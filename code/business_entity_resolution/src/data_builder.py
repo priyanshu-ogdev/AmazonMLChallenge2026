@@ -116,6 +116,8 @@ STAGE0_TSV_COLUMNS = [
     "street_number",
     "trailing_segment",
     "digit_runs",
+    "name_token_count",
+    "address_token_count",
 ]
 
 
@@ -176,6 +178,8 @@ def normalize_tsv_file(
                 "street_number": rec["street_number"] or "",
                 "trailing_segment": rec["trailing_segment"] or "",
                 "digit_runs": "|".join(rec["digit_runs"]) if rec["digit_runs"] else "",
+                "name_token_count": rec["name_token_count"],
+                "address_token_count": rec["address_token_count"],
             })
             count += 1
             if len(buffer) >= chunk_size:

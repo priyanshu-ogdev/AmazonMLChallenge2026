@@ -32,8 +32,12 @@ RANDOM_SEED = 42
 ID_COLUMNS = {"source1_entity_id", "candidate_entity_id", "label"}
 DROP_CATEGORICAL = {
     "blocker_provenance",
+    # Raw country strings: never a GBM predictor (would encode country identity).
     "source1_country",
     "candidate_country",
+    # Canonical country strings: used for fold stratification only, not GBM input.
+    "source1_canonical_country",
+    "candidate_canonical_country",
 }
 DEFAULT_PARAMS = {
     "objective": "binary:logistic",
@@ -224,9 +228,15 @@ def train_oof(
     X = matrix.to_numpy(dtype=np.float32)
     y = frame["label"].to_numpy(dtype=np.int32)
     groups = frame["source1_entity_id"].to_numpy()
-    countries = frame.get(
-        "source1_country", pd.Series(["unknown"] * len(frame), index=frame.index)
-    ).astype(str)
+    # Prefer canonical country for stratification: it is stable across alias
+    # variants (US/USA/us → 'us', France/FR → 'france') so it produces
+    # balanced folds. Fall back to raw if canonical column is absent.
+    if "source1_canonical_country" in frame.columns:
+        countries = frame["source1_canonical_country"].astype(str)
+    elif "source1_country" in frame.columns:
+        countries = frame["source1_country"].astype(str)
+    else:
+        countries = pd.Series(["unknown"] * len(frame), index=frame.index)
     stratify = countries + ":" + frame["label"].astype(str)
     splitter = StratifiedGroupKFold(
         n_splits=n_splits, shuffle=True, random_state=RANDOM_SEED
@@ -300,12 +310,17 @@ def run_training(
 ) -> Dict:
     frame = pd.read_csv(feature_file, sep="\t", dtype=str, keep_default_na=False)
     frame = merge_feature_file(frame, qwen_file)
-    labeled = attach_labels(frame, load_ground_truth(ground_truth_file))
+    # Explicitly assign ground_truth so it is available for choose_threshold's
+    # all_source1_ids argument (includes singletons with empty match lists).
+    ground_truth = load_ground_truth(ground_truth_file)
+    labeled = attach_labels(frame, ground_truth)
     oof, columns, diagnostics = train_oof(labeled)
     calibrator = fit_calibrator(
         oof["oof_score"].to_numpy(), oof["label"].to_numpy()
     )
     calibrated = apply_calibrator(calibrator, oof["oof_score"].to_numpy())
+    # Pass the full S1 universe (dict keys) so singleton entities with zero
+    # candidates are included in the macro-F0.5 threshold search.
     threshold, f05 = choose_threshold(
         oof, calibrated, all_source1_ids=list(ground_truth)
     )

@@ -1,0 +1,148 @@
+"""
+Tests for downstream contracts and fixes: pair_features canonical country,
+stage3_gbm categorical dropping and macro_f05 singletons, and stage4_decision.
+
+Requires pandas and numpy (for target PC test execution).
+"""
+
+import sys
+import unittest
+from pathlib import Path
+
+# Ensure src is importable
+repo_root = Path(__file__).resolve().parent.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
+try:
+    import numpy as np
+    import pandas as pd
+    from src.pair_features import _record_features, pair_feature_row
+    from src.stage3_gbm import DROP_CATEGORICAL, prepare_matrix, macro_f05
+    from src.stage4_decision import assemble_matching_results
+    HAS_DEPENDENCIES = True
+except ImportError:
+    HAS_DEPENDENCIES = False
+
+
+@unittest.skipUnless(HAS_DEPENDENCIES, "Requires pandas and numpy (installed on target execution PC)")
+class TestDownstreamContracts(unittest.TestCase):
+    """Verify pair feature contracts, canonical country fixes, and leakage boundaries."""
+
+    def test_pair_features_canonical_country(self):
+        """Verify pair features use canonical country comparison, avoiding alias bugs."""
+        rec_us1 = {
+            "entity_id": "S1-1",
+            "business_name": "Acme Inc",
+            "business_address": "123 Main St",
+            "country": "US",
+        }
+        rec_us2 = {
+            "entity_id": "S2-1",
+            "business_name": "Acme Incorporated",
+            "business_address": "123 Main Street",
+            "country": "USA",
+        }
+        rec_fr = {
+            "entity_id": "S2-2",
+            "business_name": "Acme SAS",
+            "business_address": "123 Rue Principale",
+            "country": "France",
+        }
+        rec_nocountry = {
+            "entity_id": "S2-3",
+            "business_name": "Acme Co",
+            "business_address": "123 Main St",
+            "country": "",
+        }
+
+        f1 = _record_features(rec_us1)
+        f2 = _record_features(rec_us2)
+        f_fr = _record_features(rec_fr)
+        f_no = _record_features(rec_nocountry)
+
+        self.assertEqual(f1["canonical_country"], "us")
+        self.assertEqual(f2["canonical_country"], "us")
+        self.assertEqual(f_fr["canonical_country"], "france")
+        self.assertEqual(f_no["canonical_country"], "")
+
+        # US vs USA -> country_equal should be 1
+        row_same = pair_feature_row(f1, f2)
+        self.assertEqual(row_same["country_equal"], 1)
+        self.assertEqual(row_same["country_equal_missing"], 0)
+
+        # US vs France -> country_equal should be 0
+        row_diff = pair_feature_row(f1, f_fr)
+        self.assertEqual(row_diff["country_equal"], 0)
+        self.assertEqual(row_diff["country_equal_missing"], 0)
+
+        # US vs missing -> country_equal should be -1, country_equal_missing = 1
+        row_missing = pair_feature_row(f1, f_no)
+        self.assertEqual(row_missing["country_equal"], -1)
+        self.assertEqual(row_missing["country_equal_missing"], 1)
+
+    def test_stage3_drop_categorical(self):
+        """Verify DROP_CATEGORICAL excludes both raw and canonical country strings from GBM matrix."""
+        self.assertIn("source1_country", DROP_CATEGORICAL)
+        self.assertIn("candidate_country", DROP_CATEGORICAL)
+        self.assertIn("source1_canonical_country", DROP_CATEGORICAL)
+        self.assertIn("candidate_canonical_country", DROP_CATEGORICAL)
+
+        dummy = pd.DataFrame({
+            "source1_entity_id": ["S1-1", "S1-2"],
+            "candidate_entity_id": ["S2-1", "S2-2"],
+            "source1_country": ["US", "India"],
+            "candidate_country": ["US", "India"],
+            "source1_canonical_country": ["us", "india"],
+            "candidate_canonical_country": ["us", "india"],
+            "country_equal": [1, 1],
+            "name_exact": [1, 0],
+            "name_jaccard": [0.9, 0.4],
+        })
+        matrix, cols = prepare_matrix(dummy)
+        self.assertNotIn("source1_country", cols)
+        self.assertNotIn("source1_canonical_country", cols)
+        self.assertNotIn("candidate_canonical_country", cols)
+        self.assertIn("country_equal", cols)
+        self.assertIn("name_exact", cols)
+        self.assertIn("name_jaccard", cols)
+
+    def test_stage3_macro_f05_singletons(self):
+        """Verify macro_f05 correctly awards 1.0 to singletons with empty actual and predicted."""
+        source1_ids = ["S1-1", "S1-2"]
+        scores = [0.9, 0.2]
+        labels = [1, 0]
+        all_source1_ids = ["S1-1", "S1-2", "S1-3"]  # S1-3 has no candidates (singleton)
+
+        score = macro_f05(
+            source1_ids=source1_ids,
+            scores=scores,
+            labels=labels,
+            threshold=0.5,
+            all_source1_ids=all_source1_ids,
+        )
+        self.assertAlmostEqual(score, 1.0)
+
+    def test_stage4_decision_singletons(self):
+        """Verify stage4 emits every S1 entity once, with empty match list for singletons."""
+        scored = pd.DataFrame({
+            "source1_entity_id": ["S1-1", "S1-2"],
+            "candidate_entity_id": ["S2-1", "S2-2"],
+            "calibrated_score": [0.85, 0.30],
+        })
+        source1_ids = ["S1-1", "S1-2", "S1-3"]
+        results = assemble_matching_results(scored, source1_ids, threshold=0.5)
+
+        self.assertEqual(len(results), 3)
+        row1 = results[results["source1_entity_id"] == "S1-1"].iloc[0]
+        self.assertEqual(row1["matched_entity_ids"], "S2-1")
+
+        row2 = results[results["source1_entity_id"] == "S1-2"].iloc[0]
+        self.assertEqual(row2["matched_entity_ids"], "")
+
+        row3 = results[results["source1_entity_id"] == "S1-3"].iloc[0]
+        self.assertEqual(row3["matched_entity_ids"], "")
+
+
+if __name__ == "__main__":
+    unittest.main()

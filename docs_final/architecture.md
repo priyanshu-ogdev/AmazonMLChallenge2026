@@ -33,7 +33,7 @@ cap values, plus the scale plan, are in `docs/LAYER_1_OVERVIEW.md` and
 
 ## Stage 2 — Feature engineering (three independent sub-stages, no interdependency)
 
-**2a — Bi-encoder cosine similarity.** A fine-tuned dense encoder (BGE-M3's own dense head, or Qwen3-Embedding-0.6B — see `open-decisions.md`) scores each candidate pair. See `training.md` for how this is trained. **v1 default: Qwen3-Embedding-0.6B, off-the-shelf, no fine-tuning** — see `v1-baseline.md` for the verified rationale and a required implementation correction (symmetric instruction treatment, not the model's default query/document asymmetry).
+**2a — Bi-encoder cosine similarity.** A fine-tuned dense encoder scores each candidate pair. **v1 default: BGE-M3 LoRA fine-tuned (rank 64, rslora, all-linear, CachedMNRL + 0.10 self-distillation)**, gated by the two-direction held-out-country retrieval check before being trusted over the off-the-shelf fallback — see `training.md` and `docs/LAYER_2_OVERVIEW.md` for the complete rationale and gate criteria. Qwen3-Embedding-0.6B is an **inference-only auxiliary feature (Stage 2b)** included only if an ablation proves complementary value; it is not the automatic fallback for a failed BGE adapter (that fallback is unchanged BGE-M3 base).
 
 **2b — Cross-encoder (Ditto-style) probability.** A fine-tuned sequence-pair classifier scores each candidate pair jointly. See `training.md`. **Cut from v1** — stretch goal only, see `v1-baseline.md`.
 

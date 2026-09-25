@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 
 from src.normalize import (
+    canonicalize_country,
+    country_match_flag,
     extract_postal_code,
     normalize_address,
     normalize_name,
@@ -80,9 +82,11 @@ def _char_trigrams(value: str) -> Set[str]:
 def _record_features(record: Dict[str, str]) -> Dict[str, object]:
     name = normalize_name(record.get("business_name", ""))
     address = normalize_address(record.get("business_address", ""))
+    raw_country = record.get("country", "")
     return {
         "entity_id": record["entity_id"],
-        "country": record.get("country", ""),
+        "country": raw_country,
+        "canonical_country": canonicalize_country(raw_country),
         "name": name,
         "address": address,
         "name_tokens": _tokens(name),
@@ -115,13 +119,31 @@ def pair_feature_row(
     address_numbers_left = left["address_numbers"]
     address_numbers_right = right["address_numbers"]
 
+    # Use canonical country for the match flag so aliases (US/USA/us) and
+    # France (France/FR) are correctly unified. country_match_flag() returns
+    # None when either side is empty, so the GBM can use a missing branch.
+    canon_left = left["canonical_country"]
+    canon_right = right["canonical_country"]
+    match_flag = country_match_flag(canon_left, canon_right)
+
     row: Dict[str, object] = {
         "source1_entity_id": left["entity_id"],
         "candidate_entity_id": right["entity_id"],
+        # Raw country strings: DROP_CATEGORICAL in Stage 3 (not GBM inputs).
         "source1_country": left["country"],
         "candidate_country": right["country"],
+        # Canonical country strings: also dropped by Stage 3, used for
+        # fold stratification and per-country diagnostics only.
+        "source1_canonical_country": canon_left,
+        "candidate_canonical_country": canon_right,
         "source_is_s3": int(str(right["entity_id"]).startswith("S3-")),
-        "country_equal": int(left["country"] != "" and left["country"] == right["country"]),
+        # country_equal uses canonicalized form: handles US/USA/us and
+        # France/FR correctly. Value is 0/1; None is stored as -1 to allow
+        # the GBM to learn a missing-country branch.
+        "country_equal": (
+            -1 if match_flag is None else int(match_flag)
+        ),
+        "country_equal_missing": int(match_flag is None),
         "left_country_missing": int(not left["country"]),
         "right_country_missing": int(not right["country"]),
         "name_both_missing": int(not name_left and not name_right),
@@ -246,10 +268,16 @@ def build_pair_features(
     feature_columns = [
         "source1_entity_id",
         "candidate_entity_id",
+        # Raw country strings (Stage 3 drops these as DROP_CATEGORICAL)
         "source1_country",
         "candidate_country",
+        # Canonical country strings (Stage 3 drops these; used for diagnostics)
+        "source1_canonical_country",
+        "candidate_canonical_country",
         "source_is_s3",
+        # country_equal: -1=missing, 0=mismatch, 1=match (canonical)
         "country_equal",
+        "country_equal_missing",
         "left_country_missing",
         "right_country_missing",
         "name_both_missing",

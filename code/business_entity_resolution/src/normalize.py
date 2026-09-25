@@ -336,11 +336,10 @@ def _strip_urls(text: str) -> str:
     return _URL_RE.sub(" ", text)
 
 
-def _clean_basic(text: str) -> str:
+def _clean_typography_and_case(text: str) -> str:
     """
-    Lowercase, standardize typographic characters, apply dba expansion,
-    strip punctuation (preserve / - '), collapse whitespace.
-    Does NOT strip accented Latin or Indic/Devanagari characters.
+    Lowercase, standardize typographic characters, apply dba expansion.
+    Preserves commas and separators needed by downstream pattern matching.
     """
     if not text:
         return ""
@@ -353,13 +352,30 @@ def _clean_basic(text: str) -> str:
     text = text.replace("&", " and ")
     # dba -> doing business as
     text = _DBA_RE.sub(" doing business as ", text)
+    return text
+
+
+def _strip_punctuation(text: str) -> str:
+    """
+    Remove periods unless between two digits.
+    Remove punctuation except / - ' and collapse whitespace.
+    """
+    if not text:
+        return ""
     # Remove periods unless between two digits
     text = re.sub(r"\.(?!\d)", " ", text)
     text = re.sub(r"(?<!\d)\.", " ", text)
     # Remove punctuation except / - '
     text = re.sub(r"[^\w\s/\-']", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _clean_basic(text: str) -> str:
+    """
+    Full basic cleaning: case, typography, punctuation stripping, whitespace collapse.
+    Used directly by normalize_name and backward-compatible callers.
+    """
+    return _strip_punctuation(_clean_typography_and_case(text))
 
 
 def _strip_address_hash_prefix(address: str) -> str:
@@ -485,11 +501,12 @@ def normalize_address(address: str) -> str:
     Pipeline:
       1. Unicode normalization (NFKC)
       2. URL stripping
-      3. Basic cleaning (case, punctuation, whitespace)
+      3. Typography and case cleaning (preserves commas for landmark boundaries)
       4. Hash-prefix removal (##8 -> 8)
       5. Ordinal normalization (22nd -> 22)
-      6. Landmark phrase stripping (non-greedy, terminator-anchored)
-      7. Address suffix expansion (street types + context-aware directions)
+      6. Landmark phrase stripping (non-greedy, terminator-anchored at comma/digits)
+      7. Punctuation stripping (removes commas, periods, collapses whitespace)
+      8. Address suffix expansion (street types + context-aware directions)
 
     Args:
         address: Raw business_address string (may be NaN, empty, or have noise).
@@ -504,10 +521,11 @@ def normalize_address(address: str) -> str:
         return ""
     address = _unicode_normalize(address)
     address = _strip_urls(address)
-    address = _clean_basic(address)
+    address = _clean_typography_and_case(address)
     address = _strip_address_hash_prefix(address)
     address = _normalize_ordinals(address)
     address = _strip_landmarks(address)
+    address = _strip_punctuation(address)
     address = _expand_address_suffixes(address)
     return address.strip()
 
