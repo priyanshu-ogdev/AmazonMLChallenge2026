@@ -95,7 +95,9 @@ class TrainingConfig:
     save_steps: int = 500
     save_total_limit: int = 3
     load_best_model_at_end: bool = True
-    metric_for_best_model: str = "eval_held_out_country_cosine_recall@10"
+    # Note: metric_for_best_model is constructed dynamically in
+    # train_bi_encoder.py as f"eval_{evaluator.name}_cosine_recall@10"
+    # to avoid silent drift when evaluator direction or name changes.
 
     # Reproducibility
     seed: int = 42

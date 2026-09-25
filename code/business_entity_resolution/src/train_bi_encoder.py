@@ -103,6 +103,19 @@ def create_model_with_lora(
 
     model.add_adapter(peft_config)
 
+    # Cast the full model (base + LoRA) to bf16 so that LoRA parameters
+    # and their optimizer state match the VRAM budget assumptions.
+    # SentenceTransformerTrainer's bf16=True only autocasts forward-pass
+    # activations — it does NOT recast parameter storage. Without this,
+    # 28.3M LoRA params land in fp32, adding ~0.22 GB vs. the 0.06 GB
+    # budget entry, and optimizer state (fp32 moments) would already dominate
+    # correctly. The base weights loaded by SentenceTransformer are typically
+    # fp32 from HuggingFace; casting here also halves their storage to match
+    # the 1.14 GB budget entry.
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        model = model.to(dtype=torch.bfloat16)
+        logger.info("  Cast model (base + LoRA) to bfloat16")
+
     # Report parameter counts
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -280,11 +293,23 @@ def train(
         max_seq_length=training_config.max_seq_length,
     )
 
-    # Enable gradient checkpointing if requested
+    # Enable gradient checkpointing if requested.
+    # PEFT/LoRA REQUIREMENT: enable_input_require_grads() MUST be called first.
+    # Gradient checkpointing works by recomputing activations on the backward
+    # pass. For this to create a valid gradient graph through the input
+    # embeddings, the input tensors must have requires_grad=True. With vanilla
+    # fine-tuning the embedding layer's output has requires_grad because the
+    # embedding weights are trainable; with LoRA the base embedding weights are
+    # frozen, so the embedding output has requires_grad=False and the gradient
+    # graph is silently broken at that point. enable_input_require_grads()
+    # registers a forward hook that forces requires_grad=True on all module
+    # inputs, threading the gradient signal through the checkpoint boundaries.
     if training_config.gradient_checkpointing:
-        logger.info("Enabling gradient checkpointing")
+        logger.info("Enabling gradient checkpointing (with PEFT input-grad hook)")
         try:
-            model[0].auto_model.gradient_checkpointing_enable()
+            auto_model = model[0].auto_model
+            auto_model.enable_input_require_grads()       # PEFT LoRA requirement
+            auto_model.gradient_checkpointing_enable()    # then enable checkpointing
         except AttributeError:
             logger.warning("Could not enable gradient checkpointing (model may not support it)")
 

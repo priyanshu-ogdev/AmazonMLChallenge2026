@@ -34,8 +34,11 @@ from typing import Dict, Set, Optional, Tuple
 from collections import defaultdict
 
 import numpy as np
-import torch
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
 
 logging.basicConfig(
     level=logging.INFO,

@@ -611,14 +611,22 @@ def build_training_data(config: DataConfig) -> Dict[str, Any]:
         candidates_map = load_candidates_map(config.blocking_candidates_path)
 
     def pairs_to_dataset(pairs: List[Dict]) -> Any:
-        if not HAS_DATASETS:
+        if not HAS_DATASETS or not pairs:
             return None
         data = {
             "anchor": [p["anchor"] for p in pairs],
             "positive": [p["positive"] for p in pairs],
         }
-        if pairs and "negatives" in pairs[0]:
-            data["negatives"] = [p.get("negatives", []) for p in pairs]
+        has_negatives = any("negatives" in p and p["negatives"] for p in pairs)
+        if has_negatives:
+            max_negs = max(len(p.get("negatives", [])) for p in pairs)
+            if max_negs == 1:
+                data["negative"] = [
+                    p["negatives"][0] if p.get("negatives") else ""
+                    for p in pairs
+                ]
+            else:
+                data["negatives"] = [p.get("negatives", []) for p in pairs]
         return Dataset.from_dict(data)
 
     def build_direction_artifacts(

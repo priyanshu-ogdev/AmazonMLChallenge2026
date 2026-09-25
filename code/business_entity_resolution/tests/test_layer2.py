@@ -306,5 +306,71 @@ class TestLayer2EvaluationAndMetrics(unittest.TestCase):
             self.assertTrue(any("Margin pass" in r for r in res["reasons"]))
 
 
+class TestLayer2DataBuilder(unittest.TestCase):
+    """Test bi-encoder training pair extraction and IR evaluation dataset building."""
+
+    def test_build_positive_pairs_without_negatives(self):
+        gt = pd.DataFrame([
+            {"source1_entity_id": "S1-1", "matched_entity_ids": "S2-1, S3-1"},
+            {"source1_entity_id": "S1-2", "matched_entity_ids": "S2-2"},
+        ])
+        s1_records = {
+            "S1-1": {"encoder_text": "s1 one text", "country_canonical": "us"},
+            "S1-2": {"encoder_text": "s1 two text", "country_canonical": "india"},
+        }
+        s2s3_records = {
+            "S2-1": {"encoder_text": "s2 one text"},
+            "S3-1": {"encoder_text": "s3 one text"},
+            "S2-2": {"encoder_text": "s2 two text"},
+        }
+        pairs = build_positive_pairs(gt, s1_records, s2s3_records)
+        self.assertEqual(len(pairs), 3)
+        self.assertEqual(pairs[0]["anchor"], "s1 one text")
+        self.assertEqual(pairs[0]["positive"], "s2 one text")
+        self.assertNotIn("negatives", pairs[0])
+
+    def test_build_positive_pairs_with_hard_negatives(self):
+        gt = pd.DataFrame([
+            {"source1_entity_id": "S1-1", "matched_entity_ids": "S2-1"},
+        ])
+        s1_records = {
+            "S1-1": {"encoder_text": "s1 one text", "country_canonical": "us"},
+        }
+        s2s3_records = {
+            "S2-1": {"encoder_text": "s2 one text"},
+            "S2-cand-neg": {"encoder_text": "s2 candidate neg text"},
+        }
+        candidates_map = {
+            "S1-1": ["S2-cand-neg", "S2-1"],
+        }
+        pairs = build_positive_pairs(
+            gt, s1_records, s2s3_records,
+            candidates_map=candidates_map,
+            negatives_per_positive=1,
+        )
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0]["anchor"], "s1 one text")
+        self.assertEqual(pairs[0]["positive"], "s2 one text")
+        self.assertIn("negatives", pairs[0])
+        self.assertEqual(pairs[0]["negatives"], ["s2 candidate neg text"])
+
+    def test_build_evaluation_data(self):
+        eval_gt = pd.DataFrame([
+            {"source1_entity_id": "S1-1", "matched_entity_ids": "S2-1"},
+        ])
+        s1_records = {"S1-1": {"encoder_text": "s1 text"}}
+        s2s3_records = {"S2-1": {"encoder_text": "s2 text"}}
+        neg_records = {"S2-neg": {"encoder_text": "s2 neg text"}}
+
+        queries, corpus, relevant_docs = build_evaluation_data(
+            eval_gt, s1_records, s2s3_records, neg_records,
+        )
+        self.assertEqual(queries, {"S1-1": "s1 text"})
+        self.assertEqual(corpus["S2-1"], "s2 text")
+        self.assertEqual(corpus["S2-neg"], "s2 neg text")
+        self.assertEqual(relevant_docs, {"S1-1": {"S2-1"}})
+
+
 if __name__ == "__main__":
     unittest.main()
+

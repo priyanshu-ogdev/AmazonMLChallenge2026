@@ -1,24 +1,28 @@
 """
 Custom loss functions for bi-encoder LoRA fine-tuning.
 
-Primary loss: CachedMultipleNegativesRankingLoss (MNRL)
-  — contrastive loss with gradient caching to decouple effective batch size
-    from physical VRAM. Optimizes ranking (retrieval quality).
+Primary loss: CachedMultipleNegativesRankingLoss (CachedMNRL)
+  — contrastive ranking loss with gradient caching to decouple effective
+    batch size from physical VRAM. Processes activations in mini_batch_size
+    chunks, accumulating gradients before the optimizer step.
 
 Secondary loss: Self-distillation anchor loss
-  — cosine distance between fine-tuned and frozen base model embeddings.
+  — cosine distance between fine-tuned and frozen base model embeddings,
+    also chunked to match CachedMNRL’s mini_batch_size window.
     Penalizes drift from the pretrained multilingual embedding space.
     This is the second layer of the anti-forgetting stack (after LoRA itself).
 
 Design decisions (from docs/stage2_features_and_embeddings.md):
-  - MNRL over raw triplet loss: triplet loss can cause severe collapse
-    depending on LR/setup. MNRL optimizes ranking directly.
+  - CachedMNRL over raw triplet loss: MNRL optimizes ranking directly and
+    avoids triplet collapse. GradCache further decouples effective batch size
+    from VRAM by processing activations in mini_batch_size windows.
   - Self-distillation weight=0.10: mid-point of 0.05-0.15 range.
     A compliant, no-external-data substitute for replay training.
   - The distillation term adds ~50% compute overhead (extra forward pass).
-    Acceptable for short sequences (80 tokens) on 568M model.
+    Both passes are chunked to the same mini_batch_size to keep peak
+    activation memory bounded at one chunk, not the full physical batch.
 
-IMPORTANT: MNRL optimizes ranking, not absolute cosine values. The GBM
+IMPORTANT: CachedMNRL optimizes ranking, not absolute cosine values. The GBM
   consumes raw cosine similarity as a feature, so calibration (isotonic or
   Platt) happens downstream at Stage 3, not here.
 """
@@ -75,6 +79,7 @@ class DistillationCachedMNRL(nn.Module):
         super().__init__()
         self.model = model
         self.distill_weight = distill_weight
+        self.mini_batch_size = mini_batch_size   # keep for chunked distillation
 
         # Main contrastive loss with gradient caching
         self.cached_mnrl = CachedMultipleNegativesRankingLoss(
@@ -113,27 +118,25 @@ class DistillationCachedMNRL(nn.Module):
         labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Compute combined MNRL + self-distillation loss.
+        Compute combined CachedMNRL + self-distillation loss.
 
         Flow:
         1. Ensure frozen model is on the correct device
-        2. Compute self-distillation loss (forward through both models)
+        2. Compute self-distillation loss in mini_batch_size chunks
+           (matches CachedMNRL’s own chunking to keep peak VRAM bounded)
         3. Compute CachedMNRL loss (uses gradient caching internally)
         4. Return weighted sum
 
-        Distillation is computed FIRST to avoid any potential mutation of
-        sentence_features by CachedMNRL's internal gradient caching mechanism.
+        Distillation is chunked BEFORE CachedMNRL so that its gradient
+        accumulation does not interact with CachedMNRL’s own internal
+        caching state. Both are bounded to mini_batch_size activations
+        in memory at any one time.
         """
         sentence_features = list(sentence_features)
         self._ensure_device_sync(sentence_features)
 
-        # --- Self-distillation loss ---
-        # Clone features to avoid any mutation issues from subsequent MNRL processing
-        distill_features = [
-            {k: v.clone() for k, v in sf.items() if isinstance(v, torch.Tensor)}
-            for sf in sentence_features
-        ]
-        distill_loss = self._compute_distillation(distill_features)
+        # --- Self-distillation loss (chunked to mini_batch_size) ---
+        distill_loss = self._compute_distillation_chunked(sentence_features)
 
         # --- Main contrastive loss ---
         mnrl_loss = self.cached_mnrl(sentence_features, labels)
@@ -143,41 +146,60 @@ class DistillationCachedMNRL(nn.Module):
 
         return total_loss
 
-    def _compute_distillation(
+    def _compute_distillation_chunked(
         self, features: List[Dict[str, torch.Tensor]]
     ) -> torch.Tensor:
         """
-        Compute cosine distance between current and frozen embeddings.
+        Compute cosine distance between current and frozen embeddings,
+        chunked to mini_batch_size to mirror CachedMNRL’s own memory budget.
+
+        BUG FIX: The original _compute_distillation() ran a single forward
+        pass over the full physical batch (e.g. 48 samples) outside
+        CachedMNRL’s chunk loop, allocating full-batch activation tensors and
+        completely defeating the purpose of GradCache. This version slices
+        each sentence-feature dict’s tensors to mini_batch_size rows and
+        accumulates the mean cosine distance across chunks — peak activation
+        memory is now bounded to one chunk, matching CachedMNRL’s footprint.
 
         For each text column in the batch:
-        1. Get frozen model embedding (no grad — just reference)
-        2. Get current model embedding (with grad — backprop updates LoRA)
-        3. Compute mean cosine distance (1 - cos_sim)
-
-        This directly penalizes drift from the pretrained embedding space,
-        including on tokens/patterns the training data never exercises
-        (like French-specific vocabulary).
+        1. Slice tensors to mini_batch_size chunks
+        2. Get frozen model embedding (no grad — just reference)
+        3. Get current model embedding (with grad — backprop updates LoRA)
+        4. Accumulate mean cosine distance (1 - cos_sim) across chunks
         """
-        total_distance = torch.tensor(0.0, device=features[0]["input_ids"].device)
-        count = 0
+        device = features[0]["input_ids"].device
+        total_distance = torch.tensor(0.0, device=device)
+        n_chunks = 0
 
         for sf in features:
-            # Frozen model embeddings — no gradient computation needed
-            with torch.no_grad():
-                frozen_output = self.frozen_model(sf)
-                frozen_emb = frozen_output["sentence_embedding"]
+            # Determine the batch dimension of this sentence-feature dict
+            batch_size = next(iter(sf.values())).shape[0]
 
-            # Current model embeddings — gradient needed for LoRA backprop
-            current_output = self.model(sf)
-            current_emb = current_output["sentence_embedding"]
+            for start in range(0, batch_size, self.mini_batch_size):
+                end = min(start + self.mini_batch_size, batch_size)
 
-            # Cosine distance: 1 - cos_sim(current, frozen)
-            cos_sim = F.cosine_similarity(current_emb, frozen_emb, dim=-1)
-            distance = (1.0 - cos_sim).mean()
-            total_distance = total_distance + distance
-            count += 1
+                # Slice tensors to the current chunk
+                chunk = {
+                    k: v[start:end] if isinstance(v, torch.Tensor) else v
+                    for k, v in sf.items()
+                }
 
-        return total_distance / max(count, 1)
+                # Frozen model embeddings — no gradient computation needed
+                with torch.no_grad():
+                    frozen_output = self.frozen_model(chunk)
+                    frozen_emb = frozen_output["sentence_embedding"]
+
+                # Current model embeddings — gradient needed for LoRA backprop
+                current_output = self.model(chunk)
+                current_emb = current_output["sentence_embedding"]
+
+                # Cosine distance: 1 - cos_sim(current, frozen)
+                cos_sim = F.cosine_similarity(current_emb, frozen_emb, dim=-1)
+                distance = (1.0 - cos_sim).mean()
+                total_distance = total_distance + distance
+                n_chunks += 1
+
+        return total_distance / max(n_chunks, 1)
 
     def get_config_dict(self) -> dict:
         """Return configuration for logging/serialization."""
