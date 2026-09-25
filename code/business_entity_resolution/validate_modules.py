@@ -69,8 +69,14 @@ except ImportError as e:
     print(f"[NOTE] eval_bi_encoder.py requires sentence_transformers ({e})")
 
 # 7. Quick data test
+import os
 import pandas as pd
-gt_path = "../../dataset/train/train_ground_truth.tsv"
+gt_paths = [
+    os.path.join(os.path.dirname(__file__), "..", "..", "dataset", "train", "train_ground_truth.tsv"),
+    "../../dataset/train/train_ground_truth.tsv",
+    "dataset/train/train_ground_truth.tsv",
+]
+gt_path = next((p for p in gt_paths if os.path.exists(p)), gt_paths[0])
 try:
     gt_sample = pd.read_csv(gt_path, sep="\t", nrows=5, dtype=str)
     print(f"\n[OK] Dataset accessible: {len(gt_sample)} rows read")

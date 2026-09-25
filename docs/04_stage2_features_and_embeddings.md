@@ -157,7 +157,7 @@ Run:
 Record Recall@1/5/10/20/50, MRR, precision@10, hardest-negative margin
 statistics, query count, and country/source slices. Accept only when both
 directions satisfy the absolute and relative checks in
-`docs/FINAL_DESIGN.md`. A failed run is retained as an experiment artifact;
+[`docs/00_system_architecture.md`](00_system_architecture.md). A failed run is retained as an experiment artifact;
 it is never silently promoted.
 
 Recovery is deliberately limited: distillation weight 0.15, then rank 32.
@@ -245,7 +245,7 @@ Stage 2 does not:
 Those responsibilities belong to Stages 1, 3, 4, and 5.
 
 The Layer 3 scorer and calibration contract is documented in
-[`LAYER_3_OVERVIEW.md`](LAYER_3_OVERVIEW.md). Stage 2 outputs are accepted
+[`05_stage3_scoring_and_calibration.md`](05_stage3_scoring_and_calibration.md). Stage 2 outputs are accepted
 only when they satisfy that downstream schema and grouped-OOF protocol.
 
 ## 8. Ablation and experiment order
