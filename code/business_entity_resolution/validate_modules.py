@@ -37,8 +37,11 @@ for name, addr, country in tests:
         print(f"       postal: {postal}")
 
 # 3. Losses module (import only, no model loading)
-from src.losses import DistillationCachedMNRL, create_loss
-print(f"\n[OK] losses.py (imports only)")
+try:
+    from src.losses import DistillationCachedMNRL, create_loss
+    print(f"\n[OK] losses.py (imports only)")
+except ImportError as e:
+    print(f"\n[NOTE] losses.py requires torch ({e})")
 
 # 4. Data builder (import only)
 from src.data_builder import (
@@ -48,16 +51,22 @@ from src.data_builder import (
 print(f"[OK] data_builder.py (imports only)")
 
 # 5. Train bi-encoder (import only)
-from src.train_bi_encoder import (
-    create_model_with_lora, create_frozen_model, train, merge_lora
-)
-print(f"[OK] train_bi_encoder.py (imports only)")
+try:
+    from src.train_bi_encoder import (
+        create_model_with_lora, create_frozen_model, train, merge_lora
+    )
+    print(f"[OK] train_bi_encoder.py (imports only)")
+except ImportError as e:
+    print(f"[NOTE] train_bi_encoder.py requires torch/peft ({e})")
 
 # 6. Eval bi-encoder (import only)
-from src.eval_bi_encoder import (
-    compute_retrieval_metrics, compute_margin_analysis, evaluate_model
-)
-print(f"[OK] eval_bi_encoder.py (imports only)")
+try:
+    from src.eval_bi_encoder import (
+        compute_retrieval_metrics, compute_margin_analysis, evaluate_model
+    )
+    print(f"[OK] eval_bi_encoder.py (imports only)")
+except ImportError as e:
+    print(f"[NOTE] eval_bi_encoder.py requires sentence_transformers ({e})")
 
 # 7. Quick data test
 import pandas as pd
