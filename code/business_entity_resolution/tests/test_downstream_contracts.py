@@ -114,20 +114,44 @@ class TestDownstreamContracts(unittest.TestCase):
         self.assertIn("name_jaccard", cols)
 
     def test_stage3_macro_f05_singletons(self):
-        """Verify macro_f05 correctly awards 1.0 to singletons with empty actual and predicted."""
+        """Verify macro_f05 correctly awards 1.0 to true singletons with empty actual and predicted."""
         source1_ids = ["S1-1", "S1-2"]
         scores = [0.9, 0.2]
         labels = [1, 0]
-        all_source1_ids = ["S1-1", "S1-2", "S1-3"]  # S1-3 has no candidates (singleton)
+        gt = {
+            "S1-1": {"S2-1"},
+            "S1-2": set(),
+            "S1-3": set(),  # S1-3 has no candidates (true singleton)
+        }
 
         score = macro_f05(
             source1_ids=source1_ids,
             scores=scores,
             labels=labels,
             threshold=0.5,
-            all_source1_ids=all_source1_ids,
+            ground_truth=gt,
         )
         self.assertAlmostEqual(score, 1.0)
+
+    def test_stage3_macro_f05_blocking_miss_zero_credit(self):
+        """Verify macro_f05 awards 0.0 to an entity with GT matches completely missed by blocking."""
+        source1_ids = ["S1-1"]
+        scores = [0.9]
+        labels = [1]
+        gt = {
+            "S1-1": {"S2-1"},
+            "S1-miss": {"S2-miss"},  # Blocking failed to retrieve S1-miss
+        }
+
+        score = macro_f05(
+            source1_ids=source1_ids,
+            scores=scores,
+            labels=labels,
+            threshold=0.5,
+            ground_truth=gt,
+        )
+        # S1-1 scores 1.0, S1-miss scores 0.0 -> mean is 0.5
+        self.assertAlmostEqual(score, 0.5)
 
     def test_stage4_decision_singletons(self):
         """Verify stage4 emits every S1 entity once, with empty match list for singletons."""

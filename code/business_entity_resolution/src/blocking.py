@@ -889,6 +889,12 @@ def main() -> None:
         default=None,
         help="Optional path to .npz file containing precomputed dense embeddings for Channel 7",
     )
+    parser.add_argument(
+        "--similarity-floor",
+        type=float,
+        default=SIMILARITY_FLOOR,
+        help=f"Minimum cosine similarity floor for candidate acceptance (default: {SIMILARITY_FLOOR})",
+    )
     args = parser.parse_args()
 
     run_blocking(
@@ -900,6 +906,7 @@ def main() -> None:
         top_k_sparse=args.top_k_sparse,
         top_k_dense=args.top_k_dense,
         max_candidates_per_entity=args.max_candidates,
+        similarity_floor=args.similarity_floor,
     )
 
 
