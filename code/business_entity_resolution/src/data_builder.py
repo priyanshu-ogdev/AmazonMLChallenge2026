@@ -57,7 +57,7 @@ import json
 import logging
 import argparse
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Optional, Iterator, Any
+from typing import Dict, List, Set, Tuple, Optional, Iterator, Any, Union
 from collections import defaultdict
 
 import numpy as np
