@@ -209,9 +209,12 @@ The feature groups and their purpose are:
 | Postal | equality and missingness | strong location evidence without external lookup |
 | Missingness | name/address/country/postal indicators | distinguish absent evidence from disagreement |
 | Contradictions | same name/different address and same address/different name | precision protection against false merges |
-| Metadata | country equality, blocker provenance, candidate rank | let the scorer learn source and retrieval context |
+| Metadata | country equality, blocker provenance, candidate rank, best blocker score, best blocker score diff (0.0 when missing), blocker count, candidate count for S1 | let the scorer learn source and retrieval context |
 
-The extractor keeps IDs only for joins and rejects unknown references. Learned
+The extractor keeps IDs only for joins and rejects unknown references. Missing
+provenance signals are explicitly represented with missing indicators
+(`best_blocker_score_missing`, `best_blocker_score_diff_missing`, `candidate_rank_missing`)
+and neutral sentinels (`0.0` for diff, `-1.0` for rank/score). Learned
 TF-IDF statistics are intentionally not fitted here; they must be trained
 inside each Stage 3 fold to prevent leakage.
 
@@ -267,25 +270,25 @@ improves the complete downstream task, not an isolated retrieval metric.
 
 | Component | Status |
 |---|---|
-| BGE-M3 LoRA training | implemented |
-| BGE held-out evaluation | implemented, reverse-direction orchestration remains |
+| BGE-M3 LoRA training | implemented (supports directional & full training) |
+| BGE held-out evaluation | implemented (supports single-direction & bidirectional 2-way gate) |
 | Qwen inference feature | implemented |
-| Deterministic pair features | implemented |
-| Blocking | pending |
-| Fold-safe learned TF-IDF features | pending Stage 3 |
-| GBM and OOF calibration | implemented |
+| Deterministic pair features | implemented (provenance rank, score, count, ambiguity & margin signals) |
+| Blocking | implemented (`src/blocking.py`, includes FAISS dense retrieval hook) |
+| Fold-safe learned TF-IDF features | implemented (`src/scoring.py`, fold-safe fit on training entities) |
+| GBM and OOF calibration | implemented (includes country masking, monotonic constraints, held-out diagnostics) |
 | F0.5 threshold and submission assembly | implemented |
 
 Layer 2 is complete as a feature-generation contract when the BGE gate has
 been run, the candidate set is available, and the feature-schema invariants
 above pass on the actual challenge data.
 
-### Known execution boundaries
+### Orchestrated bidirectional gate
 
-The current repository does not yet orchestrate the reverse BGE gate from one
-command: the data builder emits one held-out direction at a time, so the
-India→US run must be prepared and executed as a second explicit run. This is
-an execution gap, not permission to accept a one-direction result.
+The repository orchestrates the reverse BGE gate directly:
+1. `data_builder.py --bidirectional_gate` prepares both `us_train_india_eval_` and `india_train_us_eval_` splits and IR evaluation benchmarks in a single run.
+2. `train_bi_encoder.py --direction [us_to_india | india_to_us]` runs training on either directional split.
+3. `eval_bi_encoder.py --direction bidirectional` evaluates both directions against baseline and enforces the joint go/no-go gate decision.
 
 The Stage 2c `blocker_provenance` value is metadata for Stage 3 encoding; it
 must be categorical-encoded or reduced to numeric provenance indicators inside
@@ -295,3 +298,4 @@ The BGE evaluator's checkpoint metric is constructed from the evaluator name
 (`eval_<name>_cosine_recall@10`). If a future Sentence-Transformers upgrade
 changes that naming contract, inspect the emitted evaluation log and update
 the configuration before trusting `load_best_model_at_end`.
+

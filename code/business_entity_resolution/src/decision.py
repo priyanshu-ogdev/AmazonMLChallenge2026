@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable
 
+import numpy as np
 import pandas as pd
 
 
@@ -35,8 +36,13 @@ def assemble_matching_results(
         raise ValueError("source1_ids contains duplicates")
     if scored[["source1_entity_id", "candidate_entity_id"]].duplicated().any():
         raise ValueError("scored table contains duplicate candidate pairs")
-    if scored["calibrated_score"].isna().any():
-        raise ValueError("calibrated_score contains missing values")
+
+    try:
+        numeric_scores = pd.to_numeric(scored["calibrated_score"])
+    except (ValueError, TypeError) as err:
+        raise ValueError(f"calibrated_score contains non-numeric values: {err}") from err
+    if numeric_scores.isna().any() or not np.isfinite(numeric_scores).all():
+        raise ValueError("calibrated_score contains missing or non-finite values")
 
     allowed = set(source1_ids)
     unknown = set(scored["source1_entity_id"]) - allowed
@@ -44,9 +50,12 @@ def assemble_matching_results(
         raise ValueError(f"scored table contains unknown S1 IDs: {sorted(unknown)[:5]}")
 
     matches: Dict[str, list[str]] = {entity_id: [] for entity_id in source1_ids}
-    for row in scored.itertuples(index=False):
-        if float(row.calibrated_score) >= threshold:
-            matches[row.source1_entity_id].append(row.candidate_entity_id)
+    s1_col = scored["source1_entity_id"].values
+    cand_col = scored["candidate_entity_id"].values
+    score_vals = numeric_scores.values
+    for s1, cand, score in zip(s1_col, cand_col, score_vals):
+        if score >= threshold:
+            matches[s1].append(str(cand))
     return pd.DataFrame(
         {
             "source1_entity_id": source1_ids,

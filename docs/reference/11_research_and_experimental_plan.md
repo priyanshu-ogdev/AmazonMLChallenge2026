@@ -12,7 +12,7 @@ counts per source, field length distributions, fraction of S1 entities with 0/1/
 (abbreviation styles, missing fields).
 **Why first:** every design decision from here on (block key choice, negative-sampling ratio,
 threshold prior) depends on facts about this specific dataset that no literature review can supply
-— this is the boundary named explicitly in `05_hyperparameter_verification_status.md`.
+— this is the boundary named explicitly in [`12_hyperparameter_verification_status.md`](12_hyperparameter_verification_status.md).
 **Gate:** proceed once singleton rate and rough noise character are known; these numbers alone
 often reprioritize which blocking keys matter most.
 
@@ -22,7 +22,7 @@ name (no embeddings yet). Generate `candidate_pairs.tsv`.
 **Measure:** blocking recall = fraction of true matches (from ground truth) present in the
 candidate set; candidate-set size distribution per S1 entity.
 **Reasoning check:** this baseline tests whether the "union of cheap keys" argument
-(`06_optimization_design.md` §1) is even necessary — if simple keys already achieve near-ceiling
+(`13_optimization_design.md` §1) is even necessary — if simple keys already achieve near-ceiling
 recall, the added complexity of embedding-based ANN blocking may not be worth its compute cost.
 **Gate:** if recall is already ≥~0.97 with acceptable candidate-set size, defer embedding-based
 blocking to a stretch goal. If recall is materially lower, proceed to Stage 1b.
@@ -32,7 +32,7 @@ blocking to a stretch goal. If recall is materially lower, proceed to Stage 1b.
 with Stage 1's keys.
 **Measure:** recall delta over Stage 1 baseline; candidate-set size delta (embedding blocking
 tends to add more candidates, which raises Stage 2's compute cost).
-**Reasoning check:** confirms or disconfirms the specific claim in `06_optimization_design.md` §1
+**Reasoning check:** confirms or disconfirms the specific claim in [`13_optimization_design.md`](13_optimization_design.md) §1
 that dense embeddings catch semantically-close-but-token-dissimilar pairs — measured here, not
 assumed.
 **Gate:** keep only if the recall gain materially reduces the ceiling loss from Stage 1, weighed
@@ -49,7 +49,7 @@ is added unless it beats this number on the same held-out fold.
 
 ## Stage 3 — Threshold calibration
 **Do:** Sweep the decision threshold, plot precision/recall/F_0.5 across the range.
-**Reasoning check:** confirms or disconfirms the mechanical prediction in `02_matching_stage.md`
+**Reasoning check:** confirms or disconfirms the mechanical prediction in [`early_drafts/02_matching_stage.md`](early_drafts/02_matching_stage.md)
 that the F_0.5-optimal threshold sits above the F1-optimal one — this is a definitional consequence
 of the metric, so the *direction* is not really in question, but the *magnitude* is unmeasured
 until this stage.
@@ -68,12 +68,12 @@ simplicity.
 
 ## Stage 5 — Domain fine-tuning (conditional, highest-effort stage)
 **Do:** Build the triplet-sampling pipeline from `train_ground_truth.tsv` with same-name-different-
-address hard negatives (reasoning in `06_optimization_design.md` §3). Fine-tune BGE-base-en-v1.5 or
+address hard negatives (reasoning in [`13_optimization_design.md`](13_optimization_design.md) §3). Fine-tune BGE-base-en-v1.5 or
 BGE-M3, own training code only (not vendored).
 **Measure:** F_0.5 delta from swapping the fine-tuned encoder's similarity in for the pretrained
 one used in Stage 2/4, same held-out fold.
-**Reasoning check:** this is the stage the Sodhana paper's precedent (`03_embedding_models.md`,
-`04_citations.md`) most directly informs — but their reported gains were on synthetic data with a
+**Reasoning check:** this is the stage the Sodhana paper's precedent ([`early_drafts/03_embedding_models.md`](early_drafts/03_embedding_models.md),
+[`07_citations_and_benchmarks.md`](07_citations_and_benchmarks.md)) most directly informs — but their reported gains were on synthetic data with a
 different distribution than this competition's; treat their numbers as motivation to attempt this
 stage, not as a predicted outcome here.
 **Gate:** keep only if it beats Stage 3/4's locked baseline; this is the most compute-expensive
@@ -90,7 +90,7 @@ elsewhere (reranking logic must not override a correct no-match decision).
 
 ## Stage 7 — Locale slicing and final validation
 **Do:** Re-run Stage 3's evaluation sliced by locale. If France is confirmed as an actual held-out
-locale in the real data (see `04_citations.md` — this was not confirmed against the primary brief),
+locale in the real data (see [`07_citations_and_benchmarks.md`](07_citations_and_benchmarks.md) — this was not confirmed against the primary brief),
 isolate it specifically; otherwise slice by whatever locales the data actually contains.
 **Reasoning check:** this is the direct test of the generalization risk the primary brief flags
 generically ("account for locale-specific patterns") — deferred to last because it requires the
@@ -102,7 +102,7 @@ than patching the matching stage to compensate.
 ## Stage 8 — Packaging and validation
 **Do:** Run `utils/validate_submission.py` against final `matching_results.tsv` and
 `candidate_pairs.tsv`; assemble `code/`, `Documentation_template.md` (drawing from this docs set,
-particularly `06_optimization_design.md` for the reasoning narrative and `07_prd.md` for scope);
+particularly [`13_optimization_design.md`](13_optimization_design.md) for the reasoning narrative and [`10_product_requirements_document.md`](10_product_requirements_document.md) for scope);
 final license check on every dependency actually shipped in `code/` against NFR-1.
 **Gate:** submission-ready only when validation script passes and license check is clean.
 

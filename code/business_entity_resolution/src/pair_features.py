@@ -83,10 +83,11 @@ def _record_features(record: Dict[str, str]) -> Dict[str, object]:
     name = normalize_name(record.get("business_name", ""))
     address = normalize_address(record.get("business_address", ""))
     raw_country = record.get("country", "")
+    canonical_country = record.get("canonical_country") or canonicalize_country(raw_country)
     return {
         "entity_id": record["entity_id"],
         "country": raw_country,
-        "canonical_country": canonicalize_country(raw_country),
+        "canonical_country": canonical_country,
         "name": name,
         "address": address,
         "name_tokens": _tokens(name),
@@ -104,6 +105,10 @@ def pair_feature_row(
     right: Dict[str, object],
     provenance: Optional[str] = None,
     left_rank: Optional[float] = None,
+    best_score: Optional[float] = None,
+    blocker_count: Optional[int] = None,
+    candidate_count: Optional[int] = None,
+    score_margin_to_best: Optional[float] = None,
 ) -> Dict[str, object]:
     """Return one label-free feature row for a candidate pair."""
     name_left = left["name"]
@@ -190,6 +195,13 @@ def pair_feature_row(
         ),
         "candidate_rank": -1.0 if left_rank is None else float(left_rank),
         "candidate_rank_missing": int(left_rank is None),
+        "rank_margin_from_best": -1.0 if left_rank is None else max(0.0, float(left_rank) - 1.0),
+        "best_blocker_score": -1.0 if best_score is None else float(best_score),
+        "best_blocker_score_missing": int(best_score is None),
+        "best_blocker_score_diff": 0.0 if score_margin_to_best is None else float(score_margin_to_best),
+        "best_blocker_score_diff_missing": int(score_margin_to_best is None),
+        "blocker_count": 0 if blocker_count is None else int(blocker_count),
+        "candidate_count_for_s1": 1 if candidate_count is None else int(candidate_count),
         "has_blocker_provenance": int(bool(provenance)),
         "blocker_provenance": provenance or "",
     }
@@ -200,12 +212,23 @@ def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
     records: Dict[str, Dict[str, str]] = {}
     for path in paths:
         frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
-        required = {"entity_id", "business_name", "business_address", "country"}
-        missing = required - set(frame.columns)
-        if missing:
-            raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
+        if "entity_id" not in frame.columns:
+            raise ValueError(f"{path} is missing required column: entity_id")
+        name_col = next((c for c in ("business_name", "raw_name", "norm_name") if c in frame.columns), None)
+        addr_col = next((c for c in ("business_address", "raw_address", "norm_address") if c in frame.columns), None)
+        country_col = next((c for c in ("country", "country_canonical") if c in frame.columns), None)
+        if not name_col or not addr_col:
+            raise ValueError(f"{path} is missing name/address columns: {list(frame.columns)}")
+
         for row in frame.to_dict("records"):
-            records[row["entity_id"]] = row
+            eid = row["entity_id"]
+            records[eid] = {
+                "entity_id": eid,
+                "business_name": row.get(name_col, ""),
+                "business_address": row.get(addr_col, ""),
+                "country": row.get("country", row.get(country_col, "")),
+                "canonical_country": row.get("country_canonical", ""),
+            }
     return records
 
 
@@ -222,7 +245,7 @@ def build_pair_features(
     if missing:
         raise ValueError(f"{candidate_file} is missing required columns: {sorted(missing)}")
 
-    provenance: Dict[Tuple[str, str], Tuple[str, Optional[float]]] = {}
+    provenance: Dict[Tuple[str, str], Tuple[str, Optional[float], Optional[float], Optional[int]]] = {}
     if provenance_file:
         provenance_frame = pd.read_csv(
             provenance_file, sep="\t", dtype=str, keep_default_na=False
@@ -238,15 +261,19 @@ def build_pair_features(
                 f"{provenance_file} is missing required columns: {sorted(missing)}"
             )
         for row in provenance_frame.to_dict("records"):
-            rank = row.get("candidate_rank", "")
+            rank_val = row.get("best_blocker_rank") or row.get("candidate_rank", "")
+            score_val = row.get("best_blocker_score", "")
+            count_val = row.get("blocker_count", "")
             provenance[(row["source1_entity_id"], row["candidate_entity_id"])] = (
                 row["blocker_provenance"],
-                float(rank) if rank else None,
+                float(rank_val) if rank_val else None,
+                float(score_val) if score_val else None,
+                int(count_val) if count_val else None,
             )
 
     normalized = {entity_id: _record_features(record) for entity_id, record in records.items()}
-    rows: List[Dict[str, object]] = []
     seen: Set[Tuple[str, str]] = set()
+    pairs_by_s1: Dict[str, List[str]] = {}
     for candidate_row in candidates.to_dict("records"):
         source1_id = candidate_row["source1_entity_id"]
         if source1_id not in normalized:
@@ -262,8 +289,39 @@ def build_pair_features(
             seen.add(pair)
             if candidate_id not in normalized:
                 raise ValueError(f"Unknown candidate entity ID: {candidate_id}")
-            blocker, rank = provenance.get(pair, (None, None))
-            rows.append(pair_feature_row(normalized[source1_id], normalized[candidate_id], blocker, rank))
+            pairs_by_s1.setdefault(source1_id, []).append(candidate_id)
+
+    # Pre-calculate max score per S1 entity for relative margin computation
+    s1_max_score: Dict[str, float] = {}
+    for s1_id, cand_ids in pairs_by_s1.items():
+        cand_scores = [
+            provenance.get((s1_id, cid), (None, None, None, None))[2]
+            for cid in cand_ids
+        ]
+        valid_scores = [s for s in cand_scores if s is not None]
+        if valid_scores:
+            s1_max_score[s1_id] = max(valid_scores)
+
+    rows: List[Dict[str, object]] = []
+    for s1_id, cand_ids in pairs_by_s1.items():
+        cand_count = len(cand_ids)
+        max_s = s1_max_score.get(s1_id)
+        for candidate_id in cand_ids:
+            pair = (s1_id, candidate_id)
+            blocker, rank, score, count = provenance.get(pair, (None, None, None, None))
+            margin = (max_s - score) if (max_s is not None and score is not None) else None
+            rows.append(
+                pair_feature_row(
+                    normalized[s1_id],
+                    normalized[candidate_id],
+                    provenance=blocker,
+                    left_rank=rank,
+                    best_score=score,
+                    blocker_count=count,
+                    candidate_count=cand_count,
+                    score_margin_to_best=margin,
+                )
+            )
 
     feature_columns = [
         "source1_entity_id",
@@ -302,6 +360,13 @@ def build_pair_features(
         "same_address_different_name",
         "candidate_rank",
         "candidate_rank_missing",
+        "rank_margin_from_best",
+        "best_blocker_score",
+        "best_blocker_score_missing",
+        "best_blocker_score_diff",
+        "best_blocker_score_diff_missing",
+        "blocker_count",
+        "candidate_count_for_s1",
         "has_blocker_provenance",
         "blocker_provenance",
     ]

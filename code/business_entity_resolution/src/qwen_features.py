@@ -70,18 +70,28 @@ class QwenEntityEncoder:
 
 
 def load_records(paths: Iterable[Path]) -> Dict[str, str]:
-    """Load and normalize entity text from one or more challenge TSV files."""
+    """Load and normalize entity text from raw or Layer 0 normalized challenge TSV files."""
     records: Dict[str, str] = {}
     for path in paths:
+        path = Path(path)
         frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
-        required = {"entity_id", "business_name", "business_address"}
-        missing = required - set(frame.columns)
-        if missing:
-            raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
+        if "entity_id" not in frame.columns:
+            raise ValueError(f"{path} is missing required column: entity_id")
+
+        if "encoder_text" in frame.columns:
+            for row in frame.itertuples(index=False):
+                records[row.entity_id] = getattr(row, "encoder_text")
+            continue
+
+        name_col = next((c for c in ("business_name", "raw_name", "norm_name") if c in frame.columns), None)
+        addr_col = next((c for c in ("business_address", "raw_address", "norm_address") if c in frame.columns), None)
+        if not name_col or not addr_col:
+            raise ValueError(f"{path} is missing name/address columns: {list(frame.columns)}")
+
         for row in frame.itertuples(index=False):
-            records[row.entity_id] = normalize_entity(
-                row.business_name, row.business_address
-            )
+            name_val = getattr(row, name_col, "")
+            addr_val = getattr(row, addr_col, "")
+            records[row.entity_id] = normalize_entity(name_val, addr_val)
     return records
 
 

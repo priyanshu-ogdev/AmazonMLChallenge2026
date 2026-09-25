@@ -83,7 +83,7 @@ count derived from the fold best iterations.
 Calibration is fit on OOF scores only, after the GBM OOF boundary:
 
 - fewer than 1,000 positives: Platt/logistic calibration;
-- more than 10,000 positives: isotonic calibration;
+- 10,000 or more positives (`positives >= 10000`): isotonic calibration;
 - intermediate counts: fit both and select lower pair-weighted OOF log loss.
 
 This is a starting rule. The selected method and positive count are written to
@@ -92,8 +92,9 @@ This is a starting rule. The selected method and positive count are written to
 The implementation lives in `src/calibration.py` so it can be tested without
 XGBoost. It validates finite scores and binary labels, clips probabilities to
 the closed interval `[0, 1]`, serializes Platt coefficients or isotonic
-breakpoints as JSON, and rejects unknown calibration methods. Metadata contains
-two diagnostic views:
+breakpoints as JSON (without pickle vulnerabilities), bounds Platt logits to
+`[-500.0, 500.0]` for numerical stability against exponent overflow, and rejects
+unknown calibration methods. Metadata contains two diagnostic views:
 
 - `calibration_metrics`: fit-on-OOF reliability metrics used for inspection;
 - `cross_fitted_calibration_metrics`: grouped calibration metrics where each
@@ -147,7 +148,7 @@ The training command writes:
 
 - `gbm.json` — final retrained scorer;
 - `oof_predictions.tsv` — raw and calibrated OOF scores;
-- `stage3_metadata.json` — features, calibration, threshold, AUCPR, and fold diagnostics.
+- `stage3_metadata.json` — features, calibration, threshold, AUCPR, feature importances, and fold/cross-country diagnostics.
 
 The saved artifacts can be applied to an unseen candidate table with
 `src.scoring.score_candidates(...)`. This loads the recorded feature
@@ -159,13 +160,39 @@ Example:
 ```powershell
 python -m src.scoring `
     --features ../../output/pair_features.tsv `
+    --bge-features ../../output/bge_features.tsv `
     --qwen-features ../../output/qwen_pair_features.tsv `
     --ground-truth ../../dataset/train/train_ground_truth.tsv `
-    --output-dir ../../output/stage3
+    --output-dir ../../output/stage3 `
+    --country-mask-rate 0.15 `
+    --use-monotone-constraints `
+    --booster gbtree `
+    --eta 0.03
 ```
 
-The Qwen file is optional. Feature ablation determines whether it remains in
-the production feature set.
+The BGE and Qwen files are optional. Feature ablation determines whether they
+remain in the production feature set.
+
+### SOTA upgrades implemented for open-set generalization
+
+1. **Anti-Shortcut Feature Masking (`--country-mask-rate 0.15`)**: During training,
+   stochastically masks `country_equal` to `-1` (missing) on 15% of training samples
+   to force tree splits to rely on name/address/number/dense similarities, ensuring
+   robust zero-shot generalization on unknown countries (like France). At inference,
+   masking is off.
+2. **Monotonic Constraints (`--use-monotone-constraints`)**: Enforces monotonic
+   trees with collision-safe prefix matching:
+   - `+1` on similarity features (`_sim`, `_ratio`, `_cosine`, `_overlap`, `jaccard`, `dice`, `lcs`, `exact_`) and `best_blocker_score` (increasing evidence monotonically increases match probability);
+   - `-1` on contradiction/gap features (`best_blocker_score_diff`, where larger margin to the top blocker candidate indicates lower match confidence);
+   - `0` on indicator/missing flags (`best_blocker_score_diff_missing`, `candidate_rank_missing`, `best_blocker_score_missing`), difference indicators, and categorical attributes (e.g. `country_equal` is unconstrained).
+3. **Fold-Safe Learned Lexical Statistics (`--source1`, `--candidate-sources`)**:
+   Fits character n-gram TF-IDF vectorizers strictly inside each training fold to
+   compute `tfidf_cosine` without validation or test leakage. At test inference,
+   `score_candidates()` explicitly checks for entity records if `tfidf_vectorizer.joblib`
+   exists, preventing silent feature drop.
+4. **Held-Out Country Diagnostics**: Automatically evaluates cross-country transfer
+   (e.g., US -> India, India -> US) and persists generalization metrics in metadata.
+5. **Feature Importance Logging**: Records gain and weight metrics in metadata.
 
 ## Acceptance checklist
 

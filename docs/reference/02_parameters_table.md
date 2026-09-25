@@ -1,6 +1,6 @@
 # Final v1 parameters — GBM, calibration, blocking
 
-Everything else in this doc set specifies *protocols* (validation grids, resolution methods). This file specifies the actual **starting values** to write into code for the v1 build, since a protocol alone doesn't compile. These are defensible defaults grounded in the regularization/citations reasoning already in `training.md`/`regularization.md` — not re-derivations of that reasoning, and not claims that they're already optimal. Where `open-decisions.md` lists something as genuinely open, the value here is the starting point for that grid, not a substitute for running it.
+Everything else in this doc set specifies *protocols* (validation grids, resolution methods). This file specifies the actual **starting values** to write into code for the v1 build, since a protocol alone doesn't compile. These are defensible defaults grounded in the regularization/citations reasoning already in [`04_bge_m3_training_spec.md`](04_bge_m3_training_spec.md)/[`05_regularization_and_anti_forgetting.md`](05_regularization_and_anti_forgetting.md) — not re-derivations of that reasoning, and not claims that they're already optimal. Where [`08_open_decisions_log.md`](08_open_decisions_log.md) lists something as genuinely open, the value here is the starting point for that grid, not a substitute for running it.
 
 ## GBM (Stage 3) — the only model actually trained in v1
 
@@ -11,7 +11,7 @@ import xgboost as xgb
 
 params = {
     "objective": "binary:logistic",
-    "eval_metric": "aucpr",          # not logloss/accuracy — see training.md
+    "eval_metric": "aucpr",          # not logloss/accuracy — see [`04_bge_m3_training_spec.md`](04_bge_m3_training_spec.md)
     "tree_method": "hist",           # fast, exact-enough at this data scale
     "max_depth": 4,                  # start of the specified 3–6 range, not the edge
     "learning_rate": 0.03,           # lowered from an earlier 0.05 default — see rationale below
@@ -31,7 +31,7 @@ params = {
 # small-step optimizer has actually converged), on AUCPR, on the *random* k-fold
 # validation set. Track the held-out-country fold's AUCPR in parallel, don't
 # early-stop on it — use it only as the diagnostic gap check from the GBM audit
-# in training.md.
+# in [`04_bge_m3_training_spec.md`](04_bge_m3_training_spec.md).
 early_stopping_rounds = 50
 ```
 
@@ -64,7 +64,7 @@ For each candidate threshold: apply to the **calibrated** k-fold OOF probabiliti
 
 ## Blocking (Stage 1) — completing the previously behavior-only spec
 
-`architecture.md` describes blocking's *behavior* (union of strategies, one similarity floor, recall-audited) without committing numbers. Concrete v1 values:
+[`system_architecture.md`](../system_architecture.md) describes blocking's *behavior* (union of strategies, one similarity floor, recall-audited) without committing numbers. Concrete v1 values:
 
 ```python
 TOP_K_DENSE = 50       # BGE-M3 dense cosine ANN, per S1 entity
@@ -81,4 +81,4 @@ MAX_CANDIDATES_PER_ENTITY = 100  # hard cap after union+floor, to bound Stage 2 
 - **Union, then floor:** take the union of all four strategies' candidates, then apply `SIMILARITY_FLOOR` only to candidates whose sole source was dense/sparse retrieval (token/phonetic/address-matched candidates pass through regardless of a low embedding score, since they were retrieved on a different, non-embedding signal — flooring them by embedding similarity would defeat the purpose of having multiple independent blocking strategies).
 - **Cap:** if the union+floor set for an entity exceeds `MAX_CANDIDATES_PER_ENTITY`, keep the top 100 by best available score across strategies (max, not sum, across dense/sparse/token-overlap scores) rather than dropping the excess arbitrarily.
 
-**These four numbers (`TOP_K_DENSE`, `TOP_K_SPARSE`, `SIMILARITY_FLOOR`, `MAX_CANDIDATES_PER_ENTITY`) are the actual first target of the blocking-recall audit already specified as v1's first build step.** If recall (measured against `train_ground_truth`, sliced by held-out country) comes in short, raise `TOP_K_*` and/or lower `SIMILARITY_FLOOR` first — both are free (more compute, not more code) — before adding a new blocking strategy. Only add a new strategy if raising these two doesn't close the gap, since a new strategy costs implementation time this design's own scope note (`v1-baseline.md`) says is scarce.
+**These four numbers (`TOP_K_DENSE`, `TOP_K_SPARSE`, `SIMILARITY_FLOOR`, `MAX_CANDIDATES_PER_ENTITY`) are the actual first target of the blocking-recall audit already specified as v1's first build step.** If recall (measured against `train_ground_truth`, sliced by held-out country) comes in short, raise `TOP_K_*` and/or lower `SIMILARITY_FLOOR` first — both are free (more compute, not more code) — before adding a new blocking strategy. Only add a new strategy if raising these two doesn't close the gap, since a new strategy costs implementation time this design's own scope note ([`01_v1_baseline_plan.md`](01_v1_baseline_plan.md)) says is scarce.

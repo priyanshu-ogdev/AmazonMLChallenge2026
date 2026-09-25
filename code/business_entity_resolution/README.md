@@ -81,15 +81,16 @@ python -m src.train_bi_encoder train \
 ### Step 5: Evaluate Gate
 
 ```bash
+# Evaluate bidirectional 2-way gate (evaluates US->India and India->US against baseline)
 python -m src.eval_bi_encoder \
     --model_path ./output/bge-m3-lora-gate/final \
     --data_dir ./prepared_data \
-    --baseline_model BAAI/bge-m3
+    --baseline_model BAAI/bge-m3 \
+    --direction bidirectional
 ```
 
-This computes Recall@K on the held-out country and reports **GO** or **NO-GO**.
-Run the reverse India→US direction as a separate gate run before accepting the
-adapter; the implementation's default single direction is only a smoke test.
+This computes Recall@K and hard-negative margins on both held-out country splits
+and enforces the joint **GO** / **NO-GO** decision against off-the-shelf BGE-M3.
 
 ### Step 6: Full Training (if gate passes)
 

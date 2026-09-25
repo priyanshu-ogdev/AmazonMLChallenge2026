@@ -44,20 +44,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_eval_data(data_dir: str) -> Tuple[Dict, Dict, Dict]:
-    """Load pre-built IR evaluation data."""
+def load_eval_data(data_dir: str, prefix: str = "") -> Tuple[Dict, Dict, Dict]:
+    """Load pre-built IR evaluation data, with optional directional prefix."""
     data_path = Path(data_dir)
 
-    with open(data_path / "eval_queries.json", "r", encoding="utf-8") as f:
+    queries_file = data_path / f"{prefix}eval_queries.json"
+    corpus_file = data_path / f"{prefix}eval_corpus.json"
+    relevant_file = data_path / f"{prefix}eval_relevant.json"
+
+    # Fallback to unprefixed if prefixed does not exist and prefix was specified
+    if prefix and not queries_file.exists():
+        logger.warning(f"Prefixed eval file {queries_file} not found; falling back to default eval files.")
+        queries_file = data_path / "eval_queries.json"
+        corpus_file = data_path / "eval_corpus.json"
+        relevant_file = data_path / "eval_relevant.json"
+
+    with open(queries_file, "r", encoding="utf-8") as f:
         queries = json.load(f)
-    with open(data_path / "eval_corpus.json", "r", encoding="utf-8") as f:
+    with open(corpus_file, "r", encoding="utf-8") as f:
         corpus = json.load(f)
-    with open(data_path / "eval_relevant.json", "r", encoding="utf-8") as f:
+    with open(relevant_file, "r", encoding="utf-8") as f:
         relevant_raw = json.load(f)
 
     relevant_docs = {k: set(v) for k, v in relevant_raw.items()}
 
-    logger.info(f"Loaded eval data: {len(queries)} queries, {len(corpus)} corpus, "
+    logger.info(f"Loaded eval data (prefix='{prefix}'): {len(queries)} queries, {len(corpus)} corpus, "
                 f"{sum(len(v) for v in relevant_docs.values())} relevant pairs")
 
     return queries, corpus, relevant_docs
@@ -184,51 +195,31 @@ def compute_margin_analysis(
     return pass_rates
 
 
-def evaluate_model(
-    model_path: str,
+def _evaluate_single_direction(
+    model,
+    base_model,
     data_dir: str,
-    baseline_model: Optional[str] = None,
+    prefix: str = "",
+    direction_name: str = "primary",
     batch_size: int = 64,
     k_values: list = None,
     margin_thresholds: list = None,
 ) -> Dict:
-    """
-    Full evaluation pipeline for the held-out country gate.
-
-    1. Load fine-tuned model and encode queries/corpus
-    2. Compute retrieval metrics (Recall@K, MRR)
-    3. Compute margin analysis (score-gap pass rate)
-    4. Optionally compare against off-the-shelf baseline
-    5. Make go/no-go recommendation
-    """
-    from sentence_transformers import SentenceTransformer
-
+    """Evaluate one direction (e.g. US->India or India->US) against gate criteria."""
     if k_values is None:
         k_values = [1, 5, 10, 20, 50]
 
-    queries, corpus, relevant_docs = load_eval_data(data_dir)
-
+    queries, corpus, relevant_docs = load_eval_data(data_dir, prefix=prefix)
     query_ids = list(queries.keys())
     corpus_ids = list(corpus.keys())
     query_texts = [queries[qid] for qid in query_ids]
     corpus_texts = [corpus[cid] for cid in corpus_ids]
 
-    results = {}
+    dir_results = {}
 
-    # -----------------------------------------------------------------------
-    # Evaluate fine-tuned model
-    # -----------------------------------------------------------------------
-    logger.info(f"\n{'='*60}")
-    logger.info(f"Evaluating fine-tuned model: {model_path}")
-    logger.info(f"{'='*60}")
-
-    model = SentenceTransformer(model_path)
-    logger.info(f"Encoding {len(query_texts)} queries...")
-    q_embs = model.encode(query_texts, batch_size=batch_size, show_progress_bar=True,
-                          normalize_embeddings=True)
-    logger.info(f"Encoding {len(corpus_texts)} corpus docs...")
-    c_embs = model.encode(corpus_texts, batch_size=batch_size, show_progress_bar=True,
-                          normalize_embeddings=True)
+    logger.info(f"\n--- Direction [{direction_name}]: Encoding {len(query_texts)} queries & {len(corpus_texts)} corpus docs ---")
+    q_embs = model.encode(query_texts, batch_size=batch_size, show_progress_bar=True, normalize_embeddings=True)
+    c_embs = model.encode(corpus_texts, batch_size=batch_size, show_progress_bar=True, normalize_embeddings=True)
 
     retrieval_metrics = compute_retrieval_metrics(
         q_embs, c_embs, query_ids, corpus_ids, relevant_docs, k_values
@@ -236,89 +227,149 @@ def evaluate_model(
     margin_metrics = compute_margin_analysis(
         q_embs, c_embs, query_ids, corpus_ids, relevant_docs, margin_thresholds
     )
+    dir_results["fine_tuned"] = {**retrieval_metrics, **margin_metrics}
 
-    results["fine_tuned"] = {**retrieval_metrics, **margin_metrics}
-    del model  # Free VRAM
-
-    logger.info("\nFine-tuned model metrics:")
-    for k, v in results["fine_tuned"].items():
-        logger.info(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
-
-    # -----------------------------------------------------------------------
-    # Evaluate baseline (optional)
-    # -----------------------------------------------------------------------
-    if baseline_model:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Evaluating baseline model: {baseline_model}")
-        logger.info(f"{'='*60}")
-
-        base_model = SentenceTransformer(baseline_model)
-        base_q_embs = base_model.encode(query_texts, batch_size=batch_size,
-                                        show_progress_bar=True, normalize_embeddings=True)
-        base_c_embs = base_model.encode(corpus_texts, batch_size=batch_size,
-                                        show_progress_bar=True, normalize_embeddings=True)
-
+    if base_model:
+        base_q_embs = base_model.encode(query_texts, batch_size=batch_size, show_progress_bar=True, normalize_embeddings=True)
+        base_c_embs = base_model.encode(corpus_texts, batch_size=batch_size, show_progress_bar=True, normalize_embeddings=True)
         base_retrieval = compute_retrieval_metrics(
             base_q_embs, base_c_embs, query_ids, corpus_ids, relevant_docs, k_values
         )
         base_margin = compute_margin_analysis(
             base_q_embs, base_c_embs, query_ids, corpus_ids, relevant_docs, margin_thresholds
         )
+        dir_results["baseline"] = {**base_retrieval, **base_margin}
 
-        results["baseline"] = {**base_retrieval, **base_margin}
-        del base_model
-
-        logger.info("\nBaseline model metrics:")
-        for k, v in results["baseline"].items():
-            logger.info(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
-
-    # -----------------------------------------------------------------------
-    # Go/No-Go Decision
-    # -----------------------------------------------------------------------
-    logger.info(f"\n{'='*60}")
-    logger.info("GO/NO-GO GATE DECISION")
-    logger.info(f"{'='*60}")
-
-    ft_recall_10 = results["fine_tuned"].get("recall@10", 0)
+    # Direction-specific check
+    ft_recall_10 = dir_results["fine_tuned"].get("recall@10", 0)
     decision = "GO"
     reasons = []
 
-    # Check absolute threshold
     if ft_recall_10 < 0.80:
         decision = "NO-GO"
-        reasons.append(f"Recall@10 ({ft_recall_10:.4f}) below minimum threshold (0.80)")
+        reasons.append(f"[{direction_name}] Recall@10 ({ft_recall_10:.4f}) below minimum threshold (0.80)")
 
-    # Check against baseline if available
-    if baseline_model and "baseline" in results:
-        base_recall_10 = results["baseline"].get("recall@10", 0)
+    if base_model and "baseline" in dir_results:
+        base_recall_10 = dir_results["baseline"].get("recall@10", 0)
         gap = base_recall_10 - ft_recall_10
         if gap > 0.10:
             decision = "NO-GO"
             reasons.append(
-                f"Fine-tuned Recall@10 ({ft_recall_10:.4f}) is {gap:.4f} worse than "
+                f"[{direction_name}] Fine-tuned Recall@10 ({ft_recall_10:.4f}) is {gap:.4f} worse than "
                 f"baseline ({base_recall_10:.4f}), exceeding max gap (0.10)"
             )
         elif gap > 0.05:
             reasons.append(
-                f"WARNING: Fine-tuned Recall@10 ({ft_recall_10:.4f}) is {gap:.4f} worse "
+                f"[{direction_name}] WARNING: Fine-tuned Recall@10 ({ft_recall_10:.4f}) is {gap:.4f} worse "
                 f"than baseline ({base_recall_10:.4f}). Close to threshold."
             )
 
-    # Check margin health
-    margin_pass = results["fine_tuned"].get("margin_pass@0.10", 0)
+    margin_pass = dir_results["fine_tuned"].get("margin_pass@0.10", 0)
     if margin_pass < 0.60:
         decision = "NO-GO"
-        reasons.append(f"Margin pass@0.10 ({margin_pass:.4f}) too low — model can't separate pos/neg")
+        reasons.append(f"[{direction_name}] Margin pass@0.10 ({margin_pass:.4f}) too low — model can't separate pos/neg")
 
-    results["decision"] = decision
-    results["reasons"] = reasons
+    dir_results["decision"] = decision
+    dir_results["reasons"] = reasons
+    return dir_results
 
-    if decision == "GO":
-        logger.info("✓ DECISION: GO — Fine-tuned model passes held-out country gate")
+
+def evaluate_model(
+    model_path: str,
+    data_dir: str,
+    baseline_model: Optional[str] = None,
+    batch_size: int = 64,
+    k_values: list = None,
+    margin_thresholds: list = None,
+    direction: str = "default",
+) -> Dict:
+    """
+    Full evaluation pipeline for the held-out country gate.
+
+    Supports:
+      - "default": evaluates the standard eval_*.json files
+      - "us_to_india": evaluates us_train_india_eval_ prefix
+      - "india_to_us": evaluates india_train_us_eval_ prefix
+      - "bidirectional": evaluates BOTH directions and enforces 2-way gate acceptance
+    """
+    from sentence_transformers import SentenceTransformer
+
+    logger.info(f"\n{'='*60}")
+    logger.info(f"Evaluating model: {model_path} (direction: {direction})")
+    logger.info(f"{'='*60}")
+
+    model = SentenceTransformer(model_path)
+    base_model = SentenceTransformer(baseline_model) if baseline_model else None
+
+    results = {}
+    all_reasons = []
+    overall_decision = "GO"
+
+    if direction == "bidirectional":
+        directions = [
+            ("us_train_india_eval_", "US->India (eval on India)"),
+            ("india_train_us_eval_", "India->US (eval on US)"),
+        ]
+        results["directions"] = {}
+        for prefix, name in directions:
+            res = _evaluate_single_direction(
+                model=model,
+                base_model=base_model,
+                data_dir=data_dir,
+                prefix=prefix,
+                direction_name=name,
+                batch_size=batch_size,
+                k_values=k_values,
+                margin_thresholds=margin_thresholds,
+            )
+            results["directions"][name] = res
+            if res["decision"] != "GO":
+                overall_decision = "NO-GO"
+            all_reasons.extend(res.get("reasons", []))
+    else:
+        prefix = ""
+        name = "default"
+        if direction == "us_to_india":
+            prefix = "us_train_india_eval_"
+            name = "US->India"
+        elif direction == "india_to_us":
+            prefix = "india_train_us_eval_"
+            name = "India->US"
+
+        res = _evaluate_single_direction(
+            model=model,
+            base_model=base_model,
+            data_dir=data_dir,
+            prefix=prefix,
+            direction_name=name,
+            batch_size=batch_size,
+            k_values=k_values,
+            margin_thresholds=margin_thresholds,
+        )
+        results = res
+        overall_decision = res["decision"]
+        all_reasons = res.get("reasons", [])
+
+    del model
+    if base_model:
+        del base_model
+
+    # -----------------------------------------------------------------------
+    # Joint Go/No-Go Decision Report
+    # -----------------------------------------------------------------------
+    logger.info(f"\n{'='*60}")
+    logger.info("JOINT GO/NO-GO GATE DECISION")
+    logger.info(f"{'='*60}")
+
+    results["decision"] = overall_decision
+    results["reasons"] = all_reasons
+
+    if overall_decision == "GO":
+        logger.info("✓ DECISION: GO — All evaluated directions pass the held-out country gate!")
         logger.info("  The fine-tuned checkpoint can replace the off-the-shelf feature.")
     else:
         logger.info("✗ DECISION: NO-GO — Fine-tuned model fails held-out country gate")
-        for reason in reasons:
+        for reason in all_reasons:
             logger.info(f"  Reason: {reason}")
         logger.info("\n  Recommended actions:")
         logger.info("  1. Raise self_distillation_weight toward 0.15")
@@ -326,17 +377,22 @@ def evaluate_model(
         logger.info("  3. Fall back to off-the-shelf BGE-M3 for Stage 2a")
         logger.info("  4. Evaluate Qwen3-Embedding-0.6B separately as Stage 2b")
 
-    # Save results
-    output_path = Path(data_dir) / "eval_results.json"
-    serializable = {}
-    for k, v in results.items():
-        if isinstance(v, dict):
-            serializable[k] = {kk: float(vv) if isinstance(vv, (np.floating, float)) else vv
-                               for kk, vv in v.items()}
-        else:
-            serializable[k] = v
-    with open(output_path, "w") as f:
-        json.dump(serializable, f, indent=2)
+    output_name = "eval_results_bidirectional.json" if direction == "bidirectional" else "eval_results.json"
+    output_path = Path(data_dir) / output_name
+
+    def serialize_obj(obj):
+        if isinstance(obj, dict):
+            return {k: serialize_obj(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [serialize_obj(v) for v in obj]
+        if isinstance(obj, (np.floating, float)):
+            return float(obj)
+        if isinstance(obj, (np.integer, int)):
+            return int(obj)
+        return obj
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(serialize_obj(results), f, indent=2)
     logger.info(f"\nResults saved to {output_path}")
 
     return results
@@ -357,6 +413,9 @@ def main():
     parser.add_argument("--baseline_model", type=str, default=None,
                         help="Baseline model for comparison (e.g., BAAI/bge-m3)")
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--direction", type=str, default="default",
+                        choices=["default", "us_to_india", "india_to_us", "bidirectional"],
+                        help="Direction for held-out evaluation: default, us_to_india, india_to_us, bidirectional")
 
     args = parser.parse_args()
 
@@ -365,8 +424,10 @@ def main():
         data_dir=args.data_dir,
         baseline_model=args.baseline_model,
         batch_size=args.batch_size,
+        direction=args.direction,
     )
 
 
 if __name__ == "__main__":
     main()
+

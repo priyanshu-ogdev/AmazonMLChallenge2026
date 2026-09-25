@@ -61,7 +61,7 @@ definition — F_beta with beta<1 weights precision more heavily, so the loss su
 positives more than false negatives at the margin, which by definition pushes the optimal operating
 point toward a higher-precision (i.e. typically higher-threshold) region than F1 would. This is a
 mechanical consequence of the F_0.5 formula, not something that needs external validation to
-reason about — though the *exact* value still needs measurement (see `05_hyperparameter_verification_status.md`).
+reason about — though the *exact* value still needs measurement (see [`12_hyperparameter_verification_status.md`](12_hyperparameter_verification_status.md)).
 
 **Singleton handling as its own decision, not a forced top-1 choice**: reasoned from the scoring
 rule itself — since an S1 entity can have zero true matches, any pipeline that is structurally
@@ -114,10 +114,10 @@ cost/accuracy tradeoff argument applicable to any two-stage retrieval system, no
 needs to be attributed to be used.
 
 ## Net effect on the documentation set
-`03_embedding_models.md` and `04_citations.md` remain as a factual record of what was checked
+[`early_drafts/03_embedding_models.md`](early_drafts/03_embedding_models.md) and [`07_citations_and_benchmarks.md`](07_citations_and_benchmarks.md) remain as a factual record of what was checked
 (useful for your own confidence and for the methodology write-up's credibility), but nothing in
 this pipeline's actual justification depends on those citations holding up — each design choice
 above is independently defensible by its own engineering/statistical reasoning. If you want the
 final `Documentation_template.md` methodology write-up to read as reasoned-engineering rather than
-literature-review, this file is the source to draw from; `04_citations.md` is optional supporting
+literature-review, this file is the source to draw from; [`07_citations_and_benchmarks.md`](07_citations_and_benchmarks.md) is optional supporting
 material for anyone who wants to check provenance, not the argument itself.

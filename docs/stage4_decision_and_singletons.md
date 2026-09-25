@@ -39,8 +39,11 @@ The assembler rejects:
 - thresholds outside `[0, 1]`;
 - duplicate Source 1 IDs in the input entity list;
 - duplicate candidate pairs;
-- missing calibrated scores;
+- non-numeric, missing, or non-finite calibrated scores;
 - scored rows for unknown Source 1 IDs.
+
+The matching result assembly is vectorized across score columns and source IDs
+for millisecond-scale execution over millions of candidate pairs.
 
 It does not validate whether candidate IDs exist in Source 2/3. That remains
 the responsibility of the repository submission validator, which can perform

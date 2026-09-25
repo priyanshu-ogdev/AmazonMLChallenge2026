@@ -134,6 +134,11 @@ class DataConfig:
     seed: int = 42
     num_workers: int = 4
 
+    # Direction & Gate
+    train_country: Optional[str] = None
+    eval_country: Optional[str] = None
+    bidirectional_gate: bool = False
+
 
 @dataclass
 class EvalConfig:

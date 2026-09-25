@@ -43,7 +43,8 @@ DEFAULT_PARAMS = {
     "objective": "binary:logistic",
     "eval_metric": "aucpr",
     "tree_method": "hist",
-    "eta": 0.05,
+    "booster": "gbtree",
+    "eta": 0.03,
     "max_depth": 4,
     "min_child_weight": 5,
     "subsample": 0.85,
@@ -52,6 +53,159 @@ DEFAULT_PARAMS = {
     "reg_lambda": 1.0,
     "seed": RANDOM_SEED,
 }
+
+
+def build_monotonic_constraints(columns: Sequence[str]) -> Tuple[int, ...]:
+    """
+    Build monotonic constraints matching feature column order.
+    +1: higher value must not decrease predicted probability (similarities, blocker scores).
+    -1: higher value must not increase predicted probability (contradictions, ranks, score diffs).
+     0: unconstrained (country flags, missing indicators, source flags, candidate counts).
+
+    Per specs:
+    - Missing indicators (*_missing, *_missing_either) are strictly unconstrained (0).
+    - country_equal is NEVER monotonic (0) to prevent shortcut learning.
+    - best_blocker_score_diff is strictly negative (-1).
+    - best_blocker_score is strictly positive (+1).
+    """
+    negative_features = {
+        "same_name_different_address",
+        "same_address_different_name",
+        "name_length_abs_diff",
+        "address_length_abs_diff",
+        "best_blocker_score_diff",
+        "candidate_rank",
+        "rank_margin_from_best",
+    }
+    positive_features = {
+        "bge_cosine",
+        "qwen_cosine",
+        "tfidf_cosine",
+        "name_exact",
+        "address_exact",
+        "name_jaccard",
+        "name_overlap",
+        "name_edit_similarity",
+        "name_char_trigram_jaccard",
+        "address_jaccard",
+        "address_overlap",
+        "address_edit_similarity",
+        "address_char_trigram_jaccard",
+        "name_number_overlap",
+        "address_number_overlap",
+        "postal_equal",
+        "best_blocker_score",
+        "blocker_count",
+        "has_blocker_provenance",
+    }
+    constraints = []
+    for col in columns:
+        if (
+            col.endswith("_missing")
+            or col.endswith("_missing_either")
+            or col.startswith("country_")
+            or col.startswith("source_")
+            or col in ("candidate_count_for_s1",)
+        ):
+            constraints.append(0)
+        elif col in negative_features:
+            constraints.append(-1)
+        elif col in positive_features:
+            constraints.append(1)
+        elif any(col.startswith(p + "_") for p in negative_features):
+            constraints.append(-1)
+        elif any(col.startswith(p + "_") for p in positive_features):
+            constraints.append(1)
+        else:
+            constraints.append(0)
+    return tuple(constraints)
+
+
+def apply_country_masking(
+    matrix: pd.DataFrame,
+    mask_rate: float = 0.15,
+    random_state: Optional[np.random.RandomState] = None,
+) -> pd.DataFrame:
+    """
+    Stochastically mask country_equal to -1 (missing) and country_equal_missing to 1
+    during training on a fraction of rows.
+
+    Prevents shortcut learning on US/India pairs and forces the tree splits to learn
+    generalizable lexical/dense features that work on unseen countries (e.g. France).
+    Never applied during evaluation or test inference.
+    """
+    if mask_rate <= 0.0 or "country_equal" not in matrix.columns:
+        return matrix
+    rng = random_state or np.random.RandomState(RANDOM_SEED)
+    mask = rng.rand(len(matrix)) < mask_rate
+    if not mask.any():
+        return matrix
+    masked = matrix.copy()
+    masked.loc[mask, "country_equal"] = -1.0
+    if "country_equal_missing" in masked.columns:
+        masked.loc[mask, "country_equal_missing"] = 1.0
+    return masked
+
+
+def compute_fold_safe_tfidf_scores(
+    pairs: pd.DataFrame,
+    records: Dict[str, str],
+    vectorizer: Optional[object] = None,
+    entities_to_fit: Optional[Iterable[str]] = None,
+) -> Tuple[np.ndarray, object]:
+    """
+    Compute leakage-free character n-gram TF-IDF cosine similarity for candidate pairs.
+    If vectorizer is None, fits strictly on entities_to_fit only (training fold boundary).
+    """
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.preprocessing import normalize
+
+    if vectorizer is None:
+        fit_texts = [records.get(eid, "") for eid in (entities_to_fit or set())]
+        if not fit_texts:
+            fit_texts = [""]
+        vectorizer = TfidfVectorizer(
+            analyzer="char_wb",
+            ngram_range=(3, 5),
+            sublinear_tf=True,
+            min_df=1,
+        )
+        vectorizer.fit(fit_texts)
+
+    s1_ids = pairs["source1_entity_id"].tolist()
+    cand_ids = pairs["candidate_entity_id"].tolist()
+
+    unique_ids = list(set(s1_ids) | set(cand_ids))
+    unique_texts = [records.get(eid, "") for eid in unique_ids]
+    sparse_embs = vectorizer.transform(unique_texts)
+    sparse_embs = normalize(sparse_embs, norm="l2")
+
+    id_to_idx = {eid: idx for idx, eid in enumerate(unique_ids)}
+    s1_indices = [id_to_idx[eid] for eid in s1_ids]
+    cand_indices = [id_to_idx[eid] for eid in cand_ids]
+
+    s1_mat = sparse_embs[s1_indices]
+    cand_mat = sparse_embs[cand_indices]
+    cosines = np.asarray(s1_mat.multiply(cand_mat).sum(axis=1)).reshape(-1)
+    return cosines, vectorizer
+
+
+def extract_feature_importances(
+    model: xgb.XGBClassifier, feature_names: Sequence[str]
+) -> Dict[str, Dict[str, float]]:
+    """Extract feature importance by gain and weight."""
+    try:
+        booster = model.get_booster()
+        gain = booster.get_score(importance_type="gain")
+        weight = booster.get_score(importance_type="weight")
+        feat_map = {f"f{i}": col for i, col in enumerate(feature_names)}
+        clean_gain = {feat_map.get(k, k): float(v) for k, v in gain.items()}
+        clean_weight = {feat_map.get(k, k): float(v) for k, v in weight.items()}
+        sorted_gain = dict(sorted(clean_gain.items(), key=lambda item: item[1], reverse=True))
+        sorted_weight = dict(sorted(clean_weight.items(), key=lambda item: item[1], reverse=True))
+        return {"gain": sorted_gain, "weight": sorted_weight}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def load_ground_truth(path: Path) -> Dict[str, set[str]]:
@@ -179,7 +333,9 @@ def choose_threshold(
     scores = np.asarray(scores, dtype=float)
     if len(scores) != len(frame):
         raise ValueError("scores must match threshold frame length")
-    candidates = np.unique(np.r_[0.0, scores, 1.0])
+    # Grid search 0.05 to 0.95 with step 0.01 per parameters table + unique scores + boundaries
+    grid = np.arange(0.05, 0.96, 0.01)
+    candidates = np.unique(np.r_[0.0, grid, scores, 1.0])
     values = [
         macro_f05(
             frame["source1_entity_id"],
@@ -198,12 +354,31 @@ def score_candidates(
     feature_file: Path,
     artifact_dir: Path,
     qwen_file: Optional[Path] = None,
+    bge_file: Optional[Path] = None,
+    records: Optional[Dict[str, str]] = None,
 ) -> pd.DataFrame:
     """Score a candidate table with saved model, calibration, and threshold."""
     with open(artifact_dir / "stage3_metadata.json", encoding="utf-8") as handle:
         metadata = json.load(handle)
     frame = pd.read_csv(feature_file, sep="\t", dtype=str, keep_default_na=False)
     frame = merge_feature_file(frame, qwen_file)
+    frame = merge_feature_file(frame, bge_file)
+
+    tfidf_path = artifact_dir / "tfidf_vectorizer.joblib"
+    if tfidf_path.exists():
+        if records is None:
+            raise ValueError(
+                "The saved model includes a 'tfidf_cosine' feature but no entity "
+                "records were provided to score_candidates(). Pass records= to "
+                "recompute TF-IDF cosine similarities at inference time."
+            )
+        import joblib
+        vectorizer = joblib.load(tfidf_path)
+        tfidf_col, _ = compute_fold_safe_tfidf_scores(
+            frame, records, vectorizer=vectorizer
+        )
+        frame["tfidf_cosine"] = tfidf_col
+
     matrix, _ = prepare_matrix(frame, metadata["feature_columns"])
     model = xgb.XGBClassifier()
     model.load_model(str(artifact_dir / "gbm.json"))
@@ -218,19 +393,99 @@ def score_candidates(
     return result
 
 
+def evaluate_held_out_country_diagnostic(
+    frame: pd.DataFrame,
+    feature_columns: Sequence[str],
+    params: Optional[Dict] = None,
+) -> Dict[str, object]:
+    """
+    Two-way held-out-country generalization check (e.g. US -> India and India -> US).
+    Directly measures whether the GBM has overfit to domestic country noise patterns.
+    """
+    country_col = (
+        "source1_canonical_country"
+        if "source1_canonical_country" in frame.columns
+        else "source1_country"
+    )
+    if country_col not in frame.columns:
+        return {"status": "skipped", "reason": "No country column available"}
+
+    counts = frame.groupby([country_col, "label"]).size().unstack(fill_value=0)
+    valid_countries = [
+        c
+        for c in counts.index
+        if c != "" and counts.loc[c, 0] > 0 and counts.loc[c, 1] > 0
+    ]
+    if len(valid_countries) < 2:
+        return {
+            "status": "skipped",
+            "reason": f"Need at least 2 countries with pos and neg labels; found: {valid_countries}",
+        }
+
+    base_params = dict(DEFAULT_PARAMS)
+    if params:
+        base_params.update(params)
+
+    diagnostic_results = {}
+    cross_ap = []
+    for eval_country in valid_countries[:2]:
+        train_mask = frame[country_col] != eval_country
+        valid_mask = frame[country_col] == eval_country
+        if not train_mask.any() or not valid_mask.any():
+            continue
+
+        train_df = frame[train_mask]
+        valid_df = frame[valid_mask]
+
+        train_mat, _ = prepare_matrix(train_df, feature_columns)
+        valid_mat, _ = prepare_matrix(valid_df, feature_columns)
+        y_train = train_df["label"].to_numpy(dtype=np.int32)
+        y_valid = valid_df["label"].to_numpy(dtype=np.int32)
+
+        if len(np.unique(y_train)) < 2 or len(np.unique(y_valid)) < 2:
+            continue
+
+        diag_params = dict(base_params)
+        diag_params["scale_pos_weight"] = _scale_pos_weight(y_train)
+        model = xgb.XGBClassifier(
+            n_estimators=1000,
+            early_stopping_rounds=50,
+            **diag_params,
+        )
+        model.fit(
+            train_mat,
+            y_train,
+            eval_set=[(valid_mat, y_valid)],
+            verbose=False,
+        )
+        val_preds = model.predict_proba(valid_mat)[:, 1]
+        ap = float(average_precision_score(y_valid, val_preds))
+        cross_ap.append(ap)
+        diagnostic_results[f"train_others_eval_{eval_country}"] = {
+            "eval_country": str(eval_country),
+            "train_entities": int(train_df["source1_entity_id"].nunique()),
+            "valid_entities": int(valid_df["source1_entity_id"].nunique()),
+            "average_precision": ap,
+            "best_iteration": int(model.best_iteration or 0),
+        }
+
+    if cross_ap:
+        diagnostic_results["mean_held_out_country_ap"] = float(np.mean(cross_ap))
+    return diagnostic_results
+
+
 def train_oof(
     frame: pd.DataFrame,
     n_splits: int = 5,
     params: Optional[Dict] = None,
+    country_mask_rate: float = 0.15,
+    use_monotone_constraints: bool = False,
+    records: Optional[Dict[str, str]] = None,
 ) -> Tuple[pd.DataFrame, List[str], Dict]:
     """Train grouped OOF models; no S1 entity appears in both train and valid."""
     matrix, columns = prepare_matrix(frame)
-    X = matrix.to_numpy(dtype=np.float32)
     y = frame["label"].to_numpy(dtype=np.int32)
     groups = frame["source1_entity_id"].to_numpy()
-    # Prefer canonical country for stratification: it is stable across alias
-    # variants (US/USA/us → 'us', France/FR → 'france') so it produces
-    # balanced folds. Fall back to raw if canonical column is absent.
     if "source1_canonical_country" in frame.columns:
         countries = frame["source1_canonical_country"].astype(str)
     elif "source1_country" in frame.columns:
@@ -246,29 +501,60 @@ def train_oof(
     base = dict(DEFAULT_PARAMS)
     if params:
         base.update(params)
+    if use_monotone_constraints and records is None:
+        base["monotone_constraints"] = build_monotonic_constraints(columns)
+
+    X_base = matrix.to_numpy(dtype=np.float32)
     try:
-        splits = splitter.split(X, stratify, groups)
+        splits = splitter.split(X_base, stratify, groups)
         split_list = list(splits)
     except ValueError:
-        # Small data can lack enough examples in a country/label stratum.
-        # Preserve entity grouping and class stratification rather than fail
-        # or silently fall back to pair-level StratifiedKFold.
-        split_list = list(splitter.split(X, y, groups))
+        split_list = list(splitter.split(X_base, y, groups))
+
     for fold, (train_idx, valid_idx) in enumerate(split_list):
         fold_params = dict(base)
         fold_params["scale_pos_weight"] = _scale_pos_weight(y[train_idx])
+
+        train_matrix = matrix.iloc[train_idx].copy()
+        valid_matrix = matrix.iloc[valid_idx].copy()
+
+        # Fold-safe TF-IDF: fit strictly on training fold entities
+        if records is not None:
+            train_eids = set(groups[train_idx]) | set(frame.iloc[train_idx]["candidate_entity_id"])
+            train_tfidf, fold_vec = compute_fold_safe_tfidf_scores(
+                frame.iloc[train_idx], records, entities_to_fit=train_eids
+            )
+            valid_tfidf, _ = compute_fold_safe_tfidf_scores(
+                frame.iloc[valid_idx], records, vectorizer=fold_vec
+            )
+            train_matrix["tfidf_cosine"] = train_tfidf
+            valid_matrix["tfidf_cosine"] = valid_tfidf
+            fold_columns = list(columns) + ["tfidf_cosine"]
+            if use_monotone_constraints:
+                fold_params["monotone_constraints"] = build_monotonic_constraints(fold_columns)
+
+        if country_mask_rate > 0.0:
+            train_matrix = apply_country_masking(
+                train_matrix,
+                mask_rate=country_mask_rate,
+                random_state=np.random.RandomState(RANDOM_SEED + fold),
+            )
+
+        X_train = train_matrix.to_numpy(dtype=np.float32)
+        X_valid = valid_matrix.to_numpy(dtype=np.float32)
+
         model = xgb.XGBClassifier(
             n_estimators=1000,
             early_stopping_rounds=50,
             **fold_params,
         )
         model.fit(
-            X[train_idx],
+            X_train,
             y[train_idx],
-            eval_set=[(X[valid_idx], y[valid_idx])],
+            eval_set=[(X_valid, y[valid_idx])],
             verbose=False,
         )
-        oof[valid_idx] = model.predict_proba(X[valid_idx])[:, 1]
+        oof[valid_idx] = model.predict_proba(X_valid)[:, 1]
         fold_info.append(
             {
                 "fold": fold,
@@ -282,7 +568,8 @@ def train_oof(
         )
     result = frame.copy()
     result["oof_score"] = oof
-    return result, columns, {"folds": fold_info}
+    final_columns = list(columns) + (["tfidf_cosine"] if records is not None else [])
+    return result, final_columns, {"folds": fold_info}
 
 
 def fit_final(
@@ -290,16 +577,42 @@ def fit_final(
     feature_columns: Sequence[str],
     params: Optional[Dict] = None,
     n_estimators: int = 300,
-) -> xgb.XGBClassifier:
-    matrix, _ = prepare_matrix(frame, feature_columns)
+    country_mask_rate: float = 0.15,
+    use_monotone_constraints: bool = False,
+    records: Optional[Dict[str, str]] = None,
+    output_dir: Optional[Path] = None,
+) -> Tuple[xgb.XGBClassifier, List[str]]:
+    cols = list(feature_columns)
+    if records is not None:
+        import joblib
+        all_eids = set(frame["source1_entity_id"]) | set(frame["candidate_entity_id"])
+        tfidf_col, final_vec = compute_fold_safe_tfidf_scores(
+            frame, records, entities_to_fit=all_eids
+        )
+        frame = frame.assign(tfidf_cosine=tfidf_col)
+        if "tfidf_cosine" not in cols:
+            cols.append("tfidf_cosine")
+        if output_dir is not None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            joblib.dump(final_vec, output_dir / "tfidf_vectorizer.joblib")
+
+    matrix, _ = prepare_matrix(frame, cols)
     y = frame["label"].to_numpy(dtype=np.int32)
     final_params = dict(DEFAULT_PARAMS)
     if params:
         final_params.update(params)
+    if use_monotone_constraints:
+        final_params["monotone_constraints"] = build_monotonic_constraints(cols)
     final_params["scale_pos_weight"] = _scale_pos_weight(y)
+    if country_mask_rate > 0.0:
+        matrix = apply_country_masking(
+            matrix,
+            mask_rate=country_mask_rate,
+            random_state=np.random.RandomState(RANDOM_SEED),
+        )
     model = xgb.XGBClassifier(n_estimators=n_estimators, **final_params)
     model.fit(matrix, y, verbose=False)
-    return model
+    return model, cols
 
 
 def run_training(
@@ -307,33 +620,87 @@ def run_training(
     ground_truth_file: Path,
     output_dir: Path,
     qwen_file: Optional[Path] = None,
+    bge_file: Optional[Path] = None,
+    source1_files: Optional[Sequence[Path]] = None,
+    candidate_source_files: Optional[Sequence[Path]] = None,
+    booster: str = "gbtree",
+    eta: float = 0.03,
+    country_mask_rate: float = 0.15,
+    use_monotone_constraints: bool = False,
 ) -> Dict:
+    params = dict(DEFAULT_PARAMS)
+    params["booster"] = booster
+    params["eta"] = eta
+    if booster == "dart":
+        # XGBoost 3.x: DART is no longer a separate booster value.
+        # Use gbtree with dropout parameters directly.
+        params["booster"] = "gbtree"
+        params.update({
+            "sample_type": "uniform",
+            "normalize_type": "tree",
+            "rate_drop": 0.1,
+            "skip_drop": 0.5,
+            "one_drop": 0,
+        })
+
     frame = pd.read_csv(feature_file, sep="\t", dtype=str, keep_default_na=False)
     frame = merge_feature_file(frame, qwen_file)
-    # Explicitly assign ground_truth so it is available for choose_threshold's
-    # all_source1_ids argument (includes singletons with empty match lists).
+    frame = merge_feature_file(frame, bge_file)
+
+    # Optional records loading for fold-safe TF-IDF cosine feature
+    records = None
+    if source1_files and candidate_source_files:
+        from src.bge_features import load_records as load_entity_records
+        records = load_entity_records(list(source1_files) + list(candidate_source_files))
+
     ground_truth = load_ground_truth(ground_truth_file)
     labeled = attach_labels(frame, ground_truth)
-    oof, columns, diagnostics = train_oof(labeled)
+    oof, columns, diagnostics = train_oof(
+        labeled,
+        params=params,
+        country_mask_rate=country_mask_rate,
+        use_monotone_constraints=use_monotone_constraints,
+        records=records,
+    )
     calibrator = fit_calibrator(
         oof["oof_score"].to_numpy(), oof["label"].to_numpy()
     )
     calibrated = apply_calibrator(calibrator, oof["oof_score"].to_numpy())
-    # Pass the full S1 universe (dict keys) so singleton entities with zero
-    # candidates are included in the macro-F0.5 threshold search.
     threshold, f05 = choose_threshold(
         oof, calibrated, all_source1_ids=list(ground_truth)
     )
-    model = fit_final(labeled, columns, n_estimators=max(50, int(np.mean(
-        [fold["best_iteration"] for fold in diagnostics["folds"]]
-    ) * 1.1)))
+    best_iters = [
+        fold["best_iteration"]
+        for fold in diagnostics["folds"]
+        if fold.get("best_iteration", 0) > 0
+    ]
+    final_n_est = max(50, int(np.mean(best_iters) * 1.1)) if best_iters else 300
+
+    model, final_columns = fit_final(
+        labeled,
+        columns,
+        params=params,
+        n_estimators=final_n_est,
+        country_mask_rate=country_mask_rate,
+        use_monotone_constraints=use_monotone_constraints,
+        records=records,
+        output_dir=output_dir,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     model.save_model(str(output_dir / "gbm.json"))
     oof.assign(calibrated_score=calibrated).to_csv(
         output_dir / "oof_predictions.tsv", sep="\t", index=False
     )
+
+    # Held-out country cross-evaluation diagnostic
+    held_out_diag = evaluate_held_out_country_diagnostic(labeled, final_columns, params=params)
+    diagnostics["held_out_country_cross_eval"] = held_out_diag
+
+    # Feature importance
+    feature_imp = extract_feature_importances(model, final_columns)
+
     metadata = {
-        "feature_columns": columns,
+        "feature_columns": final_columns,
         "calibrator": calibrator[0],
         "calibrator_parameters": serialize_calibrator(calibrator),
         "calibration_metrics": calibration_metrics(
@@ -350,8 +717,11 @@ def run_training(
         "average_precision": float(
             average_precision_score(labeled["label"], oof["oof_score"])
         ),
-        "params": DEFAULT_PARAMS,
+        "params": params,
+        "country_mask_rate": country_mask_rate,
+        "use_monotone_constraints": use_monotone_constraints,
         "final_n_estimators": int(model.get_params()["n_estimators"]),
+        "feature_importance": feature_imp,
         "diagnostics": diagnostics,
     }
     with open(output_dir / "stage3_metadata.json", "w", encoding="utf-8") as handle:
@@ -365,9 +735,26 @@ def main() -> None:
     parser.add_argument("--ground-truth", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--qwen-features", type=Path, default=None)
+    parser.add_argument("--bge-features", type=Path, default=None)
+    parser.add_argument("--source1", type=Path, nargs="+", default=None)
+    parser.add_argument("--candidate-sources", type=Path, nargs="+", default=None)
+    parser.add_argument("--booster", type=str, choices=["gbtree", "dart"], default="gbtree")
+    parser.add_argument("--eta", type=float, default=0.03)
+    parser.add_argument("--country-mask-rate", type=float, default=0.15)
+    parser.add_argument("--use-monotone-constraints", action="store_true")
     args = parser.parse_args()
     print(json.dumps(run_training(
-        args.features, args.ground_truth, args.output_dir, args.qwen_features
+        feature_file=args.features,
+        ground_truth_file=args.ground_truth,
+        output_dir=args.output_dir,
+        qwen_file=args.qwen_features,
+        bge_file=args.bge_features,
+        source1_files=args.source1,
+        candidate_source_files=args.candidate_sources,
+        booster=args.booster,
+        eta=args.eta,
+        country_mask_rate=args.country_mask_rate,
+        use_monotone_constraints=args.use_monotone_constraints,
     ), indent=2))
 
 

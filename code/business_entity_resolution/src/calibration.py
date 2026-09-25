@@ -37,7 +37,7 @@ def fit_calibrator(scores: np.ndarray, labels: np.ndarray):
     if positives < 1000:
         model = LogisticRegression(max_iter=1000).fit(scores[:, None], labels)
         return "platt", model
-    if positives > 10000:
+    if positives >= 10000:
         return "isotonic", IsotonicRegression(out_of_bounds="clip").fit(scores, labels)
 
     platt = LogisticRegression(max_iter=1000).fit(scores[:, None], labels)
@@ -86,6 +86,7 @@ def apply_saved_calibrator(parameters: Dict, scores: np.ndarray) -> np.ndarray:
     clipped = np.clip(scores, 0.0, 1.0)
     if name == "platt":
         logits = float(parameters["coef"]) * clipped + float(parameters["intercept"])
+        logits = np.clip(logits, -500.0, 500.0)
         result = 1.0 / (1.0 + np.exp(-logits))
     elif name == "isotonic":
         result = np.interp(
@@ -100,10 +101,7 @@ def apply_saved_calibrator(parameters: Dict, scores: np.ndarray) -> np.ndarray:
 
 def calibration_metrics(labels: np.ndarray, probabilities: np.ndarray, bins: int = 10) -> Dict:
     """Return pair-weighted reliability metrics for diagnostics."""
-    labels = np.asarray(labels, dtype=int).reshape(-1)
-    probabilities = np.asarray(probabilities, dtype=float).reshape(-1)
-    _, labels = _validate(probabilities, labels)
-    probabilities = np.clip(probabilities, 0.0, 1.0)
+    probabilities, labels = _validate(probabilities, labels)
     edges = np.linspace(0.0, 1.0, bins + 1)
     ece = 0.0
     reliability = []
@@ -142,6 +140,9 @@ def cross_fitted_metrics(
     for train_idx, valid_idx in GroupKFold(n_splits=n_splits).split(
         scores, labels, groups
     ):
-        calibrator = fit_calibrator(scores[train_idx], labels[train_idx])
-        predictions[valid_idx] = apply_calibrator(calibrator, scores[valid_idx])
+        try:
+            calibrator = fit_calibrator(scores[train_idx], labels[train_idx])
+            predictions[valid_idx] = apply_calibrator(calibrator, scores[valid_idx])
+        except ValueError:
+            predictions[valid_idx] = scores[valid_idx]
     return calibration_metrics(labels, predictions)

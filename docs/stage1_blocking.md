@@ -1,8 +1,8 @@
 # Layer 1 — Candidate Generation and Blocking Plan
 
-**Status:** designed, not yet implemented  
+**Status:** implemented (`src/blocking.py`)  
 **Input:** Layer 0 normalized artifacts  
-**Output:** `candidate_pairs.tsv` plus auditable provenance
+**Output:** `candidate_pairs.tsv` plus auditable provenance (`candidate_provenance.tsv`)
 
 ## Purpose
 

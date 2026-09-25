@@ -47,7 +47,10 @@ from sentence_transformers import (
     util,
 )
 from sentence_transformers.training_args import BatchSamplers
-from sentence_transformers.evaluation import InformationRetrievalEvaluator
+try:
+    from sentence_transformers.sentence_transformer.evaluation import InformationRetrievalEvaluator
+except ImportError:
+    from sentence_transformers.evaluation import InformationRetrievalEvaluator
 
 from peft import LoraConfig, TaskType
 
@@ -152,6 +155,7 @@ def create_frozen_model(
 def create_evaluator(
     data_dir: str,
     name: str = "held_out_country",
+    prefix: str = "",
 ) -> Optional[InformationRetrievalEvaluator]:
     """
     Create an InformationRetrievalEvaluator from pre-built evaluation data.
@@ -160,9 +164,15 @@ def create_evaluator(
     by data_builder.py. Returns None if eval data is not found.
     """
     data_path = Path(data_dir)
-    queries_path = data_path / "eval_queries.json"
-    corpus_path = data_path / "eval_corpus.json"
-    relevant_path = data_path / "eval_relevant.json"
+    queries_path = data_path / f"{prefix}eval_queries.json"
+    corpus_path = data_path / f"{prefix}eval_corpus.json"
+    relevant_path = data_path / f"{prefix}eval_relevant.json"
+
+    if prefix and not queries_path.exists():
+        logger.warning(f"Prefixed eval files with prefix '{prefix}' not found, falling back to default eval files")
+        queries_path = data_path / "eval_queries.json"
+        corpus_path = data_path / "eval_corpus.json"
+        relevant_path = data_path / "eval_relevant.json"
 
     if not all(p.exists() for p in [queries_path, corpus_path, relevant_path]):
         logger.warning("Evaluation data not found, skipping evaluator setup")
@@ -179,7 +189,7 @@ def create_evaluator(
     relevant_docs = {k: set(v) for k, v in relevant_raw.items()}
 
     logger.info(
-        f"IR Evaluator: {len(queries)} queries, {len(corpus)} corpus docs, "
+        f"IR Evaluator ({name}): {len(queries)} queries, {len(corpus)} corpus docs, "
         f"{sum(len(v) for v in relevant_docs.values())} relevant pairs"
     )
 
@@ -207,6 +217,7 @@ def train(
     data_dir: str,
     output_dir: str,
     mode: str = "held_out_country",
+    direction: str = "default",
     training_config: Optional[TrainingConfig] = None,
     lora_config: Optional[LoRAConfig] = None,
 ):
@@ -217,6 +228,7 @@ def train(
         data_dir: Path to prepared data from data_builder.py
         output_dir: Where to save the fine-tuned model
         mode: "held_out_country" (gate check) or "full" (final training)
+        direction: Direction for held-out country ("default", "us_to_india", "india_to_us")
         training_config: Training hyperparameters
         lora_config: LoRA adapter configuration
     """
@@ -232,9 +244,17 @@ def train(
     # -----------------------------------------------------------------------
     # Load dataset
     # -----------------------------------------------------------------------
+    prefix = ""
+    if direction == "us_to_india":
+        prefix = "us_train_india_eval_"
+    elif direction == "india_to_us":
+        prefix = "india_train_us_eval_"
+
     if mode == "held_out_country":
-        dataset_path = data_path / "held_out_country_dataset"
-        logger.info("Mode: held-out country gate (train one country, eval other)")
+        dataset_path = data_path / f"{prefix}held_out_country_dataset"
+        if not dataset_path.exists():
+            dataset_path = data_path / "held_out_country_dataset"
+        logger.info(f"Mode: held-out country gate (direction={direction}, path={dataset_path})")
     elif mode == "full":
         dataset_path = data_path / "full_training_dataset"
         logger.info("Mode: full training (both countries)")
@@ -293,7 +313,8 @@ def train(
     # -----------------------------------------------------------------------
     # Create evaluator
     # -----------------------------------------------------------------------
-    evaluator = create_evaluator(data_dir)
+    eval_name = f"held_out_{direction}" if direction != "default" else "held_out_country"
+    evaluator = create_evaluator(data_dir, name=eval_name, prefix=prefix)
 
     # -----------------------------------------------------------------------
     # Training arguments
@@ -465,6 +486,9 @@ def main():
     train_parser.add_argument("--mode", type=str, default="held_out_country",
                               choices=["held_out_country", "full"],
                               help="Training mode")
+    train_parser.add_argument("--direction", type=str, default="default",
+                              choices=["default", "us_to_india", "india_to_us"],
+                              help="Direction for held-out country gate split")
     # Training params
     train_parser.add_argument("--epochs", type=int, default=3)
     train_parser.add_argument("--batch_size", type=int, default=48)
@@ -519,6 +543,7 @@ def main():
             data_dir=args.data_dir,
             output_dir=args.output_dir,
             mode=args.mode,
+            direction=args.direction,
             training_config=train_cfg,
             lora_config=lora_cfg,
         )

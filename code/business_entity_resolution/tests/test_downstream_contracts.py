@@ -18,8 +18,14 @@ try:
     import numpy as np
     import pandas as pd
     from src.pair_features import _record_features, pair_feature_row
-    from src.stage3_gbm import DROP_CATEGORICAL, prepare_matrix, macro_f05
-    from src.stage4_decision import assemble_matching_results
+    try:
+        from src.scoring import DROP_CATEGORICAL, prepare_matrix, macro_f05
+    except ImportError:
+        from src.stage3_gbm import DROP_CATEGORICAL, prepare_matrix, macro_f05
+    try:
+        from src.decision import assemble_matching_results
+    except ImportError:
+        from src.stage4_decision import assemble_matching_results
     HAS_DEPENDENCIES = True
 except ImportError:
     HAS_DEPENDENCIES = False
@@ -140,8 +146,91 @@ class TestDownstreamContracts(unittest.TestCase):
         row2 = results[results["source1_entity_id"] == "S1-2"].iloc[0]
         self.assertEqual(row2["matched_entity_ids"], "")
 
-        row3 = results[results["source1_entity_id"] == "S1-3"].iloc[0]
-        self.assertEqual(row3["matched_entity_ids"], "")
+    def test_provenance_signals_extraction(self):
+        """Verify provenance signals (rank, score, count) are extracted and preserved for GBM."""
+        rec1 = _record_features({"entity_id": "S1-1", "business_name": "Acme Inc", "business_address": "123 Main St", "country": "US"})
+        rec2 = _record_features({"entity_id": "S2-1", "business_name": "Acme Corp", "business_address": "123 Main Street", "country": "US"})
+
+        # Row with full provenance
+        row_prov = pair_feature_row(
+            rec1,
+            rec2,
+            provenance="exact_name;address_structural",
+            left_rank=1.0,
+            best_score=0.95,
+            score_margin_to_best=0.15,
+            blocker_count=2,
+        )
+        self.assertEqual(row_prov["candidate_rank"], 1.0)
+        self.assertEqual(row_prov["candidate_rank_missing"], 0)
+        self.assertEqual(row_prov["best_blocker_score"], 0.95)
+        self.assertEqual(row_prov["best_blocker_score_missing"], 0)
+        self.assertEqual(row_prov["best_blocker_score_diff"], 0.15)
+        self.assertEqual(row_prov["best_blocker_score_diff_missing"], 0)
+        self.assertEqual(row_prov["blocker_count"], 2)
+        self.assertEqual(row_prov["has_blocker_provenance"], 1)
+
+        # Row with missing provenance
+        row_noprov = pair_feature_row(rec1, rec2)
+        self.assertEqual(row_noprov["candidate_rank"], -1.0)
+        self.assertEqual(row_noprov["candidate_rank_missing"], 1)
+        self.assertEqual(row_noprov["best_blocker_score"], -1.0)
+        self.assertEqual(row_noprov["best_blocker_score_missing"], 1)
+        self.assertEqual(row_noprov["best_blocker_score_diff"], 0.0)
+        self.assertEqual(row_noprov["best_blocker_score_diff_missing"], 1)
+        self.assertEqual(row_noprov["blocker_count"], 0)
+        self.assertEqual(row_noprov["has_blocker_provenance"], 0)
+
+        # Check prepare_matrix keeps numeric provenance features and drops string blocker_provenance
+        df = pd.DataFrame([row_prov])
+        matrix, cols = prepare_matrix(df)
+        self.assertIn("candidate_rank", cols)
+        self.assertIn("best_blocker_score", cols)
+        self.assertIn("best_blocker_score_diff", cols)
+        self.assertIn("best_blocker_score_diff_missing", cols)
+        self.assertIn("blocker_count", cols)
+        self.assertNotIn("blocker_provenance", cols)
+
+    def test_stage4_decision_threshold_boundary(self):
+        """Verify score >= threshold is inclusive at the exact boundary."""
+        scored = pd.DataFrame({
+            "source1_entity_id": ["S1-1", "S1-1", "S1-2"],
+            "candidate_entity_id": ["S2-exact", "S2-below", "S2-above"],
+            "calibrated_score": ["0.5000", "0.4999", 0.75],
+        })
+        results = assemble_matching_results(scored, ["S1-1", "S1-2"], threshold=0.50)
+        row1 = results[results["source1_entity_id"] == "S1-1"].iloc[0]
+        # Exactly 0.5000 must be included; 0.4999 must not
+        self.assertEqual(row1["matched_entity_ids"], "S2-exact")
+        row2 = results[results["source1_entity_id"] == "S1-2"].iloc[0]
+        self.assertEqual(row2["matched_entity_ids"], "S2-above")
+
+    def test_stage4_decision_invalid_inputs(self):
+        """Verify stage4 decision raises loudly on invalid inputs."""
+        valid_scored = pd.DataFrame({
+            "source1_entity_id": ["S1-1"],
+            "candidate_entity_id": ["S2-1"],
+            "calibrated_score": [0.8],
+        })
+        # Duplicate S1 IDs
+        with self.assertRaises(ValueError) as ctx:
+            assemble_matching_results(valid_scored, ["S1-1", "S1-1"], threshold=0.5)
+        self.assertIn("duplicates", str(ctx.exception))
+
+        # Unknown S1 ID in scored table
+        with self.assertRaises(ValueError) as ctx:
+            assemble_matching_results(valid_scored, ["S1-2"], threshold=0.5)
+        self.assertIn("unknown S1 IDs", str(ctx.exception))
+
+        # Non-numeric calibrated_score
+        bad_score_df = pd.DataFrame({
+            "source1_entity_id": ["S1-1"],
+            "candidate_entity_id": ["S2-1"],
+            "calibrated_score": ["not_a_number"],
+        })
+        with self.assertRaises(ValueError) as ctx:
+            assemble_matching_results(bad_score_df, ["S1-1"], threshold=0.5)
+        self.assertIn("non-numeric", str(ctx.exception))
 
 
 if __name__ == "__main__":

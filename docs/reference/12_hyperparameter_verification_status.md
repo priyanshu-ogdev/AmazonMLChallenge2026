@@ -5,7 +5,7 @@ mean before the real dataset exists from what it can only mean after.
 
 ## What has been verified (facts about the world, checkable now)
 - Model identities: architecture, parameter count, license, context length, published benchmark
-  scores — see `03_embedding_models.md` and `04_citations.md`. These are stable facts independent
+  scores — see [`early_drafts/03_embedding_models.md`](early_drafts/03_embedding_models.md) and [`07_citations_and_benchmarks.md`](07_citations_and_benchmarks.md). These are stable facts independent
   of this competition's data and don't change with tuning.
 - Paper/tool existence and their own reported numbers (Sodhana paper's Table 4, LinkTransformer's
   actual license, etc.) — checkable against primary sources regardless of dataset access.
@@ -45,11 +45,11 @@ currently-unseen* dataset:
    specifically, not just in aggregate, given that's the flagged generalization risk.
 
 *Note: "France" throughout this table is used as shorthand from earlier in this design
-conversation, not a confirmed detail from the primary competition brief — see `04_citations.md`'s
+conversation, not a confirmed detail from the primary competition brief — see [`07_citations_and_benchmarks.md`](07_citations_and_benchmarks.md)'s
 source-of-truth correction. Substitute whichever locale(s) the actual test data confirms.*
 
 ## Bottom line
-The design in `01_blocking_stage.md` and `02_matching_stage.md` is complete as a *specification* —
+The design in [`early_drafts/01_blocking_stage.md`](early_drafts/01_blocking_stage.md) and [`early_drafts/02_matching_stage.md`](early_drafts/02_matching_stage.md) is complete as a *specification* —
 every stage, every safeguard, every decision rule is defined. It is not, and cannot yet be, a
 *tuned* pipeline. Any document that presented specific hyperparameter values or a "verified" F_0.5
 score at this stage would be fabricating precision the underlying situation doesn't support. The

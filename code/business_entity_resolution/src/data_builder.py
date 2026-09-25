@@ -378,13 +378,33 @@ def parse_matched_ids(matched_str: str) -> List[str]:
 # Training Data Construction
 # ---------------------------------------------------------------------------
 
+def load_candidates_map(path: Union[str, Path]) -> Dict[str, List[str]]:
+    """Load candidate_pairs.tsv into mapping: source1_entity_id -> list of candidate_entity_ids."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Candidate file not found: {path}")
+    candidates_map: Dict[str, List[str]] = {}
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            s1_id = row.get("source1_entity_id", "").strip()
+            raw_cands = row.get("candidate_entity_ids", "").strip()
+            cands = [c.strip() for c in raw_cands.split(",") if c.strip()]
+            candidates_map[s1_id] = cands
+    return candidates_map
+
+
 def build_positive_pairs(
     sampled_gt: pd.DataFrame,
     s1_records: Dict[str, Dict[str, Any]],
     s2s3_records: Dict[str, Dict[str, Any]],
+    candidates_map: Optional[Dict[str, List[str]]] = None,
+    negatives_per_positive: int = 0,
 ) -> List[Dict[str, Any]]:
     """
     Build positive (anchor, positive) pairs from ground truth.
+    When candidates_map is provided and negatives_per_positive > 0, mines top
+    non-ground-truth candidates as hard negatives from Layer 1 blocking.
 
     For each S1 entity, creates pairs with each of its matched S2/S3 entities.
     Returns list of dicts: {"anchor": text, "positive": text, "country": country, ...}
@@ -403,18 +423,32 @@ def build_positive_pairs(
         country = s1_info["country_canonical"]
 
         matched_ids = parse_matched_ids(row["matched_entity_ids"])
+        matched_id_set = set(matched_ids)
+
+        # Mine hard negatives if candidates are available
+        hard_negatives: List[str] = []
+        if candidates_map and negatives_per_positive > 0 and s1_id in candidates_map:
+            for cand_id in candidates_map[s1_id]:
+                if cand_id not in matched_id_set and cand_id in s2s3_records:
+                    hard_negatives.append(s2s3_records[cand_id]["encoder_text"])
+                    if len(hard_negatives) >= negatives_per_positive:
+                        break
+
         for mid in matched_ids:
             match_info = s2s3_records.get(mid)
             if match_info is None:
                 skipped += 1
                 continue
-            pairs.append({
+            pair_dict: Dict[str, Any] = {
                 "anchor": anchor_text,
                 "positive": match_info["encoder_text"],
                 "country": country,
                 "s1_id": s1_id,
                 "matched_id": mid,
-            })
+            }
+            if hard_negatives:
+                pair_dict["negatives"] = list(hard_negatives)
+            pairs.append(pair_dict)
 
     if skipped > 0:
         logger.warning(f"  Skipped {skipped:,} pairs due to missing records")
@@ -567,108 +601,174 @@ def build_training_data(config: DataConfig) -> Dict[str, Any]:
     s2s3_records = records_to_dict(pd.concat([s2_df, s3_df], ignore_index=True))
     logger.info(f"  Normalized: {len(s1_records):,} S1, {len(s2s3_records):,} S2/S3")
 
-    # 5. Build positive pairs
-    train_country = "us" if "us" in countries else countries[0]
-    eval_country = "india" if "india" in countries else (countries[1] if len(countries) > 1 else countries[0])
+    # 5. Determine countries for train/eval splits
+    primary_train_country = config.train_country or ("us" if "us" in countries else countries[0])
+    primary_eval_country = config.eval_country or ("india" if "india" in countries else (countries[1] if len(countries) > 1 else countries[0]))
 
-    train_gt = sampled_gt[sampled_gt["country"] == train_country]
-    eval_gt = sampled_gt[sampled_gt["country"] == eval_country]
+    candidates_map = None
+    if config.blocking_candidates_path:
+        logger.info(f"Loading blocking candidates from {config.blocking_candidates_path} for hard negative mining...")
+        candidates_map = load_candidates_map(config.blocking_candidates_path)
 
-    logger.info(f"Building pairs ({train_country} for train, {eval_country} for held-out eval)...")
-    train_pairs = build_positive_pairs(train_gt, s1_records, s2s3_records)
-    eval_pairs = build_positive_pairs(eval_gt, s1_records, s2s3_records)
-    all_pairs = build_positive_pairs(sampled_gt, s1_records, s2s3_records)
+    def pairs_to_dataset(pairs: List[Dict]) -> Any:
+        if not HAS_DATASETS:
+            return None
+        data = {
+            "anchor": [p["anchor"] for p in pairs],
+            "positive": [p["positive"] for p in pairs],
+        }
+        if pairs and "negatives" in pairs[0]:
+            data["negatives"] = [p.get("negatives", []) for p in pairs]
+        return Dataset.from_dict(data)
 
-    logger.info(f"  Train pairs ({train_country}): {len(train_pairs):,}")
-    logger.info(f"  Eval pairs ({eval_country}): {len(eval_pairs):,}")
-    logger.info(f"  All pairs (both countries): {len(all_pairs):,}")
+    def build_direction_artifacts(
+        t_country: str,
+        e_country: str,
+        prefix: str = "",
+        is_primary: bool = False,
+    ) -> Dict[str, Any]:
+        logger.info(f"Building directional split: train={t_country}, eval={e_country} (prefix='{prefix}')...")
+        t_gt = sampled_gt[sampled_gt["country"] == t_country]
+        e_gt = sampled_gt[sampled_gt["country"] == e_country]
 
-    # 6. Build IR evaluation data for held-out country gate
-    logger.info("Building IR evaluation data for held-out country gate...")
-    eval_positive_ids = set()
-    for _, row in eval_gt.iterrows():
-        eval_positive_ids.update(parse_matched_ids(row["matched_entity_ids"]))
+        t_pairs = build_positive_pairs(
+            t_gt, s1_records, s2s3_records,
+            candidates_map=candidates_map,
+            negatives_per_positive=config.negatives_per_positive,
+        )
+        e_pairs = build_positive_pairs(
+            e_gt, s1_records, s2s3_records,
+            candidates_map=candidates_map,
+            negatives_per_positive=config.negatives_per_positive,
+        )
 
-    neg_dfs = []
-    for src_file in ["train_source2.tsv", "train_source3.tsv"]:
-        neg_sample = load_random_sample_by_country(
-            str(train_dir / src_file),
-            country=eval_country,
-            n=config.eval_corpus_negatives // 2,
-            exclude_ids=eval_positive_ids,
-            chunk_size=config.chunk_size,
+        e_positive_ids = set()
+        for _, row in e_gt.iterrows():
+            e_positive_ids.update(parse_matched_ids(row["matched_entity_ids"]))
+
+        neg_dfs = []
+        for src_file in ["train_source2.tsv", "train_source3.tsv"]:
+            neg_sample = load_random_sample_by_country(
+                str(train_dir / src_file),
+                country=e_country,
+                n=config.eval_corpus_negatives // 2,
+                exclude_ids=e_positive_ids,
+                chunk_size=config.chunk_size,
+                seed=config.seed,
+            )
+            if len(neg_sample) > 0:
+                neg_dfs.append(neg_sample)
+
+        neg_records = records_to_dict(pd.concat(neg_dfs, ignore_index=True)) if neg_dfs else {}
+
+        queries, corpus, relevant_docs = build_evaluation_data(
+            e_gt, s1_records, s2s3_records, neg_records,
+            max_queries=config.eval_sample_per_country,
             seed=config.seed,
         )
-        if len(neg_sample) > 0:
-            neg_dfs.append(neg_sample)
 
-    neg_records = records_to_dict(pd.concat(neg_dfs, ignore_index=True)) if neg_dfs else {}
+        # Save prefixed JSONL files
+        if prefix:
+            save_pairs_to_jsonl(t_pairs, output_dir / f"{prefix}held_out_train_pairs.jsonl")
+            save_pairs_to_jsonl(e_pairs, output_dir / f"{prefix}held_out_eval_pairs.jsonl")
+            if HAS_DATASETS:
+                d_set = DatasetDict({
+                    "train": pairs_to_dataset(t_pairs),
+                    "eval": pairs_to_dataset(e_pairs),
+                })
+                d_set.save_to_disk(str(output_dir / f"{prefix}held_out_country_dataset"))
+            with open(output_dir / f"{prefix}eval_queries.json", "w", encoding="utf-8") as f:
+                json.dump(queries, f, ensure_ascii=False, indent=2)
+            with open(output_dir / f"{prefix}eval_corpus.json", "w", encoding="utf-8") as f:
+                json.dump(corpus, f, ensure_ascii=False, indent=2)
+            with open(output_dir / f"{prefix}eval_relevant.json", "w", encoding="utf-8") as f:
+                json.dump({k: list(v) for k, v in relevant_docs.items()}, f, ensure_ascii=False, indent=2)
 
-    queries, corpus, relevant_docs = build_evaluation_data(
-        eval_gt, s1_records, s2s3_records, neg_records,
-        max_queries=config.eval_sample_per_country,
-        seed=config.seed,
+        # Save standard (unprefixed) files for primary direction
+        if is_primary:
+            save_pairs_to_jsonl(t_pairs, output_dir / "held_out_train_pairs.jsonl")
+            save_pairs_to_jsonl(e_pairs, output_dir / "held_out_eval_pairs.jsonl")
+            if HAS_DATASETS:
+                d_set = DatasetDict({
+                    "train": pairs_to_dataset(t_pairs),
+                    "eval": pairs_to_dataset(e_pairs),
+                })
+                d_set.save_to_disk(str(output_dir / "held_out_country_dataset"))
+            with open(output_dir / "eval_queries.json", "w", encoding="utf-8") as f:
+                json.dump(queries, f, ensure_ascii=False, indent=2)
+            with open(output_dir / "eval_corpus.json", "w", encoding="utf-8") as f:
+                json.dump(corpus, f, ensure_ascii=False, indent=2)
+            with open(output_dir / "eval_relevant.json", "w", encoding="utf-8") as f:
+                json.dump({k: list(v) for k, v in relevant_docs.items()}, f, ensure_ascii=False, indent=2)
+
+        return {
+            "train_country": t_country,
+            "eval_country": e_country,
+            "train_pairs": len(t_pairs),
+            "eval_pairs": len(e_pairs),
+            "eval_queries": len(queries),
+            "eval_corpus": len(corpus),
+            "relevant_pairs": sum(len(v) for v in relevant_docs.values()),
+        }
+
+    # Execute primary split
+    directions_info = []
+    primary_info = build_direction_artifacts(
+        primary_train_country, primary_eval_country,
+        prefix="us_train_india_eval_" if config.bidirectional_gate else "",
+        is_primary=True,
     )
+    directions_info.append(primary_info)
 
-    # 7. Save datasets (Universal JSONL + HuggingFace Arrow)
-    logger.info("Saving datasets...")
+    # If bidirectional gate is requested and reverse direction is possible
+    if config.bidirectional_gate and len(countries) >= 2:
+        reverse_train_country = primary_eval_country
+        reverse_eval_country = primary_train_country
+        reverse_info = build_direction_artifacts(
+            reverse_train_country, reverse_eval_country,
+            prefix="india_train_us_eval_",
+            is_primary=False,
+        )
+        directions_info.append(reverse_info)
 
-    save_pairs_to_jsonl(train_pairs, output_dir / "held_out_train_pairs.jsonl")
-    save_pairs_to_jsonl(eval_pairs, output_dir / "held_out_eval_pairs.jsonl")
+    # 6. Build all pairs for full training dataset (both countries)
+    logger.info("Building full training dataset (all countries combined)...")
+    all_pairs = build_positive_pairs(
+        sampled_gt, s1_records, s2s3_records,
+        candidates_map=candidates_map,
+        negatives_per_positive=config.negatives_per_positive,
+    )
     save_pairs_to_jsonl(all_pairs, output_dir / "full_training_pairs.jsonl")
-
     if HAS_DATASETS:
-        def pairs_to_dataset(pairs: List[Dict]) -> Dataset:
-            return Dataset.from_dict({
-                "anchor": [p["anchor"] for p in pairs],
-                "positive": [p["positive"] for p in pairs],
-            })
-
-        held_out_ds = DatasetDict({
-            "train": pairs_to_dataset(train_pairs),
-            "eval": pairs_to_dataset(eval_pairs),
-        })
-        held_out_path = output_dir / "held_out_country_dataset"
-        held_out_ds.save_to_disk(str(held_out_path))
-        logger.info(f"  Held-out country HuggingFace dataset saved to {held_out_path}")
-
         full_ds = DatasetDict({"train": pairs_to_dataset(all_pairs)})
         full_path = output_dir / "full_training_dataset"
         full_ds.save_to_disk(str(full_path))
         logger.info(f"  Full training HuggingFace dataset saved to {full_path}")
-    else:
-        logger.warning("  'datasets' package not found; saved universal JSONL pairs instead.")
 
-    # Save IR evaluation artifacts
-    with open(output_dir / "eval_queries.json", "w", encoding="utf-8") as f:
-        json.dump(queries, f, ensure_ascii=False, indent=2)
-    with open(output_dir / "eval_corpus.json", "w", encoding="utf-8") as f:
-        json.dump(corpus, f, ensure_ascii=False, indent=2)
-    with open(output_dir / "eval_relevant.json", "w", encoding="utf-8") as f:
-        json.dump({k: list(v) for k, v in relevant_docs.items()}, f, ensure_ascii=False, indent=2)
-
-    # Save split info
+    # 7. Save split metadata & statistics
+    primary_dir_info = directions_info[0] if directions_info else {}
     split_info = {
-        "train_country": train_country,
-        "eval_country": eval_country,
+        "train_country": primary_train_country,
+        "eval_country": primary_eval_country,
+        "primary_train_country": primary_train_country,
+        "primary_eval_country": primary_eval_country,
+        "train_country_pairs": primary_dir_info.get("train_pairs", 0),
+        "eval_country_pairs": primary_dir_info.get("eval_pairs", 0),
         "countries_observed": countries,
-        "train_country_entities": len(train_gt),
-        "eval_country_entities": len(eval_gt),
-        "train_country_pairs": len(train_pairs),
-        "eval_country_pairs": len(eval_pairs),
+        "bidirectional_gate": config.bidirectional_gate,
+        "directions": directions_info,
         "has_huggingface_datasets": HAS_DATASETS,
     }
     with open(output_dir / "country_split_info.json", "w", encoding="utf-8") as f:
         json.dump(split_info, f, indent=2)
 
-    # Save statistics
     stats = {
         **split_info,
         "sampled_per_country": config.sample_per_country,
         "total_sampled_entities": len(sampled_gt),
         "all_pairs": len(all_pairs),
-        "eval_queries": len(queries),
-        "eval_corpus": len(corpus),
+        "eval_queries": primary_dir_info.get("eval_queries", 0),
+        "eval_corpus": primary_dir_info.get("eval_corpus", 0),
         "seed": config.seed,
     }
     with open(output_dir / "data_stats.json", "w", encoding="utf-8") as f:
@@ -798,6 +898,16 @@ def main():
                         help="Chunk size for reading large TSV files")
     parser.add_argument("--splits", nargs="+", default=["train", "test"],
                         help="Splits to process for stage0_normalize")
+    parser.add_argument("--blocking_candidates", type=str, default=None,
+                        help="Path to candidate_pairs.tsv for mining hard negatives")
+    parser.add_argument("--negatives_per_positive", type=int, default=0,
+                        help="Number of hard negatives per positive pair")
+    parser.add_argument("--train_country", type=str, default=None,
+                        help="Specify primary training country (e.g. us)")
+    parser.add_argument("--eval_country", type=str, default=None,
+                        help="Specify primary evaluation country (e.g. india)")
+    parser.add_argument("--bidirectional_gate", action="store_true", default=False,
+                        help="Build both US->India and India->US evaluation splits for 2-way gate")
 
     args = parser.parse_args()
 
@@ -825,6 +935,11 @@ def main():
             eval_corpus_negatives=args.eval_corpus_neg,
             seed=args.seed,
             chunk_size=args.chunk_size,
+            blocking_candidates_path=args.blocking_candidates,
+            negatives_per_positive=args.negatives_per_positive,
+            train_country=args.train_country,
+            eval_country=args.eval_country,
+            bidirectional_gate=args.bidirectional_gate,
         )
         build_training_data(config)
 

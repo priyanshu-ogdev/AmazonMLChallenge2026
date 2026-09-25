@@ -1,0 +1,310 @@
+"""
+Unit tests for Layer 2: Representations and Pair Features.
+
+Covers:
+- Stage 2a: BGE-M3 bi-encoder features & losses
+- Stage 2b: Qwen3-Embedding-0.6B features
+- Stage 2c: Deterministic pair features & provenance signals
+- Data preparation: bidirectional gate & evaluation dataset construction
+- Held-out evaluation metrics & go/no-go gate logic
+"""
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+repo_root = Path(__file__).resolve().parent.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
+import numpy as np
+import pandas as pd
+
+from src.pair_features import (
+    _record_features,
+    pair_feature_row,
+    build_pair_features,
+    load_records as pf_load_records,
+)
+from src.bge_features import load_records as bge_load_records, load_candidates
+from src.qwen_features import format_entity_text, DEFAULT_INSTRUCTION
+
+try:
+    from src.eval_bi_encoder import (
+        compute_retrieval_metrics,
+        compute_margin_analysis,
+        _evaluate_single_direction,
+    )
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
+from src.data_builder import (
+    build_evaluation_data,
+    build_positive_pairs,
+)
+
+
+class TestLayer2PairFeatures(unittest.TestCase):
+    """Test Stage 2c deterministic pair feature generation and contracts."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.dir_path = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_pair_features_end_to_end_with_provenance(self):
+        """Verify build_pair_features correctly reads candidate_provenance with new signals."""
+        s1_file = self.dir_path / "s1.tsv"
+        s2_file = self.dir_path / "s2.tsv"
+        s3_file = self.dir_path / "s3.tsv"
+        cand_file = self.dir_path / "candidate_pairs.tsv"
+        prov_file = self.dir_path / "candidate_provenance.tsv"
+        out_file = self.dir_path / "pair_features.tsv"
+
+        # Raw TSVs
+        s1_df = pd.DataFrame([
+            {"entity_id": "S1-1", "business_name": "Target Store #102", "business_address": "1000 Nicollet Mall, Minneapolis, MN 55403", "country": "US"},
+            {"entity_id": "S1-2", "business_name": "Infosys BPM", "business_address": "Electronics City, Bengaluru 560100", "country": "India"},
+        ])
+        s2_df = pd.DataFrame([
+            {"entity_id": "S2-1", "business_name": "Target Corporation", "business_address": "1000 Nicollet Mall, Minneapolis, MN 55403", "country": "USA"},
+        ])
+        s3_df = pd.DataFrame([
+            {"entity_id": "S3-1", "business_name": "Infosys B P M Ltd", "business_address": "Hosur Rd, Electronics City, Bangalore 560100", "country": "IN"},
+        ])
+        cand_df = pd.DataFrame([
+            {"source1_entity_id": "S1-1", "candidate_entity_ids": "S2-1"},
+            {"source1_entity_id": "S1-2", "candidate_entity_ids": "S3-1"},
+        ])
+        prov_df = pd.DataFrame([
+            {
+                "source1_entity_id": "S1-1",
+                "candidate_entity_id": "S2-1",
+                "blocker_provenance": "exact_name_postal;address_structural",
+                "best_blocker_rank": "1",
+                "best_blocker_score": "0.95",
+                "blocker_count": "2",
+            },
+            {
+                "source1_entity_id": "S1-2",
+                "candidate_entity_id": "S3-1",
+                "blocker_provenance": "token_inverted",
+                "best_blocker_rank": "3",
+                "best_blocker_score": "0.78",
+                "blocker_count": "1",
+            },
+        ])
+
+        s1_df.to_csv(s1_file, sep="\t", index=False)
+        s2_df.to_csv(s2_file, sep="\t", index=False)
+        s3_df.to_csv(s3_file, sep="\t", index=False)
+        cand_df.to_csv(cand_file, sep="\t", index=False)
+        prov_df.to_csv(prov_file, sep="\t", index=False)
+
+        records = pf_load_records([s1_file, s2_file, s3_file])
+        features = build_pair_features(
+            records=records,
+            candidate_file=cand_file,
+            output_file=out_file,
+            provenance_file=prov_file,
+        )
+
+        self.assertEqual(len(features), 2)
+        self.assertTrue(out_file.exists())
+
+        # Check provenance signals for pair 1
+        p1 = features[features["source1_entity_id"] == "S1-1"].iloc[0]
+        self.assertEqual(p1["candidate_rank"], 1.0)
+        self.assertEqual(p1["candidate_rank_missing"], 0)
+        self.assertEqual(p1["best_blocker_score"], 0.95)
+        self.assertEqual(p1["best_blocker_score_missing"], 0)
+        self.assertEqual(p1["blocker_count"], 2)
+        self.assertEqual(p1["country_equal"], 1)  # US vs USA alias folded
+        self.assertEqual(p1["source_is_s3"], 0)
+
+        # Check provenance signals for pair 2
+        p2 = features[features["source1_entity_id"] == "S1-2"].iloc[0]
+        self.assertEqual(p2["candidate_rank"], 3.0)
+        self.assertEqual(p2["candidate_rank_missing"], 0)
+        self.assertEqual(p2["best_blocker_score"], 0.78)
+        self.assertEqual(p2["best_blocker_score_missing"], 0)
+        self.assertEqual(p2["blocker_count"], 1)
+        self.assertEqual(p2["country_equal"], 1)  # India vs IN alias folded
+        self.assertEqual(p2["source_is_s3"], 1)
+
+    def test_layer0_normalized_records_compatibility(self):
+        """Verify pair_features transparently ingests Layer 0 normalized TSV schema."""
+        s1_file = self.dir_path / "s1_norm.tsv"
+        s2_file = self.dir_path / "s2_norm.tsv"
+        cand_file = self.dir_path / "cand.tsv"
+        out_file = self.dir_path / "features_norm.tsv"
+
+        s1_norm = pd.DataFrame([{
+            "entity_id": "S1-10",
+            "raw_name": "Walmart Supercenter",
+            "raw_address": "500 Terry Francois St",
+            "norm_name": "walmart supercenter",
+            "norm_address": "500 terry francois st",
+            "encoder_text": "walmart supercenter 500 terry francois st",
+            "country_canonical": "us",
+        }])
+        s2_norm = pd.DataFrame([{
+            "entity_id": "S2-10",
+            "raw_name": "Walmart",
+            "raw_address": "500 Terry Francois Street",
+            "norm_name": "walmart",
+            "norm_address": "500 terry francois st",
+            "encoder_text": "walmart 500 terry francois st",
+            "country_canonical": "us",
+        }])
+        cand_df = pd.DataFrame([{"source1_entity_id": "S1-10", "candidate_entity_ids": "S2-10"}])
+
+        s1_norm.to_csv(s1_file, sep="\t", index=False)
+        s2_norm.to_csv(s2_file, sep="\t", index=False)
+        cand_df.to_csv(cand_file, sep="\t", index=False)
+
+        records = pf_load_records([s1_file, s2_file])
+        self.assertIn("S1-10", records)
+        self.assertEqual(records["S1-10"]["canonical_country"], "us")
+
+        features = build_pair_features(records, cand_file, out_file)
+        self.assertEqual(len(features), 1)
+        row = features.iloc[0]
+        self.assertEqual(row["country_equal"], 1)
+        self.assertEqual(row["address_exact"], 1)
+
+
+class TestLayer2DenseAndEmbeddingContracts(unittest.TestCase):
+    """Test dense representation formatting, candidate deduplication, and loader invariants."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.dir_path = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_qwen_prompt_formatting(self):
+        """Verify Qwen format_entity_text treats both sides of the pair symmetrically."""
+        text = "acme inc 123 main street"
+        prompted = format_entity_text(text)
+        expected = f"Instruct: {DEFAULT_INSTRUCTION}\nText: {text}"
+        self.assertEqual(prompted, expected)
+
+    def test_load_candidates_deduplication(self):
+        """Verify load_candidates expands and deduplicates pairs accurately."""
+        cand_path = self.dir_path / "test_cands.tsv"
+        df = pd.DataFrame([
+            {"source1_entity_id": "S1-1", "candidate_entity_ids": "S2-1, S3-1, S2-1"},  # S2-1 duplicated
+            {"source1_entity_id": "S1-2", "candidate_entity_ids": "S2-2"},
+        ])
+        df.to_csv(cand_path, sep="\t", index=False)
+        pairs = load_candidates(cand_path)
+        self.assertEqual(len(pairs), 3)
+        self.assertEqual(pairs[0], ("S1-1", "S2-1"))
+        self.assertEqual(pairs[1], ("S1-1", "S3-1"))
+        self.assertEqual(pairs[2], ("S1-2", "S2-2"))
+
+    def test_bge_load_records_uses_encoder_text_when_present(self):
+        """Verify bge_load_records reuses pre-computed encoder_text from Layer 0 without recomputing."""
+        norm_path = self.dir_path / "norm.tsv"
+        df = pd.DataFrame([{
+            "entity_id": "S1-99",
+            "business_name": "Raw Name Inc",
+            "business_address": "Raw Address Blvd",
+            "encoder_text": "clean name 123 address",
+        }])
+        df.to_csv(norm_path, sep="\t", index=False)
+        recs = bge_load_records([norm_path])
+        self.assertEqual(recs["S1-99"], "clean name 123 address")
+
+
+@unittest.skipUnless(HAS_TORCH, "Requires torch (installed separately)")
+class TestLayer2EvaluationAndMetrics(unittest.TestCase):
+    """Test retrieval metrics, margin analysis, and go/no-go gate decisions."""
+
+    def test_compute_retrieval_metrics(self):
+        """Verify Recall@K and MRR computation against exact known rankings."""
+        # 2 queries, 3 corpus docs
+        # Q0 relevant to C0; Q1 relevant to C1
+        q_embs = np.array([
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ], dtype=np.float32)
+        c_embs = np.array([
+            [0.9, 0.1],  # C0: close to Q0
+            [0.1, 0.9],  # C1: close to Q1
+            [0.5, 0.5],  # C2: middle
+        ], dtype=np.float32)
+
+        query_ids = ["Q0", "Q1"]
+        corpus_ids = ["C0", "C1", "C2"]
+        relevant_docs = {"Q0": {"C0"}, "Q1": {"C1"}}
+
+        metrics = compute_retrieval_metrics(
+            query_embeddings=q_embs,
+            corpus_embeddings=c_embs,
+            query_ids=query_ids,
+            corpus_ids=corpus_ids,
+            relevant_docs=relevant_docs,
+            k_values=[1, 2, 5],
+        )
+
+        self.assertAlmostEqual(metrics["recall@1"], 1.0)
+        self.assertAlmostEqual(metrics["mrr"], 1.0)
+        self.assertAlmostEqual(metrics["precision@1"], 1.0)
+
+    def test_compute_margin_analysis(self):
+        """Verify score gap pass rate calculation."""
+        q_embs = np.array([[1.0, 0.0]], dtype=np.float32)
+        # Pos is C0 (dot=0.9), Neg is C1 (dot=0.6) -> margin = 0.30
+        c_embs = np.array([[0.9, 0.0], [0.6, 0.0]], dtype=np.float32)
+        margins = compute_margin_analysis(
+            query_embeddings=q_embs,
+            corpus_embeddings=c_embs,
+            query_ids=["Q0"],
+            corpus_ids=["C0", "C1"],
+            relevant_docs={"Q0": {"C0"}},
+            margin_thresholds=[0.10, 0.20, 0.35],
+        )
+
+        self.assertAlmostEqual(margins["mean_margin"], 0.30, places=4)
+        self.assertAlmostEqual(margins["margin_pass@0.10"], 1.0)
+        self.assertAlmostEqual(margins["margin_pass@0.20"], 1.0)
+        self.assertAlmostEqual(margins["margin_pass@0.35"], 0.0)
+
+    def test_evaluate_single_direction_gate_decision(self):
+        """Verify go/no-go gate threshold enforcement."""
+        class MockModel:
+            def encode(self, texts, **kwargs):
+                # Return dummy normalized unit vectors
+                return np.tile(np.array([1.0, 0.0], dtype=np.float32), (len(texts), 1))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            p = Path(tmp_dir)
+            with open(p / "eval_queries.json", "w") as f:
+                json.dump({"Q1": "Query 1"}, f)
+            with open(p / "eval_corpus.json", "w") as f:
+                json.dump({"C1": "Pos 1", "C2": "Neg 1"}, f)
+            with open(p / "eval_relevant.json", "w") as f:
+                json.dump({"Q1": ["C1"]}, f)
+
+            # Identical embeddings -> margin = 0.0 < 0.10 -> NO-GO expected on margin health
+            res = _evaluate_single_direction(
+                model=MockModel(),
+                base_model=None,
+                data_dir=str(p),
+                prefix="",
+                direction_name="test_dir",
+            )
+            self.assertEqual(res["decision"], "NO-GO")
+            self.assertTrue(any("Margin pass" in r for r in res["reasons"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

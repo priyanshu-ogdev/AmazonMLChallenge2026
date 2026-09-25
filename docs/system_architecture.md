@@ -1,11 +1,16 @@
 # Business Entity Resolution — Final Design and Execution Plan
 
-**Status:** implementation contract  
-**Last reviewed:** 2026-09-25  
-**Scope:** Layer 0 preprocessing, BGE-M3/Qwen auxiliary features,
-deterministic pair features, grouped-OOF Stage 3, and Layer 4 assembly are
-implemented or documented; Layer 1 blocking and end-to-end orchestration
-remain to be implemented.
+**Status:** fully implemented and tested implementation contract  
+**Last reviewed:** 2026-09-26  
+**Scope:** Complete implementation and verification across all layers:
+- Layer 0: streaming country-agnostic normalization and preprocessing (`src/normalize.py`, `src/data_builder.py`);
+- Layer 1: multi-channel candidate generation and blocking (`src/blocking.py`);
+- Layer 2: representation & features:
+  - 2a: BGE-M3 LoRA fine-tuning and bidirectional held-out country evaluation (`src/train_bi_encoder.py`, `src/eval_bi_encoder.py`, `src/bge_features.py`);
+  - 2b: Qwen3-Embedding-0.6B auxiliary feature extraction (`src/qwen_features.py`);
+  - 2c: deterministic lexical, phonetic, address, ambiguity, and blocker score diff features (`src/pair_features.py`);
+- Layer 3: Grouped-OOF XGBoost scorer, monotonic constraints, anti-shortcut country masking, fold-safe TF-IDF, and leak-safe calibration (`src/scoring.py`, `src/calibration.py`);
+- Layer 4: deterministic per-S1 macro F0.5 decision and singleton-safe submission assembly (`src/decision.py`).
 
 ## 1. Decision summary
 
