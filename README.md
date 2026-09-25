@@ -1,8 +1,8 @@
 # ML Challenge 2026 Problem Statement
 
 The finalized architecture and execution contract is documented in
-[`docs/00_system_architecture.md`](docs/00_system_architecture.md). The BGE-M3 module README
-documents the implemented Layer 2 feature components; the remaining stages
+[`docs/system_architecture.md`](docs/system_architecture.md). The BGE-M3 module README
+documents the implemented Stage 2 feature components; the remaining stages
 must follow that contract. For the complete documentation index and pipeline
 guide, see [`docs/README.md`](docs/README.md).
 

@@ -1,7 +1,7 @@
 # Layer 4 — Decision Policy and Submission Assembly
 
 **Status:** v1 deterministic implementation  
-**Implementation:** `src/stage4_decision.py`
+**Implementation:** `src/decision.py`
 
 ## Purpose
 

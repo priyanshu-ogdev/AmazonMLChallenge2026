@@ -19,7 +19,7 @@ class LoRAConfig:
     """
     LoRA adapter configuration for BGE-M3 dense head.
 
-    Rationale (from docs/04_stage2_features_and_embeddings.md):
+    Rationale (from docs/stage2_features_and_embeddings.md):
     - r=64: middle of the 32/64/128 sweep, chosen as a single committed value.
       Optimizer overhead (0.34GB) is negligible vs 10GB headroom on 3060.
     - lora_alpha=64 with use_rslora=True: rank-stabilized scaling (α/√r),
@@ -27,9 +27,9 @@ class LoRAConfig:
       ranks that biased Hu et al.'s original rank ablation (arXiv:2312.03732).
     - target_modules="all-linear": attention (query/key/value/dense) + FFN
       (intermediate.dense, output.dense), all layers. Never attention-only,
-      never top-N-only (docs/04_stage2_features_and_embeddings.md).
+      never top-N-only (docs/stage2_features_and_embeddings.md).
     - lora_dropout=0.1: middle of the 0.05-0.1 range
-      (docs/04_stage2_features_and_embeddings.md).
+      (docs/stage2_features_and_embeddings.md).
     - bias="none": standard LoRA practice, keeps trainable param count minimal.
     """
     r: int = 64
@@ -46,7 +46,7 @@ class TrainingConfig:
     """
     Training hyperparameters for the bi-encoder LoRA fine-tune.
 
-    From docs/04_stage2_features_and_embeddings.md "Stage 2a" section:
+    From docs/stage2_features_and_embeddings.md "Stage 2a" section:
     - physical_batch_size=48: mid-point of 32-64 range, fits in ~10GB headroom
     - mini_batch_size=16: GradCache chunk for CachedMultipleNegativesRankingLoss
     - max_seq_length=80: business name+address strings are short;
@@ -55,7 +55,7 @@ class TrainingConfig:
     - warmup_ratio=0.1: standard warmup
     - epochs=3: small labeled set — more risks overfitting
     - distillation_weight=0.10: mid-point of the 0.05-0.15 range
-      (docs/04_stage2_features_and_embeddings.md)
+      (docs/stage2_features_and_embeddings.md)
     """
     # Model
     model_name: str = "BAAI/bge-m3"
@@ -140,7 +140,7 @@ class EvalConfig:
     """
     Evaluation configuration for the held-out-country gate.
 
-    Protocol (from docs/04_stage2_features_and_embeddings.md):
+    Protocol (from docs/stage2_features_and_embeddings.md):
     - Train on US, validate on India (and reverse)
     - If held-out-country Recall@K is meaningfully worse than in-domain:
       raise distillation_weight or drop rank or fall back to off-the-shelf

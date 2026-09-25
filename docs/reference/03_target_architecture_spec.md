@@ -26,7 +26,7 @@ optimization only when both sides have a non-empty canonical value; missing or
 unknown-country records retain a global fallback. That final set — not an
 earlier pass — is exactly what gets written to `candidate_pairs.tsv`, and every
 ID in `matching_results.tsv` must appear there too. Concrete top-K, floor, and
-cap values, plus the scale plan, are in [`docs/03_stage1_blocking.md`](../03_stage1_blocking.md) and
+cap values, plus the scale plan, are in [`docs/stage1_blocking.md`](../stage1_blocking.md) and
 [`02_parameters_table.md`](02_parameters_table.md).
 
 **A dedicated blocking-recall audit gate is part of this stage, not an afterthought.** Because blocking sets the recall ceiling for everything downstream, its recall should be measured directly against `train_ground_truth` — what fraction of true matches actually appear somewhere in the unioned candidate set — sliced by country, before any time is spent tuning Stage 2 or 3. This is the one measurement in the whole pipeline where a bad result can't be compensated for later, so it's worth confirming first rather than discovering only after the matching stage has already been tuned around whatever recall blocking happened to produce. If recall comes in measurably worse for the held-out-country proxy than for the in-domain countries, the fix belongs here (strengthening phonetic/address-token blocking specifically) — not in the matching stage, which has no mechanism to recover an entity blocking never retrieved.

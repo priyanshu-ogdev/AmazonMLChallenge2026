@@ -89,7 +89,7 @@ except ImportError as e:
 
 # 7. Check pair_features
 try:
-    from src.pair_features import pair_feature_row, _record_features
+    from src.pair_features import pair_feature_row, build_pair_features
     print(f"\n[OK] src.pair_features")
 except ImportError as e:
     print(f"\n[NOTE] src.pair_features requires ({e})")
@@ -108,21 +108,21 @@ try:
 except ImportError as e:
     print(f"\n[NOTE] src.calibration requires scikit-learn ({e})")
 
-# 10. Check stage3_gbm
+# 10. Check scoring (GBM ranker)
 try:
-    from src.stage3_gbm import train_oof, run_training, choose_threshold
-    print(f"\n[OK] src.stage3_gbm")
+    from src.scoring import train_oof, run_training, choose_threshold, score_candidates
+    print(f"\n[OK] src.scoring")
 except ImportError as e:
-    print(f"\n[NOTE] src.stage3_gbm requires xgboost/pandas ({e})")
+    print(f"\n[NOTE] src.scoring requires xgboost/pandas ({e})")
 
-# 11. Check stage4_decision
+# 11. Check decision
 try:
-    from src.stage4_decision import assemble_matching_results
-    print(f"\n[OK] src.stage4_decision")
+    from src.decision import assemble_matching_results, load_source1_ids
+    print(f"\n[OK] src.decision")
 except ImportError as e:
-    print(f"\n[NOTE] src.stage4_decision requires pandas ({e})")
+    print(f"\n[NOTE] src.decision requires pandas ({e})")
 
-# 12. Quick data check if pandas is installed
+# 12. Quick data check
 try:
     import os
     import pandas as pd
@@ -146,3 +146,4 @@ except Exception as e:
 print("\n" + "=" * 65)
 print("MODULE CHECK COMPLETE — ALL SCRIPTS SYNTAX AND INTERFACE VALIDATED")
 print("=" * 65)
+

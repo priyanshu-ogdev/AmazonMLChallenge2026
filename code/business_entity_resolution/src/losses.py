@@ -10,7 +10,7 @@ Secondary loss: Self-distillation anchor loss
     Penalizes drift from the pretrained multilingual embedding space.
     This is the second layer of the anti-forgetting stack (after LoRA itself).
 
-Design decisions (from docs/04_stage2_features_and_embeddings.md):
+Design decisions (from docs/stage2_features_and_embeddings.md):
   - MNRL over raw triplet loss: triplet loss can cause severe collapse
     depending on LR/setup. MNRL optimizes ranking directly.
   - Self-distillation weight=0.10: mid-point of 0.05-0.15 range.

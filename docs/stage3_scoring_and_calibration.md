@@ -1,11 +1,11 @@
 # Layer 3 — Pair Scoring, Calibration, and Training Protocol
 
 **Status:** v1 baseline implementation  
-**Implementation:** `src/stage3_gbm.py`
+**Implementation:** `src/scoring.py`
 
 ## Purpose
 
-Layer 3 converts Layer 2 evidence into a pair-level match score. It does not
+Stage 3 converts Stage 2 evidence into a pair-level match score. It does not
 generate candidates and it does not decide the final list by itself. It must
 operate on the exact candidate pairs from `candidate_pairs.tsv`.
 
@@ -17,7 +17,7 @@ four details were unsafe for production:
 1. `StratifiedKFold` splits pairs rather than S1 entities, allowing the same
    entity's positives and negatives to leak between training and validation.
 2. Its feature names (`bi_encoder_cosine`, `name_levenshtein_sim`, etc.) did
-   not match the implemented Layer 2 schema.
+   not match the implemented Stage 2 schema.
 3. Its country gate hard-coded US and India instead of treating country as an
    open set.
 4. Focal loss and DART were presented too early. The first model must be a
@@ -29,7 +29,7 @@ small. There is never a pair-level split.
 
 ## Input and labeling
 
-`stage3_gbm.py` accepts the Stage 2c feature table and optionally the Qwen
+`scoring.py` accepts the Stage 2c feature table and optionally the Qwen
 feature table. It joins on:
 
 ```text
@@ -115,8 +115,8 @@ The final threshold is stored in the Stage 3 metadata and must be reused for
 test inference. Country- or source-specific thresholds are deferred until a
 grouped validation comparison proves a stable gain.
 
-Layer 4 applies this threshold and assembles the complete submission. Its
-contract is documented in [`06_stage4_decision_and_singletons.md`](06_stage4_decision_and_singletons.md).
+Stage 4 applies this threshold and assembles the complete submission. Its
+contract is documented in [`stage4_decision_and_singletons.md`](stage4_decision_and_singletons.md).
 
 ## Deferred escalation paths
 
@@ -150,14 +150,14 @@ The training command writes:
 - `stage3_metadata.json` — features, calibration, threshold, AUCPR, and fold diagnostics.
 
 The saved artifacts can be applied to an unseen candidate table with
-`src.stage3_gbm.score_candidates(...)`. This loads the recorded feature
+`src.scoring.score_candidates(...)`. This loads the recorded feature
 schema, applies the persisted Platt/isotonic parameters, and uses the saved
 threshold; it does not refit anything or infer a threshold from test data.
 
 Example:
 
 ```powershell
-python -m src.stage3_gbm `
+python -m src.scoring `
     --features ../../output/pair_features.tsv `
     --qwen-features ../../output/qwen_pair_features.tsv `
     --ground-truth ../../dataset/train/train_ground_truth.tsv `

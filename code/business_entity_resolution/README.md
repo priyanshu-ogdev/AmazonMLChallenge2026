@@ -2,16 +2,16 @@
 
 The authoritative end-to-end design, stage contracts, validation gates, Qwen
 ablation, and execution order are in
-[`../../docs/00_system_architecture.md`](../../docs/00_system_architecture.md). This README documents
+[`../../docs/system_architecture.md`](../../docs/system_architecture.md). This README documents
 the implemented Stage 2a/2b/2c modules and the Stage 3 scorer; blocking and final
-submission assembly are documented in the main pipeline docs. The detailed Layer 2 rationale is in
-[`../../docs/04_stage2_features_and_embeddings.md`](../../docs/04_stage2_features_and_embeddings.md).
+submission assembly are documented in the main pipeline docs. The detailed Stage 2 rationale is in
+[`../../docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md).
 The Stage 3 training contract is in
-[`../../docs/05_stage3_scoring_and_calibration.md`](../../docs/05_stage3_scoring_and_calibration.md).
+[`../../docs/stage3_scoring_and_calibration.md`](../../docs/stage3_scoring_and_calibration.md).
 Calibration utilities are isolated in `src/calibration.py` and can be
-validated independently of the XGBoost scorer.
-Stage 4 submission assembly is implemented in `src/stage4_decision.py`; it
-preserves empty rows for S1 entities with no accepted matches (see [`../../docs/06_stage4_decision_and_singletons.md`](../../docs/06_stage4_decision_and_singletons.md)).
+validated independently of the XGBoost scorer (`src/scoring.py`).
+Stage 4 submission assembly is implemented in `src/decision.py`; it
+preserves empty rows for S1 entities with no accepted matches (see [`../../docs/stage4_decision_and_singletons.md`](../../docs/stage4_decision_and_singletons.md)).
 
 ## Overview
 
@@ -144,14 +144,14 @@ All parameters are in `src/config.py` with detailed rationale comments. Key valu
 
 | Parameter | Value | Source |
 |-----------|-------|--------|
-| LoRA rank | 64 | [`docs/04_stage2_features_and_embeddings.md`](../../docs/04_stage2_features_and_embeddings.md) |
-| LoRA alpha | 64 (with rsLoRA → effective 8) | [`docs/04_stage2_features_and_embeddings.md`](../../docs/04_stage2_features_and_embeddings.md) |
-| Target modules | all-linear | [`docs/04_stage2_features_and_embeddings.md`](../../docs/04_stage2_features_and_embeddings.md) |
-| Learning rate | 2e-5 | [`docs/04_stage2_features_and_embeddings.md`](../../docs/04_stage2_features_and_embeddings.md) |
-| Batch size | 48 (physical) / 16 (mini-batch) | [`docs/04_stage2_features_and_embeddings.md`](../../docs/04_stage2_features_and_embeddings.md) |
-| Max seq length | 80 | [`docs/04_stage2_features_and_embeddings.md`](../../docs/04_stage2_features_and_embeddings.md) |
-| Epochs | 3 | [`docs/04_stage2_features_and_embeddings.md`](../../docs/04_stage2_features_and_embeddings.md) |
-| Distillation weight | 0.10 | [`docs/04_stage2_features_and_embeddings.md`](../../docs/04_stage2_features_and_embeddings.md) |
+| LoRA rank | 64 | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
+| LoRA alpha | 64 (with rsLoRA → effective 8) | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
+| Target modules | all-linear | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
+| Learning rate | 2e-5 | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
+| Batch size | 48 (physical) / 16 (mini-batch) | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
+| Max seq length | 80 | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
+| Epochs | 3 | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
+| Distillation weight | 0.10 | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
 
 ## Troubleshooting
 
