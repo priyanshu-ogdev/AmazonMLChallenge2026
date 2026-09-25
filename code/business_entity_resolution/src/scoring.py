@@ -836,10 +836,13 @@ def run_training(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train Stage 3 grouped GBM")
-    parser.add_argument("--features", type=Path, required=True)
-    parser.add_argument("--ground-truth", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser = argparse.ArgumentParser(description="Stage 3 Grouped GBM Training and Candidate Scoring")
+    parser.add_argument("--mode", choices=["train", "score"], default="train", help="Operation mode (default: train)")
+    parser.add_argument("--features", type=Path, required=True, help="Input pair features TSV")
+    parser.add_argument("--ground-truth", type=Path, default=None, help="Path to ground truth TSV (required for train)")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Directory for model artifacts (train)")
+    parser.add_argument("--artifact-dir", type=Path, default=None, help="Directory containing saved model artifacts (score)")
+    parser.add_argument("--output-file", type=Path, default=None, help="Path for scored output TSV (score)")
     parser.add_argument("--qwen-features", type=Path, default=None)
     parser.add_argument("--bge-features", type=Path, default=None)
     parser.add_argument("--source1", type=Path, nargs="+", default=None)
@@ -849,19 +852,42 @@ def main() -> None:
     parser.add_argument("--country-mask-rate", type=float, default=0.15)
     parser.add_argument("--use-monotone-constraints", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(run_training(
-        feature_file=args.features,
-        ground_truth_file=args.ground_truth,
-        output_dir=args.output_dir,
-        qwen_file=args.qwen_features,
-        bge_file=args.bge_features,
-        source1_files=args.source1,
-        candidate_source_files=args.candidate_sources,
-        booster=args.booster,
-        eta=args.eta,
-        country_mask_rate=args.country_mask_rate,
-        use_monotone_constraints=args.use_monotone_constraints,
-    ), indent=2))
+
+    records = None
+    if args.source1 and args.candidate_sources:
+        from src.bge_features import load_records as load_entity_records
+        records = load_entity_records(list(args.source1) + list(args.candidate_sources))
+
+    if args.mode == "train":
+        if args.ground_truth is None or args.output_dir is None:
+            parser.error("--ground-truth and --output-dir are required when --mode train")
+        print(json.dumps(run_training(
+            feature_file=args.features,
+            ground_truth_file=args.ground_truth,
+            output_dir=args.output_dir,
+            qwen_file=args.qwen_features,
+            bge_file=args.bge_features,
+            source1_files=args.source1,
+            candidate_source_files=args.candidate_sources,
+            booster=args.booster,
+            eta=args.eta,
+            country_mask_rate=args.country_mask_rate,
+            use_monotone_constraints=args.use_monotone_constraints,
+        ), indent=2))
+    elif args.mode == "score":
+        artifact_dir = args.artifact_dir or args.output_dir
+        if artifact_dir is None or args.output_file is None:
+            parser.error("--artifact-dir and --output-file are required when --mode score")
+        scored = score_candidates(
+            feature_file=args.features,
+            artifact_dir=artifact_dir,
+            qwen_file=args.qwen_features,
+            bge_file=args.bge_features,
+            records=records,
+        )
+        args.output_file.parent.mkdir(parents=True, exist_ok=True)
+        scored.to_csv(args.output_file, sep="\t", index=False)
+        print(f"Scored {len(scored)} candidate pairs -> {args.output_file}")
 
 
 if __name__ == "__main__":
