@@ -172,7 +172,7 @@ class TestDownstreamContracts(unittest.TestCase):
 
         # Row with missing provenance
         row_noprov = pair_feature_row(rec1, rec2)
-        self.assertEqual(row_noprov["candidate_rank"], -1.0)
+        self.assertEqual(row_noprov["candidate_rank"], 999.0)
         self.assertEqual(row_noprov["candidate_rank_missing"], 1)
         self.assertEqual(row_noprov["best_blocker_score"], -1.0)
         self.assertEqual(row_noprov["best_blocker_score_missing"], 1)

@@ -537,6 +537,7 @@ class DenseRetrievalIndex:
             self.s1_embeddings = {}
 
         self.partition_indices: Dict[str, List[int]] = defaultdict(list)
+        self.partition_embs: Dict[str, Any] = {}
         self.faiss_indexes: Dict[str, Any] = {}
         try:
             import faiss
@@ -555,6 +556,8 @@ class DenseRetrievalIndex:
                 index = faiss.IndexFlatIP(dim)
                 index.add(sub_embs)
                 self.faiss_indexes[country] = (index, idxs)
+            elif len(idxs) > 0:
+                self.partition_embs[country] = self.candidate_embs[idxs]
 
     def query(self, s1_id: str, country: str, top_k: int = 50) -> Dict[str, float]:
         emb = self.s1_embeddings.get(s1_id)
@@ -578,7 +581,9 @@ class DenseRetrievalIndex:
             idxs = self.partition_indices[country]
             if not idxs:
                 return {}
-            sub_embs = self.candidate_embs[idxs]
+            sub_embs = self.partition_embs.get(country)
+            if sub_embs is None:
+                sub_embs = self.candidate_embs[idxs]
             dots = np.dot(sub_embs, emb)
             top_order = np.argsort(-dots)[:top_k]
             scores = {}

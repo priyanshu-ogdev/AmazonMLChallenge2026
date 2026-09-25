@@ -84,6 +84,7 @@ def _record_features(record: Dict[str, str]) -> Dict[str, object]:
     address = normalize_address(record.get("business_address", ""))
     raw_country = record.get("country", "")
     canonical_country = record.get("canonical_country") or canonicalize_country(raw_country)
+    raw_addr = record.get("raw_address") or record.get("business_address", "")
     return {
         "entity_id": record["entity_id"],
         "country": raw_country,
@@ -94,7 +95,7 @@ def _record_features(record: Dict[str, str]) -> Dict[str, object]:
         "address_tokens": _tokens(address),
         "name_numbers": _numeric_tokens(name),
         "address_numbers": _numeric_tokens(address),
-        "postal": extract_postal_code(address),
+        "postal": extract_postal_code(raw_addr),
         "name_trigrams": _char_trigrams(name),
         "address_trigrams": _char_trigrams(address),
     }
@@ -167,8 +168,8 @@ def pair_feature_row(
         "address_char_trigram_jaccard": _jaccard(
             left["address_trigrams"], right["address_trigrams"]
         ),
-        "name_number_overlap": _jaccard(name_numbers_left, name_numbers_right),
-        "address_number_overlap": _jaccard(
+        "name_number_overlap": _overlap(name_numbers_left, name_numbers_right),
+        "address_number_overlap": _overlap(
             address_numbers_left, address_numbers_right
         ),
         "postal_equal": int(
@@ -193,9 +194,12 @@ def pair_feature_row(
             and bool(name_right)
             and name_left != name_right
         ),
-        "candidate_rank": -1.0 if left_rank is None else float(left_rank),
+        # candidate_rank is monotonic-decreasing (-1 constraint). Missing values
+        # use 999.0 (worse than any real rank) to prevent the constraint from treating
+        # missing ranks as superior to rank 0.
+        "candidate_rank": 999.0 if left_rank is None else float(left_rank),
         "candidate_rank_missing": int(left_rank is None),
-        "rank_margin_from_best": -1.0 if left_rank is None else max(0.0, float(left_rank) - 1.0),
+        "rank_margin_from_best": 999.0 if left_rank is None else max(0.0, float(left_rank) - 1.0),
         "best_blocker_score": -1.0 if best_score is None else float(best_score),
         "best_blocker_score_missing": int(best_score is None),
         "best_blocker_score_diff": 0.0 if score_margin_to_best is None else float(score_margin_to_best),

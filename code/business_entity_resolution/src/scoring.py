@@ -293,6 +293,7 @@ def macro_f05(
     labels: Sequence[int],
     threshold: float,
     all_source1_ids: Optional[Sequence[str]] = None,
+    ground_truth: Optional[Dict[str, Set[str]]] = None,
 ) -> float:
     if len(source1_ids) != len(scores) or len(scores) != len(labels):
         raise ValueError("source1_ids, scores, and labels must have equal length")
@@ -303,18 +304,39 @@ def macro_f05(
     grouped: Dict[str, List[Tuple[float, int]]] = {}
     for entity_id, score, label in zip(source1_ids, scores, labels):
         grouped.setdefault(entity_id, []).append((float(score), int(label)))
-    if all_source1_ids is not None:
+    if ground_truth is not None:
+        for entity_id in ground_truth:
+            grouped.setdefault(entity_id, [])
+    elif all_source1_ids is not None:
         for entity_id in all_source1_ids:
             grouped.setdefault(entity_id, [])
     entity_scores = []
-    for pairs in grouped.values():
+    for entity_id, pairs in grouped.items():
         predicted = {i for i, (score, _) in enumerate(pairs) if score >= threshold}
-        actual = {i for i, (_, label) in enumerate(pairs) if label == 1}
-        if not predicted and not actual:
+        # When ground_truth is provided, use the true ground-truth match count for the entity.
+        # This prevents awarding 1.0 to entities that blocking completely failed to retrieve.
+        if ground_truth is not None and entity_id in ground_truth:
+            actual_count = len(ground_truth[entity_id])
+        else:
+            actual_count = sum(1 for _, label in pairs if label == 1)
+        pred_count = len(predicted)
+        tp = sum(1 for i in predicted if pairs[i][1] == 1)
+
+        if pred_count == 0 and actual_count == 0:
+            # True singleton correctly matched with zero candidates
             entity_scores.append(1.0)
             continue
-        precision = len(predicted & actual) / len(predicted) if predicted else 0.0
-        recall = len(predicted & actual) / len(actual) if actual else 0.0
+        if pred_count == 0 and actual_count > 0:
+            # Entity has true matches but none were predicted (blocking miss or threshold cut)
+            entity_scores.append(0.0)
+            continue
+        if pred_count > 0 and actual_count == 0:
+            # Predicted matches for a true singleton (precision = 0)
+            entity_scores.append(0.0)
+            continue
+
+        precision = tp / pred_count if pred_count else 0.0
+        recall = tp / actual_count if actual_count else 0.0
         entity_scores.append(
             (1.25 * precision * recall / (0.25 * precision + recall))
             if precision + recall > 0
@@ -327,6 +349,7 @@ def choose_threshold(
     frame: pd.DataFrame,
     scores: np.ndarray,
     all_source1_ids: Optional[Sequence[str]] = None,
+    ground_truth: Optional[Dict[str, Set[str]]] = None,
 ) -> Tuple[float, float]:
     if "source1_entity_id" not in frame or "label" not in frame:
         raise ValueError("threshold frame must contain source1_entity_id and label")
@@ -343,6 +366,7 @@ def choose_threshold(
             frame["label"],
             threshold,
             all_source1_ids=all_source1_ids,
+            ground_truth=ground_truth,
         )
         for threshold in candidates
     ]
@@ -749,7 +773,7 @@ def run_training(
     )
     calibrated = apply_calibrator(calibrator, oof["oof_score"].to_numpy())
     threshold, f05 = choose_threshold(
-        oof, calibrated, all_source1_ids=list(ground_truth)
+        oof, calibrated, ground_truth=ground_truth
     )
     best_iters = [
         fold["best_iteration"]

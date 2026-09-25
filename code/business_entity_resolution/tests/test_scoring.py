@@ -128,6 +128,90 @@ class TestStage3Scoring(unittest.TestCase):
         self.assertLessEqual(threshold, 1.0)
         self.assertGreater(best_f05, 0.0)
 
+    def test_macro_f05_blocking_miss_vs_singleton(self):
+        """Verify macro_f05 correctly gives 0.0 to blocking misses and 1.0 to true singletons."""
+        source1_ids = ["S1-hit"]
+        scores = [0.9]
+        labels = [1]
+
+        # Ground truth:
+        # S1-hit has 1 match (retrieved and predicted)
+        # S1-miss has 1 match (NOT in candidates - blocking miss)
+        # S1-singleton has 0 matches (true singleton)
+        gt = {
+            "S1-hit": {"S2-hit"},
+            "S1-miss": {"S2-miss"},
+            "S1-singleton": set(),
+        }
+
+        # With ground_truth:
+        # S1-hit -> score 1.0 (tp=1, pred=1, act=1)
+        # S1-miss -> score 0.0 (blocking miss, pred=0, act=1)
+        # S1-singleton -> score 1.0 (true singleton, pred=0, act=0)
+        # Overall macro_f05 = (1.0 + 0.0 + 1.0) / 3 = 2/3
+        f05_with_gt = macro_f05(
+            source1_ids=source1_ids,
+            scores=scores,
+            labels=labels,
+            threshold=0.5,
+            ground_truth=gt,
+        )
+        self.assertAlmostEqual(f05_with_gt, 2.0 / 3.0)
+
+        # Contrast with legacy all_source1_ids where blocking miss was erroneously scored 1.0
+        f05_legacy = macro_f05(
+            source1_ids=source1_ids,
+            scores=scores,
+            labels=labels,
+            threshold=0.5,
+            all_source1_ids=list(gt.keys()),
+        )
+        self.assertAlmostEqual(f05_legacy, 1.0)
+
+    def test_macro_f05_partial_blocking_recall(self):
+        """Verify macro_f05 evaluates recall against true GT count, not retrieved count."""
+        source1_ids = ["S1-1"]
+        scores = [0.85]
+        labels = [1]
+
+        # S1-1 has 2 ground truth matches, but blocking only retrieved 1
+        gt = {
+            "S1-1": {"S2-1", "S2-2"}
+        }
+
+        # tp = 1, pred = 1, act = 2
+        # precision = 1.0, recall = 0.5
+        # F0.5 = 1.25 * 1.0 * 0.5 / (0.25 * 1.0 + 0.5) = 0.625 / 0.75 = 5/6
+        f05 = macro_f05(
+            source1_ids=source1_ids,
+            scores=scores,
+            labels=labels,
+            threshold=0.5,
+            ground_truth=gt,
+        )
+        self.assertAlmostEqual(f05, 5.0 / 6.0)
+
+    def test_choose_threshold_with_ground_truth(self):
+        """Verify choose_threshold correctly optimizes threshold with ground_truth dictionary."""
+        frame = pd.DataFrame({
+            "source1_entity_id": ["S1-1", "S1-2", "S1-3"],
+            "label": [1, 0, 1],
+        })
+        scores = np.array([0.92, 0.15, 0.88])
+        gt = {
+            "S1-1": {"S2-1"},
+            "S1-2": set(),
+            "S1-3": {"S2-3"},
+            "S1-miss": {"S2-miss"},  # blocking miss
+            "S1-singleton": set(),   # singleton
+        }
+
+        threshold, best_f05 = choose_threshold(frame, scores, ground_truth=gt)
+        self.assertGreaterEqual(threshold, 0.0)
+        self.assertLessEqual(threshold, 1.0)
+        self.assertGreater(best_f05, 0.0)
+        self.assertLess(best_f05, 1.0)  # Cannot be 1.0 because S1-miss is 0.0
+
     def test_run_training_and_score_candidates_end_to_end(self):
         """End-to-end integration test of Stage 3 training and test scoring."""
         # 1. Prepare synthetic pair features
