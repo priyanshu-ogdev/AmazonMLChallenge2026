@@ -1,0 +1,72 @@
+# =============================================================================
+# Amazon ML Challenge 2026 - .gitignore
+# =============================================================================
+
+# Datasets & Large Data Files (Exceeds GitHub limits)
+dataset/
+data/
+*.tsv
+*.csv
+*.parquet
+*.feather
+*.arrow
+*.h5
+*.hdf5
+*.jsonl
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Model Checkpoints & Large Weights
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+*.pkl
+*.pickle
+checkpoints/
+models/
+saved_models/
+weights/
+
+# Experiment Tracking & Logs
+wandb/
+runs/
+logs/
+*.log
+tensorboard/
+
+# Outputs, Cache & Submission Archives
+output/
+submissions/
+*.zip
+*.tar.gz
+*.rar
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Operating System & IDE Files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
