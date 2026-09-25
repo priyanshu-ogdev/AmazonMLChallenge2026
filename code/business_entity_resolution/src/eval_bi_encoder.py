@@ -5,7 +5,7 @@ This is the GO/NO-GO GATE: if the fine-tuned model's retrieval quality
 on the held-out country is meaningfully worse than in-domain, the
 anti-forgetting stack is insufficient and the fine-tune should not be trusted.
 
-Protocol (from docs/stage2_features_and_embeddings.md):
+Protocol (from docs/06_stage2a_bge_m3_training_spec.md):
 1. Load the fine-tuned bi-encoder
 2. Encode eval queries (held-out country S1 entities)
 3. Encode eval corpus (held-out country S2/S3 entities)
@@ -155,7 +155,7 @@ def compute_margin_analysis(
     Margin analysis: what fraction of queries have a positive pair
     scoring higher than the hardest negative by at least `margin`.
 
-    This is the cheap proxy evaluation from docs/stage2_features_and_embeddings.md:
+    This is the cheap proxy evaluation from docs/06_stage2a_bge_m3_training_spec.md:
     "margin/score-gap pass rate drives early stopping within a run"
     """
     if margin_thresholds is None:

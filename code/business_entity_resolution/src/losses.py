@@ -12,7 +12,7 @@ Secondary loss: Self-distillation anchor loss
     Penalizes drift from the pretrained multilingual embedding space.
     This is the second layer of the anti-forgetting stack (after LoRA itself).
 
-Design decisions (from docs/stage2_features_and_embeddings.md):
+Design decisions (from docs/06_stage2a_bge_m3_training_spec.md):
   - CachedMNRL over raw triplet loss: MNRL optimizes ranking directly and
     avoids triplet collapse. GradCache further decouples effective batch size
     from VRAM by processing activations in mini_batch_size windows.

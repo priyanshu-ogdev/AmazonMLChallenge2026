@@ -12,7 +12,7 @@ This comprehensive review audits the entire dataset across **7 TSV files** compr
 | Dimension | Key Discovery | Architectural Impact |
 |:---|:---|:---|
 | **Total Scale** | 12.5M train records + 11.7M test records across 3 independent sources. | In-memory operations on the full dataset cause OOM. All pipelines must use chunked / streaming I/O or disk-backed SQLite/DuckDB. |
-| **Ground Truth Topology** | **5.58% singletons** (123,247 entities); **94.42% matched** (2,083,574 entities). Average 3.67 matches/entity (max 11). | Singletons score 1.0 if empty and 0.0 if any match is predicted. High precision threshold is required to protect singletons under macro F0.5. |
+| **Ground Truth Topology** | **5.58% singletons** (123,247 entities); **94.42% matched** (2,083,574 entities). Average 3.67 matches/entity (max 11). | Singletons score 1.0 if empty and 0.0 if any match is predicted. High precision threshold is required to protect singletons under macro $F_{0.5}$. |
 | **Injective Matching (1:N)** | **0 instances** of an S2 or S3 entity matching multiple S1 entities (`s2_multi=0`, `s3_multi=0`). | Strict 1-to-N matching constraint: an S2 or S3 record belongs to at most ONE S1 entity. Enforcing mutual exclusivity boosts precision. |
 | **Geographic Shift** | **France exists ONLY in test** (15.0% of test S1 = 259,452 entities). India jumps from 40.0% in train to 46.8% in test. | Models trained purely on US/Indian text will fail on France. Pre-trained multilingual embeddings (BGE-M3/XLM-RoBERTa) and French rules are mandatory. |
 | **Missing Addresses** | **0.0% missing in S1**, but **~3.3% missing in S2 and S3** (~610,389 records total). | Addressing missing values gracefully is mandatory. Fallback to name-only matching when address is empty, with indicator features. |
@@ -132,11 +132,12 @@ For the 2,083,574 matched S1 entities:
 | **Test S2** | 25.6 (25.0) | 41.0 (68) | 3.6 (5.0) | 50.5 (43.0) | 99.0 (213) | 7.8 (15.0) |
 | **Test S3** | 25.6 (25.0) | 42.0 (82) | 3.6 (6.0) | 48.9 (43.0) | 94.0 (199) | 7.5 (15.0) |
 
-### Sequence Length Budget for Transformer Bi-Encoder:
+### Sequence Length Budget for Transformer Models:
 - The 99th percentile total character length for Name + Address combined is **~160 characters**.
 - Average word count for Name + Address combined is **11.5 words**; 99th percentile is **~22 words**.
 - With WordPiece / BPE tokenization, 22 words corresponds to **~28 to 36 tokens**.
-- Setting `max_seq_length = 128` in BGE-M3 captures **100% of all business names and addresses without any truncation** while maintaining high throughput.
+- For Bi-Encoder (BGE-M3): Setting `max_seq_length = 80` (or `96`) captures **100% of all business names and addresses without any truncation** while maximizing mini-batch size.
+- For Cross-Record Generative Matcher (Qwen3-0.6B): A full serialized pair prompt with instruction overhead reaches $\approx 159$ tokens (median) and $\approx 205$ tokens (P99 extremes). Capping sequence length at $S = 224$ tokens completely encloses $>99.7\%$ of all candidate pairs without truncation.
 
 ---
 
@@ -214,25 +215,23 @@ When using a `Name Token Jaccard` threshold for candidate blocking:
 - At threshold **0.4**: Captures **73.1%** of true matches; retains 0.1% of random negatives.
 
 > [!TIP]
-> **Multi-Channel Blocking is Essential:** Relying solely on token Jaccard misses abbreviations (`Corp` vs `Corporation`, acronyms like `IBM` vs `International Business Machines`). A 3-channel blocking strategy (Country Partition + BM25/TF-IDF Sparse + BGE-M3 Dense Annoy/FAISS) reaches **>98.5% recall ceiling** while keeping candidate pairs under 50 per entity.
+> **Multi-Channel Blocking is Essential:** Relying solely on token Jaccard misses abbreviations (`Corp` vs `Corporation`, acronyms like `IBM` vs `International Business Machines`). A 3-channel blocking strategy (Country Partition + Exact Name Token / Phonetic + Char TF-IDF + BGE-M3 Dense ANN) reaches **>98.5% recall ceiling** while keeping candidate pairs under 100 per entity.
 
 ---
 
-## 9. Comprehensive Cleaning & Preprocessing Blueprint
-
-Based on this audit, here is the end-to-end data cleaning and preprocessing pipeline required before blocking and matching:
+## 9. Comprehensive Preprocessing & Architectural Mapping
 
 ```mermaid
 flowchart TD
     A["Raw TSV Record"] --> B["Step 1: Unicode Normalization (NFKC)"]
     B --> C["Step 2: Casing & Whitespace Normalization"]
     C --> D["Step 3: Missing Address Sentinel Imputation"]
-    D --> E["Step 4: Country-Specific Legal Suffix Standardization"]
+    D --> E["Step 4: Country-Agnostic Legal Suffix Standardization"]
     E --> F["Step 5: Address Component Parsing & Abbreviation Expansion"]
-    F --> G["Step 6: Normalized Representation for Bi-Encoder & BM25"]
+    F --> G["Step 6: Normalized Representation for Bi-Encoder & Stage 1"]
 ```
 
-### Detailed Preprocessing Steps:
+### Detailed Preprocessing Rules:
 
 #### Step 1: Unicode & Diacritic Handling
 - Apply `unicodedata.normalize('NFKC', text)` to standardize all ligatures, full-width characters, and compatibility characters.
@@ -240,7 +239,7 @@ flowchart TD
 - Replace typographic apostrophes (`’`, `‘`, `‚`) with standard ASCII apostrophes (`'`).
 
 #### Step 2: Casing & Whitespace Hygiene
-- Convert text to lowercase for lexical/token-based matching (BM25, Jaccard, Levenshtein).
+- Convert text to lowercase for lexical/token-based matching (char TF-IDF, Jaccard, Levenshtein).
 - Retain case-preserved text for dense Transformer embeddings (helps distinguish acronyms like `CAT` vs `cat`).
 - Remove redundant whitespace, tabs, and non-printable control characters (`\r`, `\x00-\x1f`).
 
@@ -257,39 +256,15 @@ flowchart TD
 
 #### Step 4: Legal Form / Suffix Standardization
 Businesses frequently appear with different legal suffix variations:
-- **US Patterns:**
-  - `incorporated` -> `inc`
-  - `corporation` / `corp.` -> `corp`
-  - `limited liability company` / `l.l.c.` -> `llc`
-  - `company` / `co.` -> `co`
-- **India Patterns:**
-  - `private limited` / `pvt. ltd.` / `p. ltd.` -> `pvt ltd`
-  - `limited` / `ltd.` -> `ltd`
-  - `limited liability partnership` -> `llp`
-- **France Patterns:**
-  - `société à responsabilité limitée` / `s.a.r.l.` -> `sarl`
-  - `société par actions simplifiée` / `s.a.s.` -> `sas`
-  - `société anonyme` / `s.a.` -> `sa`
-  - `entreprise unipersonnelle à responsabilité limitée` -> `eurl`
+- **US Patterns:** `incorporated` $\rightarrow$ `inc`, `corporation` / `corp.` $\rightarrow$ `corp`, `limited liability company` / `l.l.c.` $\rightarrow$ `llc`, `company` / `co.` $\rightarrow$ `co`.
+- **India Patterns:** `private limited` / `pvt. ltd.` / `p. ltd.` $\rightarrow$ `pvt ltd`, `limited` / `ltd.` $\rightarrow$ `ltd`, `limited liability partnership` $\rightarrow$ `llp`.
+- **France Patterns:** `société à responsabilité limitée` / `s.a.r.l.` $\rightarrow$ `sarl`, `société par actions simplifiée` / `s.a.s.` $\rightarrow$ `sas`, `société anonyme` / `s.a.` $\rightarrow$ `sa`, `entreprise unipersonnelle à responsabilité limitée` $\rightarrow$ `eurl`.
 
 #### Step 5: Address Normalization & Expansion
-- **Common Street Suffixes:**
-  - `st` / `st.` -> `street`
-  - `rd` / `rd.` -> `road`
-  - `ave` / `ave.` -> `avenue`
-  - `blvd` / `blvd.` -> `boulevard`
-  - `dr` / `dr.` -> `drive`
-  - `ste` / `ste.` -> `suite`
-  - `apt` / `apt.` -> `apartment`
-- **India-Specific Address Signals:**
-  - Standardize `opp` / `opp.` / `opposite to` -> `opposite`
-  - Standardize `nr` / `nr.` -> `near`
-  - Extract 6-digit Indian PIN codes using regex `r'\b[1-9][0-9]{5}\b'`.
-- **France-Specific Address Signals:**
-  - Standardize `bd` -> `boulevard`, `r.` -> `rue`, `av.` -> `avenue`.
-  - Extract 5-digit French Code Postal using regex `r'\b[0-9]{5}\b'`.
-- **US-Specific Address Signals:**
-  - Extract 5-digit ZIP codes using regex `r'\b[0-9]{5}(?:-[0-9]{4})?\b'`.
+- **Common Street Suffixes:** `st` / `st.` $\rightarrow$ `street`, `rd` / `rd.` $\rightarrow$ `road`, `ave` / `ave.` $\rightarrow$ `avenue`, `blvd` / `blvd.` $\rightarrow$ `boulevard`, `dr` / `dr.` $\rightarrow$ `drive`, `ste` / `ste.` $\rightarrow$ `suite`, `apt` / `apt.` $\rightarrow$ `apartment`.
+- **India-Specific Address Signals:** Standardize `opp` / `opp.` / `opposite to` $\rightarrow$ `opposite`, `nr` / `nr.` $\rightarrow$ `near`. Extract 6-digit Indian PIN codes using regex `r'\b[1-9][0-9]{5}\b'`.
+- **France-Specific Address Signals:** Standardize `bd` $\rightarrow$ `boulevard`, `r.` $\rightarrow$ `rue`, `av.` $\rightarrow$ `avenue`. Extract 5-digit French Code Postal using regex `r'\b[0-9]{5}\b'`.
+- **US-Specific Address Signals:** Extract 5-digit ZIP codes using regex `r'\b[0-9]{5}(?:-[0-9]{4})?\b'`.
 
 #### Step 6: Injective Post-Processing (1:N Mutual Exclusivity)
 Because our ground truth audit proved that **no S2 or S3 entity is ever shared across multiple S1 entities**, implement a greedy 1-to-N assignment or bipartite maximum weight matching during inference:
@@ -300,12 +275,3 @@ Because our ground truth audit proved that **no S2 or S3 entity is ever shared a
      - Assign `candidate_id` to `s1_id`.
      - `claimed_targets.add(candidate_id)`
 4. This strictly prevents multi-merge errors on distractors and guarantees valid entity partitioning.
-
----
-
-## 10. Conclusion & Next Steps
-
-1. **Cleaned Text Pipeline:** Implement `normalize_text()` incorporating Unicode NFKC, French diacritic retention, legal suffix standardization, and missing address imputation.
-2. **Blocking Setup:** Hard partition by `country`, followed by dense BGE-M3 ANN retrieval + sparse BM25 retrieval.
-3. **Training Strategy:** LoRA fine-tuning of BGE-M3 on held-out country split (India held out to simulate France zero-shot transfer) using `CachedMultipleNegativesRankingLoss`.
-4. **Post-Processing:** Apply precision-oriented probability thresholding ($\tau \approx 0.65 - 0.75$) combined with injective assignment to maximize macro $F_{0.5}$.

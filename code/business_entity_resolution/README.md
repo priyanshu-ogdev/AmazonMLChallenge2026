@@ -2,20 +2,20 @@
 
 The authoritative end-to-end design, stage contracts, validation gates, Qwen
 ablation, and execution order are in
-[`../../docs/system_architecture.md`](../../docs/system_architecture.md). This README documents
+[`../../docs/02_system_architecture.md`](../../docs/02_system_architecture.md). This README documents
 the implemented Stage 2a/2b/2c modules and the Stage 3 scorer; blocking and final
-submission assembly are documented in the main pipeline docs. The detailed Stage 2 rationale is in
-[`../../docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md).
+submission assembly are documented in the main pipeline docs. The detailed Stage 2 feature specification is in
+[`../../docs/05_stage2_features_and_embeddings.md`](../../docs/05_stage2_features_and_embeddings.md).
 The Stage 3 training contract is in
-[`../../docs/stage3_scoring_and_calibration.md`](../../docs/stage3_scoring_and_calibration.md).
+[`../../docs/08_stage3_scoring_and_calibration.md`](../../docs/08_stage3_scoring_and_calibration.md).
 Calibration utilities are isolated in `src/calibration.py` and can be
 validated independently of the XGBoost scorer (`src/scoring.py`).
 Stage 4 submission assembly is implemented in `src/decision.py`; it
-preserves empty rows for S1 entities with no accepted matches (see [`../../docs/stage4_decision_and_singletons.md`](../../docs/stage4_decision_and_singletons.md)).
+preserves empty rows for S1 entities with no accepted matches (see [`../../docs/09_stage4_decision_and_singletons.md`](../../docs/09_stage4_decision_and_singletons.md)).
 
 ## Overview
 
-This module fine-tunes **BGE-M3's encoder** (568M params, XLM-RoBERTa-based, MIT license) with **LoRA rank-64** for business entity resolution. The fine-tuned model produces embeddings for Stage 2a-i of the entity resolution pipeline, providing cosine similarity scores between S1 entities and S2/S3 candidates. Stage 2a-ii is implemented separately in `src/qwen_features.py` as an inference-only Qwen3 auxiliary feature, Stage 2c deterministic pair features are implemented in `src/pair_features.py`, and Stage 2b is reserved for the stretch Qwen3-0.6B causal generative matcher (see [`../../docs/reference/04b_qwen3_generative_matcher_spec.md`](../../docs/reference/04b_qwen3_generative_matcher_spec.md)).
+This module fine-tunes **BGE-M3's encoder** (568M params, XLM-RoBERTa-based, MIT license) with **LoRA rank-64** for business entity resolution. The fine-tuned model produces embeddings for Stage 2a-i of the entity resolution pipeline, providing cosine similarity scores between S1 entities and S2/S3 candidates. Stage 2a-ii is implemented separately in `src/qwen_features.py` as an inference-only Qwen3 auxiliary feature, Stage 2c deterministic pair features are implemented in `src/pair_features.py`, and Stage 2b is reserved for the stretch Qwen3-0.6B causal generative matcher (see [`../../docs/07_stage2b_qwen3_generative_matcher_spec.md`](../../docs/07_stage2b_qwen3_generative_matcher_spec.md)).
 
 **Key constraint**: The test set includes **France** (unseen in training). The
 anti-forgetting stack protects the pretrained multilingual space, but the
@@ -145,14 +145,14 @@ All parameters are in `src/config.py` with detailed rationale comments. Key valu
 
 | Parameter | Value | Source |
 |-----------|-------|--------|
-| LoRA rank | 64 | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
-| LoRA alpha | 64 (with rsLoRA → effective 8) | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
-| Target modules | all-linear | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
-| Learning rate | 2e-5 | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
-| Batch size | 48 (physical) / 16 (mini-batch) | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
-| Max seq length | 80 | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
-| Epochs | 3 | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
-| Distillation weight | 0.10 | [`docs/stage2_features_and_embeddings.md`](../../docs/stage2_features_and_embeddings.md) |
+| LoRA rank | 64 | [`docs/06_stage2a_bge_m3_training_spec.md`](../../docs/06_stage2a_bge_m3_training_spec.md) |
+| LoRA alpha | 64 (with rsLoRA → effective 8) | [`docs/06_stage2a_bge_m3_training_spec.md`](../../docs/06_stage2a_bge_m3_training_spec.md) |
+| Target modules | all-linear | [`docs/06_stage2a_bge_m3_training_spec.md`](../../docs/06_stage2a_bge_m3_training_spec.md) |
+| Learning rate | 2e-5 | [`docs/06_stage2a_bge_m3_training_spec.md`](../../docs/06_stage2a_bge_m3_training_spec.md) |
+| Batch size | 48 (physical) / 16 (mini-batch) | [`docs/06_stage2a_bge_m3_training_spec.md`](../../docs/06_stage2a_bge_m3_training_spec.md) |
+| Max seq length | 80 | [`docs/06_stage2a_bge_m3_training_spec.md`](../../docs/06_stage2a_bge_m3_training_spec.md) |
+| Epochs | 3 | [`docs/06_stage2a_bge_m3_training_spec.md`](../../docs/06_stage2a_bge_m3_training_spec.md) |
+| Distillation weight | 0.10 | [`docs/06_stage2a_bge_m3_training_spec.md`](../../docs/06_stage2a_bge_m3_training_spec.md) |
 
 ## Troubleshooting
 

@@ -1,7 +1,7 @@
 """
 Layer 1: Multi-Channel Candidate Generation and Blocking.
 
-Implements the Stage 1 specification defined in docs/stage1_blocking.md:
+Implements the Stage 1 specification defined in docs/04_stage1_blocking.md:
   1. Multi-channel independent blocking:
      - Exact normalized name
      - Composite name + address structural keys (postal, street number, trailing segment)
@@ -55,7 +55,7 @@ from src.normalize import (
     source_from_entity_id,
 )
 
-# Configuration defaults matching docs/stage1_blocking.md
+# Configuration defaults matching docs/04_stage1_blocking.md
 TOP_K_DENSE = 50
 TOP_K_SPARSE_OR_CHAR = 50
 MAX_CANDIDATES_PER_ENTITY = 100
@@ -457,7 +457,7 @@ class MultiChannelBlocker:
         # -------------------------------------------------------------
         # Union, Deterministic Priority Ranking & Capping
         # -------------------------------------------------------------
-        # Deterministic combined priority (from docs/stage1_blocking.md):
+        # Deterministic combined priority (from docs/04_stage1_blocking.md):
         # 1. exact/composite evidence (highest priority);
         # 2. number of independent blockers;
         # 3. best channel score;
