@@ -4,7 +4,7 @@
 **Team Members:** [List all team members]
 **Submission Date:** [Date]
 
-> Use [`docs/FINAL_DESIGN.md`](docs/FINAL_DESIGN.md) as the implementation
+> Use [`docs/00_system_architecture.md`](docs/00_system_architecture.md) as the implementation
 > contract. Replace result placeholders only with measured validation results.
 
 ---
@@ -31,7 +31,7 @@ entities. Do not infer French behavior from external data.
 
 ### 2.2 Solution Strategy
 
-The pipeline follows `docs/FINAL_DESIGN.md`: Stage 0 normalization, Stage 1
+The pipeline follows [`docs/00_system_architecture.md`](docs/00_system_architecture.md): Stage 0 normalization, Stage 1
 unioned blocking, Stage 2 pair features, Stage 3 entity-grouped OOF GBM and
 calibration, Stage 4 macro-F0.5 thresholding, and Stage 5 submission
 validation. The BGE adapter is accepted only after both held-out-country
@@ -112,4 +112,4 @@ threshold curves, and representative false-positive/false-negative examples.
 ---
 
 **Note:** Do not report planned metrics as achieved results. The authoritative
-stage contracts and stop rules are in `docs/FINAL_DESIGN.md`.
+stage contracts and stop rules are in [`docs/00_system_architecture.md`](docs/00_system_architecture.md).

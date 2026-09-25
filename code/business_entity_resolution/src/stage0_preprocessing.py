@@ -442,6 +442,9 @@ def normalize_file_to_tsv(in_path: str | Path, out_path: str | Path, chunk_size:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import sys
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     samples = [
         ("S1-925783039", "Orelee's Barbershop", "1795 Westchester Drive, High Point, NC", "US"),
         ("S1-133037285", "Christ Chapel", "2100 Cameron Drive, Unit APARTMENT G, Dundalk, MD", "US"),

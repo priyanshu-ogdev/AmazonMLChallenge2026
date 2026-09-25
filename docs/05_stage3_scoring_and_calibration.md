@@ -116,7 +116,7 @@ test inference. Country- or source-specific thresholds are deferred until a
 grouped validation comparison proves a stable gain.
 
 Layer 4 applies this threshold and assembles the complete submission. Its
-contract is documented in [`LAYER_4_OVERVIEW.md`](LAYER_4_OVERVIEW.md).
+contract is documented in [`06_stage4_decision_and_singletons.md`](06_stage4_decision_and_singletons.md).
 
 ## Deferred escalation paths
 

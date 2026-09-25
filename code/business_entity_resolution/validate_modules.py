@@ -124,11 +124,17 @@ except ImportError as e:
 
 # 12. Quick data check if pandas is installed
 try:
+    import os
     import pandas as pd
     from src.data_builder import parse_matched_ids
-    gt_path = "../../dataset/train/train_ground_truth.tsv"
+    gt_paths = [
+        os.path.join(os.path.dirname(__file__), "..", "..", "dataset", "train", "train_ground_truth.tsv"),
+        "../../dataset/train/train_ground_truth.tsv",
+        "dataset/train/train_ground_truth.tsv",
+    ]
+    gt_path = next((p for p in gt_paths if os.path.exists(p)), gt_paths[0])
     gt_sample = pd.read_csv(gt_path, sep="\t", nrows=5, dtype=str)
-    print(f"\n[OK] Dataset accessible: {len(gt_sample)} rows read")
+    print(f"\n[OK] Dataset accessible: {len(gt_sample)} rows read from {gt_path}")
     for _, row in gt_sample.iterrows():
         matched = parse_matched_ids(row["matched_entity_ids"])
         print(f"  {row['source1_entity_id']}: {len(matched)} matches")

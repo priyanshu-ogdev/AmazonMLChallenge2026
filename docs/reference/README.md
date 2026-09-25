@@ -20,15 +20,19 @@ This design was written at full research depth — held-out-country ablation gri
 
 | File | Covers |
 |---|---|
-| `v1-baseline.md` | **Read this first.** The actual 72-hour build plan: what ships in v1, what's cut, and the math behind why |
-| `parameters.md` | **Read this second, right before writing code.** The actual starting values — GBM hyperparameters, calibration method, threshold-search grid, and blocking's top-K/floor/cap numbers — that the rest of this doc set specifies only as protocols or ranges |
-| `architecture.md` | The five-stage pipeline, what each stage does, and the dependency structure (target design, not build order) |
-| `training.md` | How the bi-encoder, the cross-encoder, and the GBM are each trained — data, loss, regularization |
-| `inference.md` | The inference-time sequence, hardware footprint, and train/inference-mode switches |
-| `citations.md` | Every source this design relies on, with what was actually verified and how |
-| `regularization.md` | Dropout and regularization for every trained model, with the actual SOTA source for each mechanism — including the GBM meta-learner's theoretical grounding and a real LoRA-rank scaling confound this design had to correct |
-| `open-decisions.md` | The handful of values genuinely left open, and the exact protocol that resolves each one once real data exists |
-| `verification-log.md` | A full account of five verification rounds — four false claims caught, then a fifth round that independently confirmed France and the license/size constraint against the official problem statement — and why the pattern matters |
+| [`01_v1_baseline_plan.md`](01_v1_baseline_plan.md) | **Read this first.** The actual 72-hour build plan: what ships in v1, what's cut, and the math behind why |
+| [`02_parameters_table.md`](02_parameters_table.md) | **Read this second, right before writing code.** The actual starting values — GBM hyperparameters, calibration method, threshold-search grid, and blocking's top-K/floor/cap numbers |
+| [`03_target_architecture_spec.md`](03_target_architecture_spec.md) | The five-stage pipeline, what each stage does, and the dependency structure (target design, not build order) |
+| [`04_bge_m3_training_spec.md`](04_bge_m3_training_spec.md) | How the bi-encoder, the cross-encoder, and the GBM are each trained — data, loss, regularization |
+| [`05_regularization_and_anti_forgetting.md`](05_regularization_and_anti_forgetting.md) | Dropout and regularization for every trained model, with the SOTA source for each mechanism |
+| [`06_inference_and_latency.md`](06_inference_and_latency.md) | The inference-time sequence, hardware footprint, and train/inference-mode switches |
+| [`07_citations_and_benchmarks.md`](07_citations_and_benchmarks.md) | Every source this design relies on, with what was actually verified and how |
+| [`08_open_decisions_log.md`](08_open_decisions_log.md) | The handful of values genuinely left open, and the exact protocol that resolves each one once real data exists |
+| [`09_verification_log.md`](09_verification_log.md) | A full account of five verification rounds — four false claims caught, confirmed against official problem statement |
+| [`10_product_requirements_document.md`](10_product_requirements_document.md) | Formal functional and non-functional requirements specification (PRD) |
+| [`11_research_and_experimental_plan.md`](11_research_and_experimental_plan.md) | Research roadmap, experimental procedures, and validation milestones |
+| [`12_hyperparameter_verification_status.md`](12_hyperparameter_verification_status.md) | Hyperparameter verification audit separating verifiable constants from empirical knobs |
+| [`13_optimization_design.md`](13_optimization_design.md) | Engineering optimization details and licensing compliance notes |
 
 ## One methodological note worth keeping
 

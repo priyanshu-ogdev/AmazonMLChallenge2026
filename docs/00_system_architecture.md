@@ -99,8 +99,8 @@ adapter.
 ## 4. Stage 1 — candidate generation
 
 The complete Layer 1 implementation contract, scale plan, and recall gate are
-in [`LAYER_1_OVERVIEW.md`](LAYER_1_OVERVIEW.md). The Layer 0 preprocessing
-contract is in [`LAYER_0_OVERVIEW.md`](LAYER_0_OVERVIEW.md).
+in [`03_stage1_blocking.md`](03_stage1_blocking.md). The Layer 0 preprocessing
+contract is in [`02_stage0_normalization.md`](02_stage0_normalization.md).
 
 Blocking defines the recall ceiling, so it must be unioned rather than chained
 with destructive intersections. For every S1 record, generate candidates from:
@@ -131,7 +131,7 @@ Before training the GBM, report:
 the matching model. Every emitted final match must be present in that file.
 
 For the complete reasoning, trade-offs, invariants, and ablation protocol for
-all three sub-stages, see [`LAYER_2_OVERVIEW.md`](LAYER_2_OVERVIEW.md).
+all three sub-stages, see [`04_stage2_features_and_embeddings.md`](04_stage2_features_and_embeddings.md).
 
 ## 5. Stage 2 — pair features
 
@@ -194,7 +194,7 @@ candidate pairs exist:
 selected result with grouped, held-out-entity calibration metrics.
 
 The current implementation and its exact artifact/inference contract are
-documented in [`LAYER_3_OVERVIEW.md`](LAYER_3_OVERVIEW.md). It persists the
+documented in [`05_stage3_scoring_and_calibration.md`](05_stage3_scoring_and_calibration.md). It persists the
 calibration parameters, feature list, threshold, fold diagnostics, and final
 estimator count rather than only the model binary.
 Calibration reliability is additionally checked with grouped cross-fitting
@@ -203,7 +203,7 @@ unbiased estimate.
 
 Layer 4 applies the saved threshold and emits one explicit row for every test
 Source 1 entity, including zero-candidate singletons; see
-[`LAYER_4_OVERVIEW.md`](LAYER_4_OVERVIEW.md).
+[`06_stage4_decision_and_singletons.md`](06_stage4_decision_and_singletons.md).
 
 Do not stack a custom beta-weighted objective on top of `scale_pos_weight`.
 Escalate to beta-weighted log loss only when hard-negative separation remains
