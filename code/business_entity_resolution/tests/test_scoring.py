@@ -585,6 +585,34 @@ class TestStage3Scoring(unittest.TestCase):
         self.assertIn("tfidf_cosine", str(ctx.exception))
         self.assertIn("records=", str(ctx.exception))
 
+    def test_evaluate_held_out_country_diagnostic_two_way(self):
+        """Verify two-way held-out-country diagnostic runs without early stopping leakage."""
+        rows = []
+        for i in range(1, 11):
+            country = "us" if i <= 5 else "india"
+            rows.append({
+                "source1_entity_id": f"S1-{i}",
+                "candidate_entity_id": f"S2-pos-{i}",
+                "source1_canonical_country": country,
+                "label": 1,
+                "name_jaccard": 0.9,
+                "address_jaccard": 0.85,
+            })
+            rows.append({
+                "source1_entity_id": f"S1-{i}",
+                "candidate_entity_id": f"S2-neg-{i}",
+                "source1_canonical_country": country,
+                "label": 0,
+                "name_jaccard": 0.1,
+                "address_jaccard": 0.05,
+            })
+        df = pd.DataFrame(rows)
+        res = evaluate_held_out_country_diagnostic(df, ["name_jaccard", "address_jaccard"])
+        self.assertIn("train_others_eval_us", res)
+        self.assertIn("train_others_eval_india", res)
+        self.assertIn("mean_held_out_country_ap", res)
+        self.assertGreater(res["mean_held_out_country_ap"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

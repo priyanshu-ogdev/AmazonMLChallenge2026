@@ -174,16 +174,15 @@ def compute_margin_analysis(
         scores = similarity[i]
         relevant = relevant_docs[qid]
 
-        # Best positive score
         pos_indices = [corpus_id_to_idx[cid] for cid in relevant if cid in corpus_id_to_idx]
-        neg_indices = [idx for idx in range(len(corpus_ids))
-                       if corpus_ids[idx] not in relevant]
-
-        if not pos_indices or not neg_indices:
+        if not pos_indices or len(pos_indices) == len(corpus_ids):
             continue
 
-        best_pos = max(scores[idx] for idx in pos_indices)
-        best_neg = max(scores[idx] for idx in neg_indices)
+        best_pos = float(np.max(scores[pos_indices]))
+        scores_masked = scores.copy()
+        scores_masked[pos_indices] = -np.inf
+        best_neg = float(np.max(scores_masked))
+
         margin = best_pos - best_neg
         margins.append(margin)
 

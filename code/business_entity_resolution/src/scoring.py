@@ -446,27 +446,67 @@ def evaluate_held_out_country_diagnostic(
             continue
 
         diag_params = dict(base_params)
-        diag_params["scale_pos_weight"] = _scale_pos_weight(y_train)
-        model = xgb.XGBClassifier(
-            n_estimators=1000,
-            early_stopping_rounds=50,
-            **diag_params,
+
+        # Early stopping must be chosen on an inner holdout of the training country,
+        # never on the validation country itself (which would cause model-selection leakage).
+        train_groups = train_df["source1_entity_id"].to_numpy()
+        diag_splitter = StratifiedGroupKFold(
+            n_splits=5, shuffle=True, random_state=RANDOM_SEED
         )
-        model.fit(
-            train_mat,
-            y_train,
-            eval_set=[(valid_mat, y_valid)],
-            verbose=False,
-        )
+        inner_split_found = False
+        try:
+            strat_diag = y_train.astype(str)
+            for inner_tr, inner_va in diag_splitter.split(train_mat, strat_diag, train_groups):
+                if (
+                    (y_train[inner_tr] == 1).any()
+                    and (y_train[inner_tr] == 0).any()
+                    and (y_train[inner_va] == 1).any()
+                    and (y_train[inner_va] == 0).any()
+                ):
+                    inner_split_found = True
+                    break
+        except Exception:
+            inner_split_found = False
+
+        if inner_split_found:
+            X_fit = train_mat.iloc[inner_tr]
+            y_fit = y_train[inner_tr]
+            X_es_val = train_mat.iloc[inner_va]
+            y_es_val = y_train[inner_va]
+            diag_params["scale_pos_weight"] = _scale_pos_weight(y_fit)
+            model = xgb.XGBClassifier(
+                n_estimators=1000,
+                early_stopping_rounds=50,
+                **diag_params,
+            )
+            model.fit(
+                X_fit,
+                y_fit,
+                eval_set=[(X_es_val, y_es_val)],
+                verbose=False,
+            )
+        else:
+            diag_params["scale_pos_weight"] = _scale_pos_weight(y_train)
+            model = xgb.XGBClassifier(
+                n_estimators=300,
+                **diag_params,
+            )
+            model.fit(train_mat, y_train, verbose=False)
+
         val_preds = model.predict_proba(valid_mat)[:, 1]
         ap = float(average_precision_score(y_valid, val_preds))
         cross_ap.append(ap)
+        try:
+            best_iter = int(model.best_iteration)
+        except (AttributeError, TypeError, ValueError):
+            best_iter = int(getattr(model, "n_estimators", 300) or 0)
+
         diagnostic_results[f"train_others_eval_{eval_country}"] = {
             "eval_country": str(eval_country),
             "train_entities": int(train_df["source1_entity_id"].nunique()),
             "valid_entities": int(valid_df["source1_entity_id"].nunique()),
             "average_precision": ap,
-            "best_iteration": int(model.best_iteration or 0),
+            "best_iteration": best_iter,
         }
 
     if cross_ap:
@@ -543,24 +583,66 @@ def train_oof(
         X_train = train_matrix.to_numpy(dtype=np.float32)
         X_valid = valid_matrix.to_numpy(dtype=np.float32)
 
-        model = xgb.XGBClassifier(
-            n_estimators=1000,
-            early_stopping_rounds=50,
-            **fold_params,
+        # Model-selection leakage fix:
+        # Carve an early-stopping holdout out of train_idx only (grouped by entity).
+        # X_valid is strictly reserved for the final out-of-fold prediction.
+        train_groups = groups[train_idx]
+        train_y = y[train_idx]
+        inner_splitter = StratifiedGroupKFold(
+            n_splits=5, shuffle=True, random_state=RANDOM_SEED + fold
         )
-        model.fit(
-            X_train,
-            y[train_idx],
-            eval_set=[(X_valid, y[valid_idx])],
-            verbose=False,
-        )
+        inner_split_found = False
+        try:
+            strat_inner = train_y.astype(str)
+            for inner_tr, inner_va in inner_splitter.split(X_train, strat_inner, train_groups):
+                if (
+                    (train_y[inner_tr] == 1).any()
+                    and (train_y[inner_tr] == 0).any()
+                    and (train_y[inner_va] == 1).any()
+                    and (train_y[inner_va] == 0).any()
+                ):
+                    inner_split_found = True
+                    break
+        except Exception:
+            inner_split_found = False
+
+        if inner_split_found:
+            X_fit = X_train[inner_tr]
+            y_fit = train_y[inner_tr]
+            X_es_val = X_train[inner_va]
+            y_es_val = train_y[inner_va]
+            fold_params["scale_pos_weight"] = _scale_pos_weight(y_fit)
+            model = xgb.XGBClassifier(
+                n_estimators=1000,
+                early_stopping_rounds=50,
+                **fold_params,
+            )
+            model.fit(
+                X_fit,
+                y_fit,
+                eval_set=[(X_es_val, y_es_val)],
+                verbose=False,
+            )
+        else:
+            fold_params["scale_pos_weight"] = _scale_pos_weight(train_y)
+            model = xgb.XGBClassifier(
+                n_estimators=300,
+                **fold_params,
+            )
+            model.fit(X_train, train_y, verbose=False)
+
+        try:
+            best_iter = int(model.best_iteration)
+        except (AttributeError, TypeError, ValueError):
+            best_iter = int(getattr(model, "n_estimators", 300) or 0)
+
         oof[valid_idx] = model.predict_proba(X_valid)[:, 1]
         fold_info.append(
             {
                 "fold": fold,
                 "train_entities": int(len(set(groups[train_idx]))),
                 "valid_entities": int(len(set(groups[valid_idx]))),
-                "best_iteration": int(model.best_iteration or 0),
+                "best_iteration": best_iter,
                 "average_precision": float(
                     average_precision_score(y[valid_idx], oof[valid_idx])
                 ),

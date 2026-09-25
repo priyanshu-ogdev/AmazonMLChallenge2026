@@ -446,7 +446,9 @@ def build_positive_pairs(
                 "s1_id": s1_id,
                 "matched_id": mid,
             }
-            if hard_negatives:
+            if negatives_per_positive > 0:
+                pair_dict["negatives"] = list(hard_negatives)
+            elif hard_negatives:
                 pair_dict["negatives"] = list(hard_negatives)
             pairs.append(pair_dict)
 
@@ -617,16 +619,8 @@ def build_training_data(config: DataConfig) -> Dict[str, Any]:
             "anchor": [p["anchor"] for p in pairs],
             "positive": [p["positive"] for p in pairs],
         }
-        has_negatives = any("negatives" in p and p["negatives"] for p in pairs)
-        if has_negatives:
-            max_negs = max(len(p.get("negatives", [])) for p in pairs)
-            if max_negs == 1:
-                data["negative"] = [
-                    p["negatives"][0] if p.get("negatives") else ""
-                    for p in pairs
-                ]
-            else:
-                data["negatives"] = [p.get("negatives", []) for p in pairs]
+        if any("negatives" in p for p in pairs):
+            data["negatives"] = [p.get("negatives", []) for p in pairs]
         return Dataset.from_dict(data)
 
     def build_direction_artifacts(

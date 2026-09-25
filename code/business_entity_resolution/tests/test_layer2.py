@@ -370,6 +370,33 @@ class TestLayer2DataBuilder(unittest.TestCase):
         self.assertEqual(corpus["S2-neg"], "s2 neg text")
         self.assertEqual(relevant_docs, {"S1-1": {"S2-1"}})
 
+    def test_hard_negatives_preserved_when_first_pair_has_none(self):
+        """Verify negatives key is present and preserved even when pairs[0] has no candidates."""
+        gt = pd.DataFrame([
+            {"source1_entity_id": "S1-no-neg", "matched_entity_ids": "S2-1"},
+            {"source1_entity_id": "S1-has-neg", "matched_entity_ids": "S2-2"},
+        ])
+        s1_records = {
+            "S1-no-neg": {"encoder_text": "s1 no neg text", "country_canonical": "us"},
+            "S1-has-neg": {"encoder_text": "s1 has neg text", "country_canonical": "us"},
+        }
+        s2s3_records = {
+            "S2-1": {"encoder_text": "s2 one text"},
+            "S2-2": {"encoder_text": "s2 two text"},
+            "S2-cand": {"encoder_text": "s2 candidate text"},
+        }
+        candidates_map = {
+            "S1-has-neg": ["S2-cand"],
+        }
+        pairs = build_positive_pairs(
+            gt, s1_records, s2s3_records,
+            candidates_map=candidates_map,
+            negatives_per_positive=1,
+        )
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual(pairs[0]["negatives"], [])
+        self.assertEqual(pairs[1]["negatives"], ["s2 candidate text"])
+
 
 if __name__ == "__main__":
     unittest.main()

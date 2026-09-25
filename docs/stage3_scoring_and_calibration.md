@@ -69,10 +69,11 @@ must be measured before any custom objective or DART change.
 For each fold:
 
 1. keep all pairs for an S1 entity in one fold;
-2. fit the model on training entities only;
-3. compute validation scores for unseen entities;
-4. record AUCPR and best iteration;
-5. concatenate scores into one OOF vector.
+2. partition the training entities further into an inner grouped split to monitor early stopping without leaking the outer validation fold;
+3. fit the model on the inner training entities, stopping on the inner validation entities (or use full train fold if strata are too small);
+4. compute validation scores for strictly held-out outer validation entities;
+5. record AUCPR and best iteration;
+6. concatenate scores into one honest, leak-free OOF vector.
 
 The OOF vector is the only data used to choose calibration and the final
 threshold. The final model is retrained on all labeled pairs using a round
