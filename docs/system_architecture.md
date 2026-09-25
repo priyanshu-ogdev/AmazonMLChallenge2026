@@ -6,8 +6,9 @@
 - Layer 0: streaming country-agnostic normalization and preprocessing (`src/normalize.py`, `src/data_builder.py`);
 - Layer 1: multi-channel candidate generation and blocking (`src/blocking.py`);
 - Layer 2: representation & features:
-  - 2a: BGE-M3 LoRA fine-tuning and bidirectional held-out country evaluation (`src/train_bi_encoder.py`, `src/eval_bi_encoder.py`, `src/bge_features.py`);
-  - 2b: Qwen3-Embedding-0.6B auxiliary feature extraction (`src/qwen_features.py`);
+  - 2a-i: BGE-M3 LoRA fine-tuning and bidirectional held-out country evaluation (`src/train_bi_encoder.py`, `src/eval_bi_encoder.py`, `src/bge_features.py`);
+  - 2a-ii: Qwen3-Embedding-0.6B auxiliary dense feature extraction (`src/qwen_features.py`);
+  - 2b: (Stretch) Qwen3-0.6B Causal Generative Matcher (`docs/reference/04b_qwen3_generative_matcher_spec.md`);
   - 2c: deterministic lexical, phonetic, address, ambiguity, and blocker score diff features (`src/pair_features.py`);
 - Layer 3: Grouped-OOF XGBoost scorer, monotonic constraints, anti-shortcut country masking, fold-safe TF-IDF, and leak-safe calibration (`src/scoring.py`, `src/calibration.py`);
 - Layer 4: deterministic per-S1 macro F0.5 decision and singleton-safe submission assembly (`src/decision.py`).
@@ -21,8 +22,9 @@ TSV inputs
   -> Stage 0: country-agnostic normalization
   -> Stage 1: high-recall candidate generation / blocking
   -> Stage 2: pair features
-       2a. fine-tuned BGE-M3 cosine similarity
-       2b. Qwen3-Embedding-0.6B cosine similarity (frozen, auxiliary feature)
+       2a-i. fine-tuned BGE-M3 cosine similarity
+       2a-ii. Qwen3-Embedding-0.6B cosine similarity (frozen, auxiliary feature)
+       2b. (Stretch) Qwen3-0.6B causal generative matcher probability
        2c. deterministic lexical, address, phonetic, and source features
   -> Stage 3: calibrated GBM pair scorer
   -> Stage 4: per-entity F0.5 decision and singleton handling
@@ -32,12 +34,17 @@ TSV inputs
 The BGE-M3 LoRA configuration is **final for v1**: rank 64, rank-stabilized
 scaling, all-linear adapters, cached multiple-negatives ranking loss, and a
 0.10 self-distillation anchor. Do not reopen a rank sweep, full fine-tuning,
-Ditto, or DART before the end-to-end baseline is working.
+generative cross-matcher (Stage 2b), or DART before the end-to-end baseline is working.
 
-Qwen3-Embedding-0.6B is **not a second training target**. Stage 2b now has an
-inference-only implementation in `src/qwen_features.py`. It is an auxiliary
-embedding feature, not an automatic fallback for a failed BGE adapter. Its
-inclusion must be justified by validation uplift, not benchmark numbers alone.
+Qwen3-Embedding-0.6B is **not Stage 2b and not a second training target** — it is
+part of Stage 2a's feature set (**Stage 2a-ii**, subordinate to Stage 2a-i's own
+bi-encoder work). Stage 2b is reserved exclusively for the cross-record generative
+matcher (LoRA fine-tuned Qwen3-0.6B causal LM, stretch-only per
+[`04b_qwen3_generative_matcher_spec.md`](reference/04b_qwen3_generative_matcher_spec.md)).
+Stage 2a-ii has an inference-only implementation in `src/qwen_features.py`. It is
+an auxiliary embedding feature, not an automatic fallback for a failed BGE adapter
+(that fallback is unchanged BGE-M3 base). Its inclusion must be justified by
+validation uplift, not benchmark numbers alone.
 
 ## 2. Evidence and source policy
 
@@ -257,8 +264,8 @@ These are data-side upgrades, not a reason to reopen the LoRA architecture.
 6. Select calibration and threshold using OOF data; run the France-proxy and
    source/country slices.
 7. Produce and validate both submission files.
-8. Only if steps 1–7 are complete: test Qwen ablation, SHAP, focal/beta loss,
-   or Ditto. These are stretch work, not dependencies of v1.
+8. Only if steps 1–7 are complete: test Qwen embedding ablation, SHAP, focal/beta loss,
+   or Qwen3 generative matcher (Stage 2b). These are stretch work, not dependencies of v1.
 
 The stop condition is a reproducible, validated submission package—not a
 collection of individually impressive model metrics.

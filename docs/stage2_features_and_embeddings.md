@@ -1,8 +1,8 @@
 # Layer 2 — Complete Representation and Pair-Feature Design
 
 **Status:** final v1 design and implementation contract  
-**Last reviewed:** 2026-09-25  
-**Scope:** Stage 2a BGE-M3, Stage 2b Qwen3-Embedding-0.6B, and Stage 2c deterministic pair features
+**Last reviewed:** 2026-09-26  
+**Scope:** Stage 2a-i BGE-M3 bi-encoder, Stage 2a-ii Qwen3-Embedding-0.6B auxiliary dense feature, Stage 2b Qwen3-0.6B Causal Generative Matcher (stretch), and Stage 2c deterministic pair features
 
 ## 1. Why Layer 2 exists
 
@@ -32,16 +32,22 @@ inference, or makes the final match/no-match decision.
 
 ## 2. Architectural choices
 
-### 2.1 Why three complementary feature families
+### 2.1 Why complementary feature families
 
-**BGE-M3 (2a)** supplies a multilingual dense representation adapted to the
+**BGE-M3 (2a-i)** supplies a multilingual dense representation adapted to the
 challenge's noisy business-name/address pairs. It captures paraphrases,
 transliteration, and reordered text that exact rules miss.
 
-**Qwen3-Embedding-0.6B (2b)** is an independent, inference-only dense view.
-It is included only if an ablation proves that its errors are complementary to
-BGE and lexical features. A larger benchmark score does not justify inclusion
-by itself.
+**Qwen3-Embedding-0.6B (2a-ii)** is an independent, inference-only dense view
+subordinate to 2a-i. It is included only if an ablation proves that its errors are
+complementary to BGE and lexical features. A larger benchmark score does not
+justify inclusion by itself.
+
+**Qwen3-0.6B Generative Matcher (2b — Stretch)** is a LoRA fine-tuned causal
+language model providing joint cross-record sequence classification via
+verdict-token slicing. Grounded in arXiv:2607.24688, it acts as a high-capacity
+stretch feature evaluated strictly after steps 1–5 are validated (see
+[`reference/04b_qwen3_generative_matcher_spec.md`](reference/04b_qwen3_generative_matcher_spec.md)).
 
 **Deterministic features (2c)** provide transparent signals: exact matches,
 token overlap, edit similarity, numbers, postal codes, missingness, and
@@ -163,10 +169,11 @@ it is never silently promoted.
 Recovery is deliberately limited: distillation weight 0.15, then rank 32.
 If no run passes, Stage 2a uses unchanged BGE-M3.
 
-## 4. Stage 2b — Qwen3 auxiliary dense feature
+## 4. Stage 2a-ii — Qwen3 auxiliary dense feature
 
-Qwen is an inference-only complementary view, not a replacement training
-target and not an automatic BGE fallback.
+Qwen3-Embedding-0.6B is an inference-only complementary view subordinate to
+Stage 2a-i's BGE-M3 bi-encoder, not a replacement training target and not an
+automatic BGE fallback (that fallback is unchanged BGE-M3 base).
 
 The implementation in `src/qwen_features.py`:
 
@@ -196,7 +203,33 @@ without worsening country/source slices, false merges, or the held-out-country
 proxy. Otherwise its feature is omitted even if its standalone retrieval score
 looks attractive.
 
-## 5. Stage 2c — deterministic pair features
+## 5. Stage 2b — Qwen3-0.6B Causal Generative Matcher (Stretch Goal)
+
+Stage 2b is a high-capacity cross-record sequence-pair classifier replacing
+legacy Ditto designs, documented fully in [`reference/04b_qwen3_generative_matcher_spec.md`](reference/04b_qwen3_generative_matcher_spec.md).
+
+- **Architecture:** Qwen3-0.6B causal LM (~596M params), fine-tuned with LoRA
+  (rank 64, `use_rslora=True`, all-linear layers).
+- **Task Format & Serialization:** Serialized candidate pairs using `[COL]`/`[VAL]`
+  delimiters ending in a decision prompt; targets a single verdict token (`Yes` / `No`).
+- **Computed Sequence Length:** Derived directly from empirical text length
+  distributions in [`dataset_eda.md`](dataset_eda.md) (names ~24–26 chars/~3.5 words;
+  addresses ~46–57 chars/~7–8.6 words). Set to `max_seq_length=224`, enclosing
+  >99.7% of candidate pairs with instruction overhead and a safety buffer.
+- **Verdict-Token Slicing:** Loss and prediction logits are computed strictly
+  at the single verdict position ($T_{\text{verdict}}$). Logits memory drops
+  from ~3.27–6.54 GB down to **~29 MB**, completely eliminating the VRAM logits
+  bottleneck on the 12GB RTX 3060.
+- **Four-Layer Anti-Forgetting Stack:**
+  1. LoRA rank ceiling ($r=64$, structural parameter bound).
+  2. Sliced verdict-position KL self-distillation against frozen base ($\lambda=0.10$).
+  3. Country-balanced batch construction (50% US / 50% India).
+  4. Held-out-country gate (train US, eval India, confirmed France proxy where
+     France is 0% of train, 15.0% of test).
+- **Status & Fallback:** Strictly stretch-only, executed behind steps 1–5. If the
+  held-out-country gate fails, the feature is dropped from Stage 3 with no replacement.
+
+## 6. Stage 2c — deterministic pair features
 
 `src/pair_features.py` computes label-free features for the final candidates.
 The feature groups and their purpose are:

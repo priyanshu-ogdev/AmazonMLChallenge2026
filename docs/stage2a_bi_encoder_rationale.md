@@ -260,7 +260,7 @@ similarity scores, not to decide "match vs. no match" — that decision belongs
 to the GBM (Stage 3) and the threshold (Stage 4).
 
 Including singletons would require a different loss function (e.g., classification)
-which is the cross-encoder's (Ditto's) territory, not the bi-encoder's.
+which is the cross-record matcher's (Stage 2b generative matcher's) territory, not the bi-encoder's.
 
 ---
 
@@ -385,7 +385,7 @@ Data preparation was designed to work without a GPU:
 | Decision | Why |
 |----------|-----|
 | LoRA rank sweep (32/64/128) | Docs specify a committed value, not a sweep. 72-hour hackathon. |
-| Ditto cross-encoder (Stage 2b) | Cut for v1 per v1-baseline.md. Stretch goal. |
+| Qwen3-0.6B Generative Matcher (Stage 2b) | Cut for v1 per v1-baseline.md. Stretch goal (see [`reference/04b_qwen3_generative_matcher_spec.md`](reference/04b_qwen3_generative_matcher_spec.md)). |
 | DART for GBM | Escalation only if standard regularization fails. |
 | External French data | Prohibited by competition rules. |
 | Synthetic French augmentation | "Guesswork dressed as data" — docs explicitly warn against this. |
@@ -415,8 +415,9 @@ This bi-encoder is ONE feature in a larger pipeline:
 ```
 Stage 0: Normalize text (country-agnostic)
 Stage 1: BGE-M3 blocking (dense + sparse + token + phonetic)
-Stage 2a: *** THIS MODULE *** — fine-tuned bi-encoder cosine similarity
-Stage 2b: [Ditto cross-encoder — cut for v1]
+Stage 2a-i: *** THIS MODULE *** — fine-tuned BGE-M3 bi-encoder cosine similarity
+Stage 2a-ii: Qwen3-Embedding-0.6B auxiliary dense feature (inference-only)
+Stage 2b: [Qwen3-0.6B Causal Generative Matcher — stretch goal, cut for v1]
 Stage 2c: Hand-crafted features (Levenshtein, Jaccard, TF-IDF, etc.)
 Stage 3: GBM combining all Stage 2 features → calibrated probability
 Stage 4: F₀.₅-optimized threshold → match/no-match decision

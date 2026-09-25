@@ -4,8 +4,8 @@
 .DESCRIPTION
     Extracts multi-modal signals for every candidate pair generated in Phase 1:
     - Stage 2c: Deterministic lexical, address, phonetic, postal, conflict, rank & provenance features (src.pair_features)
-    - Stage 2a: Dense BGE-M3 cosine similarity features (src.bge_features)
-    - Stage 2b: Optional Qwen3-Embedding-0.6B cosine similarity features (src.qwen_features)
+    - Stage 2a-i: Dense BGE-M3 cosine similarity features (src.bge_features)
+    - Stage 2a-ii: Optional Qwen3-Embedding-0.6B cosine similarity features (src.qwen_features)
 .PARAMETER CandidateFile
     Path to candidate_pairs.tsv generated in Phase 1.
 .PARAMETER ProvenanceFile
@@ -111,10 +111,10 @@ $bgeArgs = @(
 Invoke-PythonModule "src.bge_features" $bgeArgs "BGE-M3 Dense Features" -DryRun $DryRun -PythonExe $python
 
 # ------------------------------------------------------------------------------
-# 3. Optional Qwen3 Embedding Features (Stage 2b)
+# 3. Optional Qwen3 Embedding Features (Stage 2a-ii)
 # ------------------------------------------------------------------------------
 if ($IncludeQwen) {
-    Write-Step "2c.3" "Extracting Stage 2b Qwen3-Embedding Cosine Features..."
+    Write-Step "2c.3" "Extracting Stage 2a-ii Qwen3-Embedding Cosine Features..."
     $qwenArgs = @(
         "--source1", $s1File,
         "--source2", $s2File,

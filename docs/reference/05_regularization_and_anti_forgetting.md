@@ -11,15 +11,15 @@ Each trained component's regularization stack, with the actual source for each m
 | LoRA rank as a structural regularizer | See "LoRA rank and layer coverage" below | Same source, plus the OOD-generalization evidence in [`07_citations_and_benchmarks.md`](07_citations_and_benchmarks.md) |
 | Self-distillation anchor loss | Weight 0.05-0.15 | Not from a single named paper — a compliant, no-external-data adaptation of the general principle behind L2-SP-style regularization toward a starting checkpoint, applied at the embedding output rather than the weight tensors |
 
-## Ditto cross-encoder
+## Stage 2b — Qwen3-0.6B Causal Generative Matcher (Stretch)
 
-| Mechanism | Setting | Source |
+| Mechanism | Setting | Source / Rationale |
 |---|---|---|
-| Encoder-internal dropout | Same as above, xlm-roberta-base's own pretrained default | Srivastava et al. 2014, as above |
-| Classification-head dropout | Higher than the encoder body — 0.2-0.3 | Standard practice for freshly-initialized classification heads; not itself from a dedicated paper, justified by the head having no pretrained structure to protect, unlike the encoder body |
-| MixDA (mixup-style augmentation regularization) | `del`/`swap`/`drop_col`/`append_col`, interpolated rather than substituted | Li, Li, Suhara, Doan, Tan, "Deep Entity Matching with Pre-Trained Language Models" (Ditto), VLDB 2020 / arXiv:2004.00584 |
-| LoRA rank, independently tuned from the bi-encoder | See below | Hu et al. 2021, as above — re-applied here because binary classification over a joint sequence pair is a different task shape than the bi-encoder's contrastive ranking |
-| Class-imbalance loss weighting | `pos_weight` sized to the true candidate imbalance | Standard `BCEWithLogitsLoss` practice, not from a dedicated paper |
+| LoRA structural rank ceiling | Rank 64 starting point (`use_rslora=True`, all-linear targeting) | Hu et al. 2021; arXiv:2312.03732. Bounds weight updates to a low-rank manifold $\Delta W = B \cdot A$, preserving base multilingual competencies |
+| Sliced verdict self-distillation | KL divergence on verdict token only, weight 0.10 | Adapts distillation to the decision token ($T_{\text{verdict}}$), preventing task over-specialization while keeping memory and compute cheap (~29MB logits) |
+| Country-balanced candidate sampling | 50% US / 50% India in training batches | Eliminates country-specific noise shortcuts, mirroring Stage 2a bi-encoder sampling |
+| Held-out-country gate | Train US $\rightarrow$ Eval India (and reverse) | Confirmed by real EDA (`dataset_eda.md`) as the *only* viable France proxy (0% train, 15% test). If gate fails, feature is dropped with no replacement |
+| Class imbalance handling | Per-example loss weighting vs. class-balanced batch sampling | Resolved pre-training; adapts causal LM cross-entropy to imbalanced candidate pairs without native `pos_weight` |
 
 ## GBM meta-learner
 
@@ -48,7 +48,7 @@ Earlier passes in this design cycled through two different numbers — an early 
 | Component | Rank sweep | Layer coverage | Scaling |
 |---|---|---|---|
 | Bi-encoder LoRA | 32, 64, 128 | All linear layers (attention + FFN), never top-N-only | rank-stabilized (α/√r) for rank ≥ 64 |
-| Ditto LoRA | Independent sweep, same three values as a starting grid — not assumed to match the bi-encoder's winner | Same — all linear layers | Same |
+| Stage 2b Generative Matcher LoRA | Rank 64 starting point (sweep 32/64/128 if computing stretch) | All linear layers (`q/k/v/o_proj` + `gate/up/down_proj`) | rank-stabilized (α/√r) |
 | Full fine-tuning (the comparison arm) | N/A — every parameter is trainable, no rank concept applies | All layers, unrestricted — this is deliberately the "maximum capacity, no structural constraint" pole of the ablation | N/A |
 
 Why 32-128 rather than defaulting to the "practical 16-64" range some post-LoRA-paper guidance now recommends generally: the retrieval-specific parameter-budget finding already in this design (PEFT underperforms full fine-tuning on retrieval quality below roughly 1% of parameters, reaching parity closer to 6%) sits above what a generic instruction-tuning default targets, and a separate finding specific to smaller datasets (LoRA benefits from larger rank precisely when the target dataset is small, since capacity to fit what little labeled data exists matters more than it does at LLM-instruction-tuning data scale) points the same direction, given this design's labeled set is expected to be small. 32 is kept in the sweep as a lower anchor rather than dropped, since the held-out-country grid — not this reasoning — is what actually decides the winner.

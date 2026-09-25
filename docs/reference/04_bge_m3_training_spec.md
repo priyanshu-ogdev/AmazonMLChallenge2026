@@ -1,6 +1,6 @@
 # Training
 
-Three components get trained: the bi-encoder (Stage 2a), the cross-encoder (Stage 2b), and the GBM (Stage 3). All three share two non-negotiable constraints: no external data anywhere in the loop, and every fine-tuned artifact must survive the France generalization test (validated on a held-out country, never assumed from literature alone).
+Three components get trained: the bi-encoder (Stage 2a), the cross-record generative matcher (Stage 2b, stretch — see [`04b_qwen3_generative_matcher_spec.md`](04b_qwen3_generative_matcher_spec.md)), and the GBM (Stage 3). All three share two non-negotiable constraints: no external data anywhere in the loop, and every fine-tuned artifact must survive the France generalization test (validated on a held-out country, never assumed from literature alone).
 
 ## Bi-encoder (Stage 2a)
 
@@ -68,16 +68,16 @@ This is the part that answers "how do we make sure fine-tuning doesn't hurt Fren
 4. **Held-out-country validation as the actual gate, not a formality.** Train on US, validate on India (and the reverse), both directions, before trusting the fine-tune at all. If the held-out-country pass/margin rate is meaningfully worse than the in-domain rate, that's the direct evidence the anti-forgetting stack isn't sufficient — the fix is raising the self-distillation weight toward 0.15 or dropping rank toward 32 (less capacity to overfit US/India specifics), not proceeding anyway. This grid was already specified in [`08_open_decisions_log.md`](08_open_decisions_log.md); what's new here is treating it as a hard go/no-go gate for whether the fine-tuned checkpoint replaces the off-the-shelf feature at all, rather than an optional check.
 
 **What this does not do:** it does not give the model labeled French examples — none exist in training data, and none should be synthesized (that would violate the no-external-data constraint if sourced from outside the competition's own files, and synthetic in-house perturbation of French text without any real French labels to validate against is guesswork dressed as data). The realistic goal is "don't damage the pretrained French competence already in the checkpoint," not "teach the model France." The held-out-country grid (US↔India) is the closest available proxy for measuring whether that goal is being met, precisely because no direct France measurement is possible before the real test set.
+ 
+## Cross-Record Generative Matcher (Stage 2b — Stretch Goal)
 
-**Backbone: `xlm-roberta-base` (MIT, 279M params, 94 languages) — not Ditto's own documented defaults.** Ditto's reference implementation and paper support BERT, DistilBERT, RoBERTa, and ALBERT, all of which are English-pretrained in their standard checkpoints. Since Ditto's method is backbone-agnostic (plain sequence-pair classification via any transformer), swapping to `xlm-roberta-base` is a straightforward substitution, not a redesign — and it happens to share the same architecture family as BGE-M3, so the pipeline carries one fewer distinct base model to license-check and document.
+Stage 2b cross-record matching has been upgraded from legacy masked-LM architectures (such as Ditto over `xlm-roberta-base`) to a causal decoder-only architecture (**Qwen3-0.6B** fine-tuned with LoRA) grounded in arXiv:2607.24688 ("Beyond Scale and Generation", Zhang et al.).
 
-**Serialization.** `[CLS] serialize(e) [SEP] serialize(e′) [SEP]` with `[COL]`/`[VAL]` tags per attribute. Domain-knowledge injection (span typing for informative fields) and TF-IDF-based summarization for long fields both operate purely on each record's own text — no external data involved.
+The complete architectural contract, empirical sequence length derivation from `dataset_eda.md` (~224 tokens), VRAM budget proving ~29MB sliced logits, loss formulation with sliced verdict self-distillation, four-layer anti-forgetting stack, and pre-training class imbalance resolution are specified in:
 
-**Data augmentation — MixDA.** Ditto's four operators (`del`, `swap`, `drop_col`, `append_col`) all transform the model's own labeled records, never external data. `drop_col` on the country attribute specifically implements the country-masking strategy used to stop the model over-relying on exact country match — this is not a separate mechanism bolted on, it's Ditto's own augmentation operator pointed at the right field. MixDA interpolates the *hidden representation* of the original and augmented example rather than swapping the augmented example in directly, because operators like `del` can be destructive enough to flip the true label (deleting the company name can leave nothing to distinguish a true match).
+👉 **[`04b_qwen3_generative_matcher_spec.md`](04b_qwen3_generative_matcher_spec.md)**.
 
-**Regularization.** Classification-head dropout set higher (0.2–0.3) than the encoder body's own dropout (kept near the 0.1 default, raised only if a held-out-country gap appears) — the head is trained from scratch on your labeled pairs alone and has no pretrained structure protecting it. LoRA rank is re-tuned independently for Ditto rather than reusing whatever wins for the bi-encoder — same 32/64/128 sweep as a starting grid, since binary classification over a joint sequence pair is a different task shape than contrastive ranking over independent embeddings (see [`05_regularization_and_anti_forgetting.md`](05_regularization_and_anti_forgetting.md)). `pos_weight` in the BCE loss, sized to whatever real imbalance is measured on the actual candidate set — Ditto trains on the same Stage 1 candidates, so this is computed once and reused, not a separately assumed value (see the GBM objective note below for why no fixed ratio should be hardcoded here). Same self-distillation anchor loss against the frozen `xlm-roberta-base` as the bi-encoder gets.
-
-**Leakage-safe training.** Same 5-fold-holdout-plus-1-final-retrain cycle as the bi-encoder, if Ditto's score feeds the GBM as an out-of-fold feature.
+Stage 2b is positioned strictly as a stretch goal behind steps 1–5 in [`01_v1_baseline_plan.md`](01_v1_baseline_plan.md).
 
 ## GBM (Stage 3)
 

@@ -2,9 +2,9 @@
 
 Everything else in this doc set specifies *protocols* (validation grids, resolution methods). This file specifies the actual **starting values** to write into code for the v1 build, since a protocol alone doesn't compile. These are defensible defaults grounded in the regularization/citations reasoning already in [`04_bge_m3_training_spec.md`](04_bge_m3_training_spec.md)/[`05_regularization_and_anti_forgetting.md`](05_regularization_and_anti_forgetting.md) — not re-derivations of that reasoning, and not claims that they're already optimal. Where [`08_open_decisions_log.md`](08_open_decisions_log.md) lists something as genuinely open, the value here is the starting point for that grid, not a substitute for running it.
 
-## GBM (Stage 3) — the only model actually trained in v1
+## GBM (Stage 3) — Supervised Pair Scorer
 
-Since v1 cuts Ditto and encoder fine-tuning, the GBM is the **only** component that learns from labeled data this cycle. Its parameters matter more than usual for exactly that reason.
+The GBM combines dense bi-encoder cosine similarities (Stage 2a-i / 2a-ii), optional stretch generative matcher probabilities (Stage 2b), and deterministic pair features (Stage 2c) into a calibrated match probability. It acts as the core supervised meta-learner optimizing the decision boundary for precision-heavy F₀.₅.
 
 ```python
 import xgboost as xgb

@@ -2,8 +2,8 @@
 Unit tests for Layer 2: Representations and Pair Features.
 
 Covers:
-- Stage 2a: BGE-M3 bi-encoder features & losses
-- Stage 2b: Qwen3-Embedding-0.6B features
+- Stage 2a-i: BGE-M3 bi-encoder features & losses
+- Stage 2a-ii: Qwen3-Embedding-0.6B auxiliary dense features
 - Stage 2c: Deterministic pair features & provenance signals
 - Data preparation: bidirectional gate & evaluation dataset construction
 - Held-out evaluation metrics & go/no-go gate logic

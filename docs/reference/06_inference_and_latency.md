@@ -4,11 +4,11 @@
 
 | Step | What runs | Depends on |
 |---|---|---|
-| Load (v1 baseline) | BGE-M3 (blocking), BGE-M3 dense head (LoRA-merged, rank 64 — Stage 2a primary), Qwen3-Embedding-0.6B (off-the-shelf, second Stage 2a feature if time allowed, or the fallback if the held-out-country gate failed), GBM + calibrator + threshold — no Ditto | — |
-| Load (target design, once stretch goals land) | BGE-M3, final bi-encoder (LoRA-merged, or the full fine-tuned checkpoint if that wins the ablation), final Ditto (same), GBM + calibrator + threshold | — |
+| Load (v1 baseline) | BGE-M3 (blocking), BGE-M3 dense head (LoRA-merged, rank 64 — Stage 2a-i primary), Qwen3-Embedding-0.6B (off-the-shelf, Stage 2a-ii auxiliary feature if time allowed, or the fallback if the held-out-country gate failed), GBM + calibrator + threshold — no Stage 2b | — |
+| Load (target design, once stretch goals land) | BGE-M3, final bi-encoder (Stage 2a-i), Qwen3-Embedding (Stage 2a-ii), final Qwen3-0.6B generative matcher (Stage 2b, LoRA-merged), GBM + calibrator + threshold | — |
 | Stage 0 | Normalize test records | Load |
 | Stage 1 | BGE-M3 dense+sparse + token/phonetic/address blocking, union | Stage 0 |
-| Stage 2a/2b/2c | Bi-encoder cosine, Ditto probability, hand-crafted features | Stage 1 only — no interdependency between 2a, 2b, 2c |
+| Stage 2a/2b/2c | Bi-encoder cosine (2a-i/2a-ii), Qwen3 generative matcher probability (2b, stretch), hand-crafted features (2c) | Stage 1 only — no interdependency between 2a, 2b, 2c |
 | Stage 3 | GBM scoring + calibration | **All** of Stage 2 — hard sync point |
 | Stage 4 | Apply F₀.₅-optimized threshold, keep-all-above per entity | Stage 3 |
 | Stage 5 | Assemble and validate submission | Stage 4 |
@@ -19,11 +19,11 @@ All models load once, up front, in a single continuous run. On one GPU this most
 
 ## Hardware footprint
 
-LoRA's small trainable-parameter count (whatever rank the ablation settles on) is a **training-time** property — it does not shrink what has to be loaded and run at inference. Before inference, every LoRA adapter is merged into its base model's weights (`W' = W + BA`), producing a plain dense model with zero adapter overhead. Worst-case total footprint: BGE-M3 (568M) + Qwen3-Embedding-0.6B (~600M, only if it wins the Stage 2a ablation) + XLM-RoBERTa-base (279M) ≈ 1.45B parameters, comfortably under 3GB at bf16 — well within a single RTX 3060's 12GB, but because these are all sub-billion-parameter models, not because of LoRA's adapter size.
+LoRA's small trainable-parameter count (whatever rank the ablation settles on) is a **training-time** property — it does not shrink what has to be loaded and run at inference. Before inference, every LoRA adapter is merged into its base model's weights (`W' = W + BA`), producing a plain dense model with zero adapter overhead. Worst-case total footprint: BGE-M3 (568M) + Qwen3-Embedding-0.6B (~596M, Stage 2a-ii) + Qwen3-0.6B (~596M, Stage 2b generative matcher) ≈ 1.76B parameters, comfortably under 3.6GB at bf16 — well within a single RTX 3060's 12GB, but because these are all sub-billion-parameter models, not because of LoRA's adapter size.
 
 ## Train/inference-mode switches — easy to lose track of, all must flip together
 
-- **Dropout off.** Every dropout rate specified for the bi-encoder and Ditto (encoder-internal, classification-head) is training-only. Both models run in eval mode at inference.
+- **Dropout off.** Every dropout rate specified for the bi-encoder and Stage 2b generative matcher (encoder-internal, adapter-level) is training-only. Both models run in eval mode at inference.
 - **Country-match masking off.** The deliberate "sometimes feed missing instead of the real country-match value" GBM regularizer is training-only. At inference every row gets its real, computed country-match value.
 - **Single final checkpoint only.** The 5-fold OOF cycle exists to generate leakage-safe *training* features. At inference, only the checkpoint trained on the full training set is used — never a fold-holdout checkpoint, which saw only 80% of the labeled data and exists solely to have produced an honest score for its own held-out fold during GBM training.
 

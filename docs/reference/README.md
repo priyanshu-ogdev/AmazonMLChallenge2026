@@ -23,7 +23,8 @@ This design was written at full research depth — held-out-country ablation gri
 | [`01_v1_baseline_plan.md`](01_v1_baseline_plan.md) | **Read this first.** The actual 72-hour build plan: what ships in v1, what's cut, and the math behind why |
 | [`02_parameters_table.md`](02_parameters_table.md) | **Read this second, right before writing code.** The actual starting values — GBM hyperparameters, calibration method, threshold-search grid, and blocking's top-K/floor/cap numbers |
 | [`03_target_architecture_spec.md`](03_target_architecture_spec.md) | The five-stage pipeline, what each stage does, and the dependency structure (target design, not build order) |
-| [`04_bge_m3_training_spec.md`](04_bge_m3_training_spec.md) | How the bi-encoder, the cross-encoder, and the GBM are each trained — data, loss, regularization |
+| [`04_bge_m3_training_spec.md`](04_bge_m3_training_spec.md) | How the bi-encoder (Stage 2a) and the GBM (Stage 3) are trained — data, loss, regularization |
+| [`04b_qwen3_generative_matcher_spec.md`](04b_qwen3_generative_matcher_spec.md) | Stage 2b Qwen3-0.6B Causal Generative Matcher specification (stretch): serialization, ~29MB sliced verdict logits, 4-layer anti-forgetting stack |
 | [`05_regularization_and_anti_forgetting.md`](05_regularization_and_anti_forgetting.md) | Dropout and regularization for every trained model, with the SOTA source for each mechanism |
 | [`06_inference_and_latency.md`](06_inference_and_latency.md) | The inference-time sequence, hardware footprint, and train/inference-mode switches |
 | [`07_citations_and_benchmarks.md`](07_citations_and_benchmarks.md) | Every source this design relies on, with what was actually verified and how |

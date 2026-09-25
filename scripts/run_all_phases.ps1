@@ -182,7 +182,7 @@ Run-PipelinePhase 2 "Representation & Feature Engineering" {
     }
 
     if ($RunMode -eq "GateOnly") {
-        Write-Info "GateOnly mode specified: stopping pipeline after Stage 2b gate."
+        Write-Info "GateOnly mode specified: stopping pipeline after Phase 2b bi-encoder gate."
         return
     }
 

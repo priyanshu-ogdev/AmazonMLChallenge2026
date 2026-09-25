@@ -24,10 +24,11 @@ flowchart TD
     end
 
     subgraph S2["Stage 2: Pairwise Feature Engineering"]
-        U1 --> F1["Fine-Tuned BGE-M3 Cosine Similarity"]
-        U1 --> F2["Auxiliary Qwen3-0.6B Cosine Similarity"]
-        U1 --> F3["32 Deterministic Lexical & Address Features"]
-        F1 & F2 & F3 --> M2["Feature Matrix (Entity-Grouped)"]
+        U1 --> F1["Fine-Tuned BGE-M3 Cosine Similarity (Stage 2a-i)"]
+        U1 --> F2["Auxiliary Qwen3-0.6B Cosine Similarity (Stage 2a-ii)"]
+        U1 --> F3["32 Deterministic Lexical & Address Features (Stage 2c)"]
+        U1 -.-> F4["(Stretch) Qwen3-0.6B Generative Matcher (Stage 2b)"]
+        F1 & F2 & F3 & F4 --> M2["Feature Matrix (Entity-Grouped)"]
     end
 
     subgraph S3["Stage 3: Supervised Scoring & Calibration"]
@@ -55,8 +56,9 @@ Every component of the pipeline is documented in depth with clear mathematical f
 | [**`dataset_eda.md`**](dataset_eda.md) | **Comprehensive Dataset Audit & EDA Report** | Full audit across all 24.2M records (Train S1/S2/S3, GT, Test S1/S2/S3). Documents the 15% France out-of-domain shift, 3.3% missing addresses, 0 cross-country matches, and proves the 1-to-N injective constraint (`s2_multi=0`, `s3_multi=0`). |
 | [**`stage0_normalization.md`**](stage0_normalization.md) | **Stage 0: Ingestion & Normalization Contract** | Country-agnostic Unicode NFKC normalization, legal suffix canonicalization (US, India, France), address abbreviation expansion, missing address sentinel handling, and streaming chunked I/O. |
 | [**`stage1_blocking.md`**](stage1_blocking.md) | **Stage 1: Candidate Generation & Blocking** | High-recall multi-channel candidate generation: exact name keys, char n-gram TF-IDF, BGE-M3 dense retrieval, hard country partitioning, and candidate provenance tracking. |
-| [**`stage2_features_and_embeddings.md`**](stage2_features_and_embeddings.md) | **Stage 2: Feature Engineering & Embeddings** | 32 deterministic pair features (token Jaccard, Levenshtein, address overlap, numeric/postal matching), fine-tuned BGE-M3 similarity, and auxiliary Qwen3-0.6B embedding features. |
+| [**`stage2_features_and_embeddings.md`**](stage2_features_and_embeddings.md) | **Stage 2: Feature Engineering & Embeddings** | Deterministic pair features (2c), fine-tuned BGE-M3 similarity (2a-i), auxiliary Qwen3-0.6B embedding features (2a-ii), and Qwen3-0.6B generative matcher (2b stretch). |
 | [**`stage2a_bi_encoder_rationale.md`**](stage2a_bi_encoder_rationale.md) | **Stage 2a: BGE-M3 LoRA Design Rationale** | Comprehensive decision log explaining every bi-encoder choice: BGE-M3 vs alternatives, rank-64 RSLoRA, CachedMNRL loss, self-distillation anti-forgetting, and held-out country gate. |
+| [**`reference/04b_qwen3_generative_matcher_spec.md`**](reference/04b_qwen3_generative_matcher_spec.md) | **Stage 2b: Qwen3-0.6B Generative Matcher Spec** | Cross-record causal LM matcher specification (stretch): prompt serialization, ~29MB sliced verdict logits VRAM budget, and 4-layer anti-forgetting stack. |
 | [**`stage3_scoring_and_calibration.md`**](stage3_scoring_and_calibration.md) | **Stage 3: Supervised Scoring & Calibration** | Grouped-OOF cross-validation (grouping by S1 entity to prevent data leakage), LightGBM/XGBoost pair ranker, isotonic calibration, and probability thresholding. |
 | [**`stage4_decision_and_singletons.md`**](stage4_decision_and_singletons.md) | **Stage 4: F0.5 Optimization & Singleton Policy** | Greedy 1-to-N injective assignment enforcing mutual exclusivity, high-precision threshold optimization for macro $F_{0.5}$, singleton protection, and output validation. |
 

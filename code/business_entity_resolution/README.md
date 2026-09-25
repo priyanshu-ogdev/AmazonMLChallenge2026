@@ -15,7 +15,7 @@ preserves empty rows for S1 entities with no accepted matches (see [`../../docs/
 
 ## Overview
 
-This module fine-tunes **BGE-M3's encoder** (568M params, XLM-RoBERTa-based, MIT license) with **LoRA rank-64** for business entity resolution. The fine-tuned model produces embeddings for Stage 2a of the entity resolution pipeline, providing cosine similarity scores between S1 entities and S2/S3 candidates. Stage 2b is implemented separately in `src/qwen_features.py` as an inference-only Qwen3 feature, and Stage 2c deterministic pair features are implemented in `src/pair_features.py`.
+This module fine-tunes **BGE-M3's encoder** (568M params, XLM-RoBERTa-based, MIT license) with **LoRA rank-64** for business entity resolution. The fine-tuned model produces embeddings for Stage 2a-i of the entity resolution pipeline, providing cosine similarity scores between S1 entities and S2/S3 candidates. Stage 2a-ii is implemented separately in `src/qwen_features.py` as an inference-only Qwen3 auxiliary feature, Stage 2c deterministic pair features are implemented in `src/pair_features.py`, and Stage 2b is reserved for the stretch Qwen3-0.6B causal generative matcher (see [`../../docs/reference/04b_qwen3_generative_matcher_spec.md`](../../docs/reference/04b_qwen3_generative_matcher_spec.md)).
 
 **Key constraint**: The test set includes **France** (unseen in training). The
 anti-forgetting stack protects the pretrained multilingual space, but the
@@ -177,11 +177,11 @@ src/
 ├── losses.py              # CachedMNRL + self-distillation loss
 ├── train_bi_encoder.py    # Main training script (GPU)
 ├── eval_bi_encoder.py     # Held-out country evaluation
-├── qwen_features.py       # Stage 2b Qwen3 inference pair features
+├── qwen_features.py       # Stage 2a-ii Qwen3 auxiliary dense pair features
 └── pair_features.py       # Stage 2c deterministic pair features
 ```
 
-## Stage 2b: Qwen feature generation
+## Stage 2a-ii: Qwen auxiliary feature generation
 
 Qwen is not fine-tuned. The feature builder applies the same entity-resolution
 instruction to S1 and S2/S3 records, normalizes both embedding sets, encodes

@@ -1,10 +1,10 @@
 """
-Stage 2b: Qwen3-Embedding-0.6B pair features.
+Stage 2a-ii: Qwen3-Embedding-0.6B auxiliary dense pair features.
 
-Qwen is deliberately inference-only in v1. This module encodes each entity
-once, applies the same task instruction to S1 and S2/S3 text, and computes
-cosine similarity for the exact candidate set that will be scored downstream.
-No candidate is created or removed here.
+Qwen is deliberately inference-only in v1 (subordinate to Stage 2a-i BGE-M3).
+This module encodes each entity once, applies the same task instruction to S1
+and S2/S3 text, and computes cosine similarity for the exact candidate set that
+will be scored downstream. No candidate is created or removed here.
 """
 
 from __future__ import annotations
@@ -196,7 +196,7 @@ def build_qwen_features(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build Qwen Stage 2b pair features")
+    parser = argparse.ArgumentParser(description="Build Qwen Stage 2a-ii auxiliary pair features")
     parser.add_argument("--source1", type=Path, required=True)
     parser.add_argument("--source2", type=Path, required=True)
     parser.add_argument("--source3", type=Path, required=True)

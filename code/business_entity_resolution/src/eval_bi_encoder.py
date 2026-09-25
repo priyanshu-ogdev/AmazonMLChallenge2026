@@ -16,8 +16,8 @@ Protocol (from docs/stage2_features_and_embeddings.md):
 Recovery if gate fails:
 - Raise self_distillation_weight toward 0.15
 - Or drop LoRA rank to 32
-- Or fall back to off-the-shelf BGE-M3 for the Stage 2a feature
-- Evaluate Qwen3-Embedding-0.6B separately as an auxiliary Stage 2b feature
+- Or fall back to off-the-shelf BGE-M3 for the Stage 2a-i feature
+- Evaluate Qwen3-Embedding-0.6B separately as an auxiliary Stage 2a-ii feature
 
 Usage:
     python -m src.eval_bi_encoder \\
@@ -376,8 +376,8 @@ def evaluate_model(
         logger.info("\n  Recommended actions:")
         logger.info("  1. Raise self_distillation_weight toward 0.15")
         logger.info("  2. Or drop LoRA rank to 32")
-        logger.info("  3. Fall back to off-the-shelf BGE-M3 for Stage 2a")
-        logger.info("  4. Evaluate Qwen3-Embedding-0.6B separately as Stage 2b")
+        logger.info("  3. Fall back to off-the-shelf BGE-M3 for Stage 2a-i")
+        logger.info("  4. Evaluate Qwen3-Embedding-0.6B separately as Stage 2a-ii")
 
     output_name = "eval_results_bidirectional.json" if direction == "bidirectional" else "eval_results.json"
     output_path = Path(data_dir) / output_name
