@@ -280,6 +280,23 @@ def train(
     train_dataset = dataset["train"]
     eval_dataset = dataset.get("eval")
 
+    # Filter to model input columns (anchor, positive, negative, negative_*)
+    # so SentenceTransformerTrainer does not attempt to tokenize extra columns
+    model_columns = [
+        col for col in getattr(train_dataset, "column_names", [])
+        if col in ("anchor", "positive", "negative") or col.startswith("negative_")
+    ]
+    if model_columns and set(model_columns) != set(train_dataset.column_names):
+        logger.info(f"Filtering train_dataset columns to model inputs: {model_columns}")
+        train_dataset = train_dataset.select_columns(model_columns)
+    if eval_dataset is not None:
+        eval_cols = [
+            col for col in getattr(eval_dataset, "column_names", [])
+            if col in ("anchor", "positive", "negative") or col.startswith("negative_")
+        ]
+        if eval_cols and set(eval_cols) != set(eval_dataset.column_names):
+            eval_dataset = eval_dataset.select_columns(eval_cols)
+
     logger.info(f"  Train: {len(train_dataset)} pairs")
     if eval_dataset:
         logger.info(f"  Eval: {len(eval_dataset)} pairs")

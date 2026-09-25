@@ -425,14 +425,24 @@ def build_positive_pairs(
         matched_ids = parse_matched_ids(row["matched_entity_ids"])
         matched_id_set = set(matched_ids)
 
+        # Collect true match encoder texts for disjointness validation
+        true_pos_texts = {
+            s2s3_records[mid]["encoder_text"]
+            for mid in matched_ids
+            if mid in s2s3_records and "encoder_text" in s2s3_records[mid]
+        }
+
         # Mine hard negatives if candidates are available
         hard_negatives: List[str] = []
         if candidates_map and negatives_per_positive > 0 and s1_id in candidates_map:
             for cand_id in candidates_map[s1_id]:
                 if cand_id not in matched_id_set and cand_id in s2s3_records:
-                    hard_negatives.append(s2s3_records[cand_id]["encoder_text"])
-                    if len(hard_negatives) >= negatives_per_positive:
-                        break
+                    cand_text = s2s3_records[cand_id].get("encoder_text", "")
+                    # Ensure candidate text is non-empty and strictly disjoint from anchor and all positive matches
+                    if cand_text and cand_text != anchor_text and cand_text not in true_pos_texts:
+                        hard_negatives.append(cand_text)
+                        if len(hard_negatives) >= negatives_per_positive:
+                            break
 
         for mid in matched_ids:
             match_info = s2s3_records.get(mid)
@@ -456,6 +466,37 @@ def build_positive_pairs(
         logger.warning(f"  Skipped {skipped:,} pairs due to missing records")
 
     return pairs
+
+
+def format_pairs_for_dataset(pairs: List[Dict]) -> Dict[str, List[Any]]:
+    """
+    Format a list of pair dictionaries into a column-oriented dict for Dataset creation.
+
+    When hard negatives are present, formats them as 1D flat string columns ('negative' or
+    'negative_0', 'negative_1', ...) to ensure compatibility with SentenceTransformerTrainer
+    and CachedMultipleNegativesRankingLoss, rather than nested lists which break tokenizers.
+    """
+    if not pairs:
+        return {}
+    data: Dict[str, List[Any]] = {
+        "anchor": [p["anchor"] for p in pairs],
+        "positive": [p["positive"] for p in pairs],
+    }
+    has_negatives = any("negatives" in p and p["negatives"] for p in pairs)
+    if has_negatives:
+        max_negs = max(len(p.get("negatives", [])) for p in pairs)
+        if max_negs == 1:
+            data["negative"] = [
+                p["negatives"][0] if p.get("negatives") else ""
+                for p in pairs
+            ]
+        else:
+            for k in range(max_negs):
+                data[f"negative_{k}"] = [
+                    p["negatives"][k] if len(p.get("negatives", [])) > k else ""
+                    for p in pairs
+                ]
+    return data
 
 
 def build_evaluation_data(
@@ -615,12 +656,7 @@ def build_training_data(config: DataConfig) -> Dict[str, Any]:
     def pairs_to_dataset(pairs: List[Dict]) -> Any:
         if not HAS_DATASETS or not pairs:
             return None
-        data = {
-            "anchor": [p["anchor"] for p in pairs],
-            "positive": [p["positive"] for p in pairs],
-        }
-        if any("negatives" in p for p in pairs):
-            data["negatives"] = [p.get("negatives", []) for p in pairs]
+        data = format_pairs_for_dataset(pairs)
         return Dataset.from_dict(data)
 
     def build_direction_artifacts(

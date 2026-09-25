@@ -44,6 +44,7 @@ except ImportError:
 from src.data_builder import (
     build_evaluation_data,
     build_positive_pairs,
+    format_pairs_for_dataset,
 )
 
 
@@ -397,7 +398,74 @@ class TestLayer2DataBuilder(unittest.TestCase):
         self.assertEqual(pairs[0]["negatives"], [])
         self.assertEqual(pairs[1]["negatives"], ["s2 candidate text"])
 
+    def test_hard_negatives_disjointness_validation(self):
+        """Verify hard negatives reject candidates matching anchor or true positive match text."""
+        gt = pd.DataFrame([
+            {"source1_entity_id": "S1-1", "matched_entity_ids": "S2-1"},
+        ])
+        s1_records = {
+            "S1-1": {"encoder_text": "same business anchor", "country_canonical": "us"},
+        }
+        s2s3_records = {
+            "S2-1": {"encoder_text": "same business positive"},
+            # cand1 text matches anchor
+            "S2-cand1": {"encoder_text": "same business anchor"},
+            # cand2 text matches true positive
+            "S2-cand2": {"encoder_text": "same business positive"},
+            # cand3 is genuinely disjoint
+            "S2-cand3": {"encoder_text": "completely distinct negative entity"},
+        }
+        candidates_map = {
+            "S1-1": ["S2-cand1", "S2-cand2", "S2-cand3"],
+        }
+        pairs = build_positive_pairs(
+            gt, s1_records, s2s3_records,
+            candidates_map=candidates_map,
+            negatives_per_positive=1,
+        )
+        self.assertEqual(len(pairs), 1)
+        # Should skip cand1 (anchor text collision) and cand2 (pos text collision), selecting cand3
+        self.assertEqual(pairs[0]["negatives"], ["completely distinct negative entity"])
+
+    def test_format_pairs_for_dataset_columns(self):
+        """Verify format_pairs_for_dataset produces flat 1D string columns for SentenceTransformers."""
+        # 1. Pairs only (no negatives)
+        pairs_no_negs = [
+            {"anchor": "anc1", "positive": "pos1"},
+            {"anchor": "anc2", "positive": "pos2"},
+        ]
+        data_no_negs = format_pairs_for_dataset(pairs_no_negs)
+        self.assertEqual(set(data_no_negs.keys()), {"anchor", "positive"})
+        self.assertEqual(data_no_negs["anchor"], ["anc1", "anc2"])
+        self.assertEqual(data_no_negs["positive"], ["pos1", "pos2"])
+
+        # 2. Triplet format: single negative column (flat strings)
+        pairs_single_neg = [
+            {"anchor": "anc1", "positive": "pos1", "negatives": []},
+            {"anchor": "anc2", "positive": "pos2", "negatives": ["neg2_text"]},
+        ]
+        data_single_neg = format_pairs_for_dataset(pairs_single_neg)
+        self.assertEqual(set(data_single_neg.keys()), {"anchor", "positive", "negative"})
+        self.assertEqual(data_single_neg["negative"], ["", "neg2_text"])
+        self.assertIsInstance(data_single_neg["negative"][0], str)
+        self.assertIsInstance(data_single_neg["negative"][1], str)
+
+        # 3. Multi-negatives format: negative_0, negative_1 (flat strings)
+        pairs_multi_neg = [
+            {"anchor": "anc1", "positive": "pos1", "negatives": ["neg1_a", "neg1_b"]},
+            {"anchor": "anc2", "positive": "pos2", "negatives": ["neg2_a"]},
+        ]
+        data_multi_neg = format_pairs_for_dataset(pairs_multi_neg)
+        self.assertEqual(
+            set(data_multi_neg.keys()),
+            {"anchor", "positive", "negative_0", "negative_1"}
+        )
+        self.assertEqual(data_multi_neg["negative_0"], ["neg1_a", "neg2_a"])
+        self.assertEqual(data_multi_neg["negative_1"], ["neg1_b", ""])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 
