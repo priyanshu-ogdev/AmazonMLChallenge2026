@@ -4,7 +4,7 @@
 before large-scale candidate generation  
 **Canonical implementation:** `src/normalize.py` and
 `src/data_builder.py`  
-**Reference/standalone implementation:** `stage0_preprocessing.py`
+**Reference/standalone implementation:** `code/business_entity_resolution/src/stage0_preprocessing.py`
 
 `src.data_builder.normalize_tsv_file` is the production entry point. The
 standalone script documents the policy but must not become a second divergent
