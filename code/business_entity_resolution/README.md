@@ -1,10 +1,27 @@
 # BGE-M3 Bi-Encoder LoRA Fine-Tuning for Entity Resolution
 
+The authoritative end-to-end design, stage contracts, validation gates, Qwen
+ablation, and execution order are in
+[`../../docs/FINAL_DESIGN.md`](../../docs/FINAL_DESIGN.md). This README documents
+the implemented Stage 2a/2b/2c modules and the Stage 3 scorer; blocking and final
+submission assembly are not yet
+part of this directory. The detailed Layer 2 rationale is in
+[`../../docs/LAYER_2_OVERVIEW.md`](../../docs/LAYER_2_OVERVIEW.md).
+The Stage 3 training contract is in
+[`../../docs/LAYER_3_OVERVIEW.md`](../../docs/LAYER_3_OVERVIEW.md).
+Calibration utilities are isolated in `src/calibration.py` and can be
+validated independently of the XGBoost scorer.
+Stage 4 submission assembly is implemented in `src/stage4_decision.py`; it
+preserves empty rows for S1 entities with no accepted matches.
+
 ## Overview
 
-This module fine-tunes **BGE-M3's dense head** (568M params, XLM-RoBERTa-based, MIT license) with **LoRA rank-64** for business entity resolution. The fine-tuned model produces embeddings for Stage 2a of the entity resolution pipeline, providing cosine similarity scores between S1 entities and S2/S3 candidates.
+This module fine-tunes **BGE-M3's encoder** (568M params, XLM-RoBERTa-based, MIT license) with **LoRA rank-64** for business entity resolution. The fine-tuned model produces embeddings for Stage 2a of the entity resolution pipeline, providing cosine similarity scores between S1 entities and S2/S3 candidates. Stage 2b is implemented separately in `src/qwen_features.py` as an inference-only Qwen3 feature, and Stage 2c deterministic pair features are implemented in `src/pair_features.py`.
 
-**Key constraint**: The test set includes **France** (unseen in training). A 4-layer anti-forgetting stack protects BGE-M3's pretrained French multilingual capabilities during fine-tuning.
+**Key constraint**: The test set includes **France** (unseen in training). The
+anti-forgetting stack protects the pretrained multilingual space, but the
+adapter is accepted only after the two-direction held-out-country gate. A
+failed gate must not be silently deployed.
 
 ## Quick Start
 
@@ -72,6 +89,8 @@ python -m src.eval_bi_encoder \
 ```
 
 This computes Recall@K on the held-out country and reports **GO** or **NO-GO**.
+Run the reverse India→US direction as a separate gate run before accepting the
+adapter; the implementation's default single direction is only a smoke test.
 
 ### Step 6: Full Training (if gate passes)
 
@@ -126,14 +145,14 @@ All parameters are in `src/config.py` with detailed rationale comments. Key valu
 
 | Parameter | Value | Source |
 |-----------|-------|--------|
-| LoRA rank | 64 | training.md committed config |
-| LoRA alpha | 64 (with rsLoRA → effective 8) | regularization.md |
-| Target modules | all-linear | regularization.md |
-| Learning rate | 2e-5 | training.md |
-| Batch size | 48 (physical) / 16 (mini-batch) | training.md |
-| Max seq length | 80 | training.md |
-| Epochs | 3 | training.md |
-| Distillation weight | 0.10 | training.md |
+| LoRA rank | 64 | `docs/LAYER_2_OVERVIEW.md` |
+| LoRA alpha | 64 (with rsLoRA → effective 8) | `docs/LAYER_2_OVERVIEW.md` |
+| Target modules | all-linear | `docs/LAYER_2_OVERVIEW.md` |
+| Learning rate | 2e-5 | `docs/LAYER_2_OVERVIEW.md` |
+| Batch size | 48 (physical) / 16 (mini-batch) | `docs/LAYER_2_OVERVIEW.md` |
+| Max seq length | 80 | `docs/LAYER_2_OVERVIEW.md` |
+| Epochs | 3 | `docs/LAYER_2_OVERVIEW.md` |
+| Distillation weight | 0.10 | `docs/LAYER_2_OVERVIEW.md` |
 
 ## Troubleshooting
 
@@ -143,7 +162,8 @@ All parameters are in `src/config.py` with detailed rationale comments. Key valu
 1. Try `--distill_weight 0.15` (stronger anti-forgetting)
 2. Try `--lora_r 32` (less capacity to overfit)
 3. Try `--no_distillation` with `--lora_r 32` (minimal perturbation)
-4. Fall back to off-the-shelf Qwen3-Embedding-0.6B
+4. Fall back to off-the-shelf BGE-M3 for the Stage 2a feature and evaluate
+   Qwen3-Embedding-0.6B only as the documented inference-only auxiliary feature.
 
 **Slow training**: Disable distillation with `--no_distillation` to halve compute time.
 
@@ -156,5 +176,45 @@ src/
 ├── data_builder.py        # Training data construction (CPU)
 ├── losses.py              # CachedMNRL + self-distillation loss
 ├── train_bi_encoder.py    # Main training script (GPU)
-└── eval_bi_encoder.py     # Held-out country evaluation
+├── eval_bi_encoder.py     # Held-out country evaluation
+├── qwen_features.py       # Stage 2b Qwen3 inference pair features
+└── pair_features.py       # Stage 2c deterministic pair features
 ```
+
+## Stage 2b: Qwen feature generation
+
+Qwen is not fine-tuned. The feature builder applies the same entity-resolution
+instruction to S1 and S2/S3 records, normalizes both embedding sets, encodes
+each entity once, and scores only the final candidate set:
+
+```bash
+python -m src.qwen_features \
+    --source1 ../../dataset/test/test_source1.tsv \
+    --source2 ../../dataset/test/test_source2.tsv \
+    --source3 ../../dataset/test/test_source3.tsv \
+    --candidate-file ../../output/candidate_pairs.tsv \
+    --output-file ../../output/qwen_pair_features.tsv
+```
+
+The generated `qwen_pair_features.tsv` contains one row per candidate pair and
+the `qwen_pair_features.json` sidecar records model and encoding parameters.
+Retain this feature only if the Stage 3 Qwen ablation improves entity-level
+macro F0.5 without increasing false merges or harming country/source slices.
+
+## Stage 2c: deterministic pair features
+
+Build label-free lexical, address, numeric, postal, missingness, conflict, and
+candidate-rank features for the exact candidate set:
+
+```bash
+python -m src.pair_features `
+    --source1 ../../dataset/test/test_source1.tsv `
+    --source2 ../../dataset/test/test_source2.tsv `
+    --source3 ../../dataset/test/test_source3.tsv `
+    --candidate-file ../../output/candidate_pairs.tsv `
+    --output-file ../../output/pair_features.tsv
+```
+
+TF-IDF and other learned representations are intentionally excluded here and
+must be fitted inside each Stage 3 training fold. The extractor rejects
+unknown IDs and never consumes ground-truth labels.

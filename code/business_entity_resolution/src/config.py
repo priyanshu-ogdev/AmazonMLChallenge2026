@@ -1,12 +1,13 @@
 """
 Configuration dataclasses for bi-encoder LoRA fine-tuning.
 
-All committed parameters from docs_final/training.md and docs_final/parameters.md,
-with research upgrades (use_rslora, gradient_checkpointing) incorporated.
+All committed parameters from the Layer 2 design, with research upgrades
+(use_rslora, gradient_checkpointing) incorporated.
 
 These are the ACTUAL values to write into code — not protocols or ranges.
-Where open-decisions.md leaves something open, the value here is the
-starting point for that grid, grounded in the regularization/citations reasoning.
+Any controlled recovery values are documented in the Layer 2 overview and
+must be recorded as separate experiments rather than silently changing this
+baseline.
 """
 
 from dataclasses import dataclass, field
@@ -18,7 +19,7 @@ class LoRAConfig:
     """
     LoRA adapter configuration for BGE-M3 dense head.
 
-    Rationale (from docs_final/training.md + regularization.md):
+    Rationale (from docs/LAYER_2_OVERVIEW.md):
     - r=64: middle of the 32/64/128 sweep, chosen as a single committed value.
       Optimizer overhead (0.34GB) is negligible vs 10GB headroom on 3060.
     - lora_alpha=64 with use_rslora=True: rank-stabilized scaling (α/√r),
@@ -26,8 +27,9 @@ class LoRAConfig:
       ranks that biased Hu et al.'s original rank ablation (arXiv:2312.03732).
     - target_modules="all-linear": attention (query/key/value/dense) + FFN
       (intermediate.dense, output.dense), all layers. Never attention-only,
-      never top-N-only (regularization.md).
-    - lora_dropout=0.1: middle of the 0.05-0.1 range (regularization.md).
+      never top-N-only (docs/LAYER_2_OVERVIEW.md).
+    - lora_dropout=0.1: middle of the 0.05-0.1 range
+      (docs/LAYER_2_OVERVIEW.md).
     - bias="none": standard LoRA practice, keeps trainable param count minimal.
     """
     r: int = 64
@@ -44,7 +46,7 @@ class TrainingConfig:
     """
     Training hyperparameters for the bi-encoder LoRA fine-tune.
 
-    From docs_final/training.md "Committed fine-tuning config" section:
+    From docs/LAYER_2_OVERVIEW.md "Stage 2a" section:
     - physical_batch_size=48: mid-point of 32-64 range, fits in ~10GB headroom
     - mini_batch_size=16: GradCache chunk for CachedMultipleNegativesRankingLoss
     - max_seq_length=80: business name+address strings are short;
@@ -52,7 +54,8 @@ class TrainingConfig:
     - learning_rate=2e-5: standard LoRA fine-tune LR for sentence-transformer scale
     - warmup_ratio=0.1: standard warmup
     - epochs=3: small labeled set — more risks overfitting
-    - distillation_weight=0.10: mid-point of 0.05-0.15 range (training.md)
+    - distillation_weight=0.10: mid-point of the 0.05-0.15 range
+      (docs/LAYER_2_OVERVIEW.md)
     """
     # Model
     model_name: str = "BAAI/bge-m3"
@@ -92,7 +95,7 @@ class TrainingConfig:
     save_steps: int = 500
     save_total_limit: int = 3
     load_best_model_at_end: bool = True
-    metric_for_best_model: str = "eval_cosine_recall@10"
+    metric_for_best_model: str = "eval_held_out_country_cosine_recall@10"
 
     # Reproducibility
     seed: int = 42
@@ -137,7 +140,7 @@ class EvalConfig:
     """
     Evaluation configuration for the held-out-country gate.
 
-    Protocol (from docs_final/open-decisions.md):
+    Protocol (from docs/LAYER_2_OVERVIEW.md):
     - Train on US, validate on India (and reverse)
     - If held-out-country Recall@K is meaningfully worse than in-domain:
       raise distillation_weight or drop rank or fall back to off-the-shelf
@@ -165,7 +168,7 @@ class VRAMBudget:
     VRAM budget verification for RTX 3060 12GB.
     Computed directly from model architecture, not assumed.
 
-    From docs_final/training.md VRAM table:
+    From the Layer 2 VRAM budget:
     - Base weights (bf16, frozen): 568M × 2 bytes = 1.14 GB
     - LoRA trainable params (r=64, all-linear): 28.3M × 2 bytes = 0.06 GB
     - LoRA optimizer (AdamW: fp32 master + 2 moments): 28.3M × 12 bytes = 0.34 GB

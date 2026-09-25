@@ -1,74 +1,115 @@
 # ML Challenge 2026: Business Entity Resolution Solution Template
 
-**Team Name:** [Your Team Name]  
-**Team Members:** [List all team members]  
+**Team Name:** [Your Team Name]
+**Team Members:** [List all team members]
 **Submission Date:** [Date]
+
+> Use [`docs/FINAL_DESIGN.md`](docs/FINAL_DESIGN.md) as the implementation
+> contract. Replace result placeholders only with measured validation results.
 
 ---
 
 ## 1. Executive Summary
-*Provide a brief 2-3 sentence overview of your approach and key innovations.*
+
+This solution uses a precision-first staged pipeline: country-agnostic
+normalization, unioned high-recall blocking, dense and lexical pair features,
+an entity-grouped calibrated GBM, and macro-F0.5 thresholding with singleton
+handling. BGE-M3 LoRA provides the primary dense retrieval feature, while
+Qwen3-Embedding-0.6B is an inference-only auxiliary feature retained only if
+its ablation improves validation without increasing false merges.
 
 ---
 
 ## 2. Methodology
 
 ### 2.1 Problem Analysis
-*Key insights discovered during EDA — noise patterns, address variations, missing fields, etc.*
+
+Describe measured noise patterns from the supplied training data: business-name
+abbreviations and typos, address reordering and missing components, numeric
+tokens, country-specific formatting, and the distribution of singleton S1
+entities. Do not infer French behavior from external data.
 
 ### 2.2 Solution Strategy
-*Outline your high-level approach.*
 
-**Approach Type:** [Blocking + Classifier / End-to-End / Graph-Based / Hybrid, etc]  
-**Core Innovation:** [Brief description of your main technical contribution]
+The pipeline follows `docs/FINAL_DESIGN.md`: Stage 0 normalization, Stage 1
+unioned blocking, Stage 2 pair features, Stage 3 entity-grouped OOF GBM and
+calibration, Stage 4 macro-F0.5 thresholding, and Stage 5 submission
+validation. The BGE adapter is accepted only after both held-out-country
+directions pass the retrieval gate.
+
+**Approach Type:** Blocking + calibrated classifier (hybrid dense and lexical)
+**Core Innovation:** Multilingual BGE-M3 LoRA retrieval protected by rank
+limits, self-distillation, country-balanced data, hard negatives, and a
+held-out-country acceptance gate, combined with precision-first pair scoring.
 
 ---
 
 ## 3. Candidate Generation (Blocking)
-*Describe how you reduced the comparison space to a manageable candidate set.*
 
-- **Blocking keys used:** [e.g., PIN code, phonetic name encoding, TF-IDF, etc.]
-- **Candidate pairs generated:** [total]
-- **How you ensured true matches were not lost:**
+The candidate set is the union of normalized/exact name keys, character TF-IDF
+retrieval, address retrieval, phonetic keys, BGE dense retrieval, and optional
+Qwen dense retrieval. Candidate provenance and rank are retained as features.
+Candidate recall is measured by country and source before model training.
+`candidate_pairs.tsv` is exactly the final set passed to the scorer.
+
+- **Blocking keys used:** [fill with measured keys and K values]
+- **Candidate pairs generated:** [fill with measured total and distribution]
+- **How you ensured true matches were not lost:** [fill with measured recall,
+  including US/India slices and singleton count]
 
 ---
 
 ## 4. Matching Model
 
 **Features used:**
-- Name features: [e.g., Jaccard, Levenshtein, phonetic encoding]
-- Address features: [e.g., token overlap, edit distance, PIN code matching]
-- Other: []
+- Name: normalized exactness, token/character similarity, edit distance,
+  phonetic keys, and dense BGE/Qwen cosine features
+- Address: token/character overlap, numeric-token and postal-code agreement,
+  missingness, and edit distance
+- Other: country/source, blocker provenance/rank, and conflict indicators
 
-**Model type:** [e.g., XGBoost, Siamese Network, Transformer, etc.]  
-**Threshold selection method:** [e.g., F_0.5 optimization on validation set]
+**Model type:** Regularized GBM over pair features; BGE-M3 is the Stage 2a
+feature generator, not the final match decision-maker.
+**Threshold selection method:** Entity-level macro-F0.5 optimization on
+out-of-fold predictions, with singletons included.
 
 ---
 
 ## 5. Results & Error Analysis
 
-- **F_0.5 Score (macro):** [your best validation score]
+- **F_0.5 Score (macro):** [measured OOF score]
+- **Candidate recall and reduction ratio:** [measured values]
+- **BGE held-out-country gate:** [both directions and baseline comparison]
+- **Qwen ablation:** [measured delta, or explain why it was omitted]
 - **Common false positives (wrong merges):** [brief description]
 - **Common false negatives (missed matches):** [brief description]
 
 ---
 
 ## 6. Conclusion
-*Summarize your approach, key achievements, and lessons learned in 2-3 sentences.*
+
+Summarize the measured performance, the effect of the dense features, and the
+remaining error modes. State explicitly that only supplied challenge data was
+used and that the submission validator passed.
 
 ---
 
 ## Appendix
 
 ### A. Code Artefacts
-*Your complete, runnable code ships in the submission zip under
-`code/business_entity_resolution/` (all source in `src/`, with a `README.md` and
-`requirements.txt`). Summarise its structure and the entry point(s) to reproduce
-`output/matching_results.tsv` and `output/candidate_pairs.tsv` here.*
+
+The runnable code ships under `code/business_entity_resolution/`. The BGE
+Stage 2a entry points are `src/data_builder.py`,
+`src/train_bi_encoder.py`, and `src/eval_bi_encoder.py`. Summarize the final
+end-to-end entry point(s) used to reproduce
+`output/matching_results.tsv` and `output/candidate_pairs.tsv`.
 
 ### B. Additional Results
-*Include any additional charts, graphs, or detailed results.*
+
+Include candidate-recall plots, country/source slices, calibration diagnostics,
+threshold curves, and representative false-positive/false-negative examples.
 
 ---
 
-**Note:** Teams can modify sections according to their approach while maintaining clarity and technical depth.
+**Note:** Do not report planned metrics as achieved results. The authoritative
+stage contracts and stop rules are in `docs/FINAL_DESIGN.md`.

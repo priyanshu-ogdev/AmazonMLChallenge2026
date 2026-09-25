@@ -1,5 +1,10 @@
 # ML Challenge 2026 Problem Statement
 
+The finalized architecture and execution contract is documented in
+[`docs/FINAL_DESIGN.md`](docs/FINAL_DESIGN.md). The BGE-M3 module README
+documents the implemented Layer 2 feature components; the remaining stages
+must follow that contract.
+
 ## Business Entity Resolution Challenge
 
 In large-scale commercial platforms, business identity data arrives from multiple independent sources — each contributing partial, noisy fragments of information about the same real-world entities. These fragments share no common identifiers, and the challenge of determining which records refer to the same business is known as Entity Resolution (ER). Your challenge is to build an ML solution that, given business records from 3 independent data sources with noisy and inconsistent fields, determines which records across sources refer to the same real-world business entity.

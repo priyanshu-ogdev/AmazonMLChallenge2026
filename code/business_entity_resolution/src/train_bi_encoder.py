@@ -44,6 +44,7 @@ from sentence_transformers import (
     SentenceTransformer,
     SentenceTransformerTrainer,
     SentenceTransformerTrainingArguments,
+    util,
 )
 from sentence_transformers.training_args import BatchSamplers
 from sentence_transformers.evaluation import InformationRetrievalEvaluator
@@ -102,6 +103,8 @@ def create_model_with_lora(
     # Report parameter counts
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if trainable_params == 0:
+        raise RuntimeError("LoRA adapter produced no trainable parameters")
     logger.info(f"  Total parameters: {total_params:,}")
     logger.info(f"  Trainable parameters: {trainable_params:,} "
                 f"({100 * trainable_params / total_params:.2f}%)")
@@ -125,6 +128,11 @@ def create_frozen_model(
     logger.info(f"Loading frozen model for distillation: {model_name}")
     frozen_model = SentenceTransformer(model_name)
     frozen_model.max_seq_length = max_seq_length
+
+    # Match the training precision when CUDA/bf16 is available. Leaving this
+    # second 568M-parameter model in fp32 would invalidate the VRAM budget.
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        frozen_model = frozen_model.to(dtype=torch.bfloat16)
 
     # Freeze everything
     frozen_model.eval()
@@ -182,7 +190,10 @@ def create_evaluator(
         name=name,
         show_progress_bar=True,
         batch_size=64,
-        score_functions={"cosine": lambda a, b: torch.nn.functional.cosine_similarity(a, b)},
+        # InformationRetrievalEvaluator passes batched embedding matrices.
+        # util.cos_sim returns the required query-by-corpus score matrix;
+        # torch.cosine_similarity would incorrectly collapse the batch axis.
+        score_functions={"cosine": util.cos_sim},
     )
 
     return evaluator
@@ -308,7 +319,12 @@ def train(
         save_steps=training_config.save_steps,
         save_total_limit=training_config.save_total_limit,
         load_best_model_at_end=training_config.load_best_model_at_end if evaluator else False,
-        metric_for_best_model=training_config.metric_for_best_model if evaluator else None,
+        # InformationRetrievalEvaluator prefixes its named metric with the
+        # evaluator name, and Trainer prefixes it with "eval_".
+        metric_for_best_model=(
+            f"eval_{evaluator.name}_cosine_recall@10"
+            if evaluator else None
+        ),
         # Batch sampling
         batch_sampler=BatchSamplers.NO_DUPLICATES,
         # Reproducibility

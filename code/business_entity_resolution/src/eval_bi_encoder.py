@@ -5,7 +5,7 @@ This is the GO/NO-GO GATE: if the fine-tuned model's retrieval quality
 on the held-out country is meaningfully worse than in-domain, the
 anti-forgetting stack is insufficient and the fine-tune should not be trusted.
 
-Protocol (from docs_final/training.md + open-decisions.md):
+Protocol (from docs/LAYER_2_OVERVIEW.md):
 1. Load the fine-tuned bi-encoder
 2. Encode eval queries (held-out country S1 entities)
 3. Encode eval corpus (held-out country S2/S3 entities)
@@ -13,10 +13,11 @@ Protocol (from docs_final/training.md + open-decisions.md):
 5. Compare against off-the-shelf baseline (optional)
 6. Report go/no-go decision
 
-Fallback if gate fails:
+Recovery if gate fails:
 - Raise self_distillation_weight toward 0.15
 - Or drop LoRA rank to 32
-- Or fall back to off-the-shelf Qwen3-Embedding-0.6B
+- Or fall back to off-the-shelf BGE-M3 for the Stage 2a feature
+- Evaluate Qwen3-Embedding-0.6B separately as an auxiliary Stage 2b feature
 
 Usage:
     python -m src.eval_bi_encoder \\
@@ -140,7 +141,7 @@ def compute_margin_analysis(
     Margin analysis: what fraction of queries have a positive pair
     scoring higher than the hardest negative by at least `margin`.
 
-    This is the cheap proxy evaluation from docs_final/training.md:
+    This is the cheap proxy evaluation from docs/LAYER_2_OVERVIEW.md:
     "margin/score-gap pass rate drives early stopping within a run"
     """
     if margin_thresholds is None:
@@ -322,7 +323,8 @@ def evaluate_model(
         logger.info("\n  Recommended actions:")
         logger.info("  1. Raise self_distillation_weight toward 0.15")
         logger.info("  2. Or drop LoRA rank to 32")
-        logger.info("  3. Or fall back to off-the-shelf Qwen3-Embedding-0.6B")
+        logger.info("  3. Fall back to off-the-shelf BGE-M3 for Stage 2a")
+        logger.info("  4. Evaluate Qwen3-Embedding-0.6B separately as Stage 2b")
 
     # Save results
     output_path = Path(data_dir) / "eval_results.json"

@@ -19,7 +19,15 @@ Lowercase, strip punctuation, collapse whitespace. Legal-suffix and address-abbr
 
 **Model: BGE-M3, kept stock or only lightly domain-adapted.** This is a structural choice, not one arm of an ablation — BGE-M3 is a bidirectional encoder that emits dense, sparse, and ColBERT-style vectors in one forward pass, so its sparse output is a free BM25-equivalent that a heavier or decoder-style model wouldn't provide. Blocking sets the pipeline's recall ceiling: nothing downstream can recover an entity dropped here, so this stage is deliberately kept loose (recall-favoring) rather than sharply discriminative.
 
-Combined with: token inverted index, phonetic blocking (Soundex/Metaphone), and address-token blocking. All strategies are **unioned**, then given one light similarity-floor filter. That final, filtered set — not an earlier unfiltered pass — is exactly what gets written to `candidate_pairs.tsv`, and every ID in `matching_results.tsv` must appear there too. **Concrete top-K, floor, and cap values, plus the ANN/exact-search implementation choice, are in `parameters.md` — this section specifies behavior, that file specifies the numbers to actually write into code.**
+Combined with: token inverted index, character TF-IDF retrieval, phonetic
+blocking where script-safe, and address-token blocking. All strategies are
+**unioned**, then deterministically ranked and capped. Country is a partition
+optimization only when both sides have a non-empty canonical value; missing or
+unknown-country records retain a global fallback. That final set — not an
+earlier pass — is exactly what gets written to `candidate_pairs.tsv`, and every
+ID in `matching_results.tsv` must appear there too. Concrete top-K, floor, and
+cap values, plus the scale plan, are in `docs/LAYER_1_OVERVIEW.md` and
+`parameters.md`.
 
 **A dedicated blocking-recall audit gate is part of this stage, not an afterthought.** Because blocking sets the recall ceiling for everything downstream, its recall should be measured directly against `train_ground_truth` — what fraction of true matches actually appear somewhere in the unioned candidate set — sliced by country, before any time is spent tuning Stage 2 or 3. This is the one measurement in the whole pipeline where a bad result can't be compensated for later, so it's worth confirming first rather than discovering only after the matching stage has already been tuned around whatever recall blocking happened to produce. If recall comes in measurably worse for the held-out-country proxy than for the in-domain countries, the fix belongs here (strengthening phonetic/address-token blocking specifically) — not in the matching stage, which has no mechanism to recover an entity blocking never retrieved.
 
