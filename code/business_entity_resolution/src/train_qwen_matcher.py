@@ -22,6 +22,7 @@ Key architectural invariants:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import math
@@ -43,6 +44,7 @@ from src.qwen_matcher_features import (
     format_matcher_prompt,
     load_candidates,
     load_records,
+    resolve_verdict_token_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,7 +71,7 @@ def build_labeled_training_pairs(
     records = load_records(list(source1_files) + list(candidate_source_files))
 
     # Load ground truth
-    gt_df = pd.read_csv(ground_truth_file, sep="\t", dtype=str, keep_default_na=False)
+    gt_df = pd.read_csv(ground_truth_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     matches_map: Dict[str, set] = {}
     for _, row in gt_df.iterrows():
         s1 = str(row["source1_entity_id"]).strip()
@@ -276,6 +278,8 @@ def train_qwen_matcher(
     max_seq_length: int = 224,
     seed: int = 42,
     device: Optional[str] = None,
+    merge_lora: bool = False,
+    merge_output_dir: Optional[str] = None,
 ) -> Dict:
     """
     Execute Stage 2b Qwen3-0.6B LoRA training.
@@ -312,11 +316,10 @@ def train_qwen_matcher(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    yes_ids = tokenizer.encode(YES_TOKEN, add_special_tokens=False)
-    no_ids = tokenizer.encode(NO_TOKEN, add_special_tokens=False)
-    if len(yes_ids) != 1 or len(no_ids) != 1:
-        raise ValueError(f"Label tokens must encode to single token IDs; got yes={yes_ids}, no={no_ids}")
-    yes_id, no_id = yes_ids[0], no_ids[0]
+    yes_id, no_id = resolve_verdict_token_ids(
+        tokenizer, prompt_suffix="Match:", yes_word=YES_TOKEN, no_word=NO_TOKEN
+    )
+    logger.info(f"Resolved in-context verdict tokens: yes_id={yes_id}, no_id={no_id}")
 
     # 3. Load base model and apply rsLoRA
     logger.info(f"Loading base model {base_model_name} in bfloat16")
@@ -462,6 +465,14 @@ def train_qwen_matcher(
     model.save_pretrained(str(output_path))
     tokenizer.save_pretrained(str(output_path))
 
+    if merge_lora or merge_output_dir:
+        m_out = Path(merge_output_dir) if merge_output_dir else (output_path / "merged")
+        m_out.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Merging LoRA weights into base model -> {m_out}")
+        merged_model = model.merge_and_unload()
+        merged_model.save_pretrained(str(m_out))
+        tokenizer.save_pretrained(str(m_out))
+
     metadata = {
         "base_model": base_model_name,
         "mode": mode,
@@ -509,6 +520,8 @@ def main() -> None:
     parser.add_argument("--no_distillation", action="store_true")
     parser.add_argument("--max_seq_length", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--merge_lora", action="store_true", help="Merge LoRA adapter into base model weights before exit")
+    parser.add_argument("--merge_output_dir", type=str, default=None, help="Directory to save merged base model")
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -534,6 +547,8 @@ def main() -> None:
         negatives_per_positive=args.negatives_per_positive,
         max_seq_length=args.max_seq_length,
         seed=args.seed,
+        merge_lora=args.merge_lora,
+        merge_output_dir=args.merge_output_dir,
     )
 
 

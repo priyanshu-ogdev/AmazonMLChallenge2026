@@ -10,6 +10,7 @@ will be scored downstream. No candidate is created or removed here.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 from pathlib import Path
@@ -74,7 +75,7 @@ def load_records(paths: Iterable[Path]) -> Dict[str, str]:
     records: Dict[str, str] = {}
     for path in paths:
         path = Path(path)
-        frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+        frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
         if "entity_id" not in frame.columns:
             raise ValueError(f"{path} is missing required column: entity_id")
 
@@ -97,7 +98,7 @@ def load_records(paths: Iterable[Path]) -> Dict[str, str]:
 
 def load_candidates(path: Path) -> List[Tuple[str, str]]:
     """Expand candidate_pairs.tsv into unique (S1, candidate) rows."""
-    frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     required = {"source1_entity_id", "candidate_entity_ids"}
     missing = required - set(frame.columns)
     if missing:
@@ -185,7 +186,7 @@ def build_qwen_features(
         columns=["source1_entity_id", "candidate_entity_id", "qwen_cosine", "qwen_cosine_missing"],
     )
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    result.to_csv(output_file, sep="\t", index=False)
+    result.to_csv(output_file, sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
     metadata = {
         "model_name": model_name,
         "instruction": instruction,

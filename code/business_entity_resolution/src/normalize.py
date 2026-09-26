@@ -521,6 +521,22 @@ def normalize_name(name: str) -> str:
     return name.strip()
 
 
+def is_missing_address(address: Optional[str]) -> bool:
+    """
+    Canonical missing address detection across Layer 0 and Layer 1.
+    Returns True if address is None, empty, NaN/null sentinels, or placeholder text.
+    """
+    if address is None:
+        return True
+    addr = str(address).strip().lower()
+    return (
+        addr in ("nan", "none", "null", "", "no address", "no address available", "not available", "unknown", "n/a", "missing")
+        or len(addr) == 0
+        or addr.startswith("no address")
+        or addr.startswith("missing")
+    )
+
+
 def normalize_address(address: str) -> str:
     """
     Normalize a business address for lexical matching and embedding.
@@ -541,10 +557,7 @@ def normalize_address(address: str) -> str:
     Returns:
         Normalized address string. Empty string for null/empty/missing input.
     """
-    if address is None:
-        return ""
-    address = str(address).strip()
-    if address.lower() in ("nan", "none", "null", ""):
+    if is_missing_address(address):
         return ""
     address = _unicode_normalize(address)
     address = _strip_urls(address)
@@ -580,20 +593,13 @@ def normalize_entity(name: str, address: str) -> str:
     """
     norm_name = normalize_name(name)
     norm_address = normalize_address(address)
+    is_missing = is_missing_address(address)
 
-    raw_addr = str(address).strip() if address is not None else ""
-    is_structurally_missing = raw_addr.lower() in ("nan", "none", "null", "")
-
-    if norm_name and norm_address:
-        return "{} | {}".format(norm_name, norm_address)
-    elif norm_name and is_structurally_missing:
-        return "{} | [NO_ADDRESS]".format(norm_name)
-    elif norm_name:
-        return norm_name
-    elif norm_address:
-        return norm_address
-    else:
+    if not norm_name and (is_missing or not norm_address):
         return "[NO_ADDRESS]"
+    if is_missing or not norm_address:
+        return f"{norm_name} | [NO_ADDRESS]"
+    return f"{norm_name} | {norm_address}"
 
 
 # ---------------------------------------------------------------------------
@@ -604,9 +610,14 @@ def normalize_entity(name: str, address: str) -> str:
 # ---------------------------------------------------------------------------
 
 _COUNTRY_ALIAS_CLASSES = [
-    ["us", "usa", "united states", "united states of america", "u s", "u s a"],
-    ["india", "in", "bharat"],
-    ["france", "fr"],
+    ["us", "usa", "united states", "united states of america", "u s", "u s a", "america"],
+    ["india", "in", "ind", "bharat", "hindustan"],
+    ["france", "fr", "fra", "francia", "french republic", "republique francaise"],
+    ["uk", "gb", "gbr", "united kingdom", "great britain"],
+    ["germany", "de", "deu", "deutschland"],
+    ["canada", "ca", "can"],
+    ["spain", "es", "esp", "espana"],
+    ["italy", "it", "ita", "italia"],
 ]
 
 def _build_country_map(classes):
@@ -618,6 +629,9 @@ def _build_country_map(classes):
     return out
 
 _COUNTRY_MAP = _build_country_map(_COUNTRY_ALIAS_CLASSES)
+
+# Major distinct markets known to be disjoint in the training ground truth.
+KNOWN_CANONICAL_COUNTRIES = frozenset({"us", "india"})
 
 def canonicalize_country(country: str) -> str:
     """
@@ -658,7 +672,7 @@ def source_from_entity_id(entity_id: str) -> str:
 
 _DIGIT_RUN_RE = re.compile(r"\b\d{4,10}(?:-\d{3,4})?\b")
 _TRAILING_SEGMENT_RE = re.compile(r",\s*([^,]+)$")
-_STREET_NUM_RE = re.compile(r"^\s*(\d{1,6})\b")
+_STREET_NUM_RE = re.compile(r"^\s*(?:#+\s*)?(\d{1,6})\b")
 
 
 def extract_structural_fields(address: str) -> Dict[str, object]:
@@ -666,11 +680,11 @@ def extract_structural_fields(address: str) -> Dict[str, object]:
     Extract generic language-agnostic structural sub-fields from address text:
       - digit_runs: candidate PIN/ZIP/postal/house-no codes (4-10 digits)
       - trailing_segment: last comma-separated segment (often city/state/region)
-      - street_number: leading digit run if address begins with a number
+      - street_number: leading digit run if address begins with a number (handles ## prefix)
     """
-    if not address:
+    if not address or is_missing_address(address):
         return {"digit_runs": [], "trailing_segment": None, "street_number": None}
-    addr_str = str(address).strip()
+    addr_str = _strip_address_hash_prefix(str(address).strip())
     digit_runs = _DIGIT_RUN_RE.findall(addr_str)
     trailing = _TRAILING_SEGMENT_RE.search(addr_str)
     trailing_segment = trailing.group(1).strip() if trailing else None
@@ -727,11 +741,11 @@ def normalize_entity_record(
     norm_address = normalize_address(address)
 
     raw_addr = str(address).strip() if address is not None else ""
-    is_missing = raw_addr.lower() in ("nan", "none", "null", "") or len(raw_addr) == 0
+    is_missing = is_missing_address(address)
 
     postal = extract_postal_code(raw_addr if not is_missing else "", country=country)
     encoder_text = normalize_entity(name, address)
-    structural = extract_structural_fields(raw_addr if not is_missing else "")
+    structural = extract_structural_fields(norm_address if norm_address else raw_addr)
 
     return {
         "entity_id":            entity_id,
@@ -758,7 +772,8 @@ def extract_postal_code(address: str, country: Optional[str] = None) -> Optional
     Extract postal/ZIP code from an address string.
 
     If country is provided:
-      - 'us': extracts 5-digit US ZIP (or ZIP+4 prefix). 6-digit street numbers ignored.
+      - 'us': extracts 5-digit US ZIP (or ZIP+4 prefix). 6-digit street numbers and
+        leading 5-digit house numbers (e.g. '12045 Main St') without true ZIPs are guarded.
       - 'india': extracts 6-digit Indian PIN (starting 1-9). 5-digit plot numbers ignored.
       - 'france': extracts 5-digit French postal code.
     If country is None or unrecognized:
@@ -774,15 +789,26 @@ def extract_postal_code(address: str, country: Optional[str] = None) -> Optional
     Returns:
         Postal code string, or None if no recognized pattern found.
     """
-    if not address:
+    if not address or is_missing_address(address):
         return None
     addr_str = str(address)
 
     c = canonicalize_country(country) if country else ""
 
     if c == "us":
-        us_matches = _ZIPCODE_RE.findall(addr_str)
-        return us_matches[-1] if us_matches else None
+        matches = list(_ZIPCODE_RE.finditer(addr_str))
+        if not matches:
+            return None
+        last_match = matches[-1]
+        # Guard: if the only 5-digit number is the leading street number (e.g. '12045 Main St')
+        if last_match.start() == 0 or re.match(r"^\s*(?:#+\s*)?" + re.escape(last_match.group(1)) + r"\b\s*[a-zA-Z]", addr_str):
+            if len(matches) == 1:
+                rest = addr_str[last_match.end():].strip()
+                if rest:
+                    return None
+            else:
+                return matches[-2].group(1)
+        return last_match.group(1)
 
     if c == "india":
         in_matches = _INDIA_PIN_RE.findall(addr_str)
@@ -822,8 +848,8 @@ def normalize_dataframe_records(
     """
     Normalize all records in a pandas DataFrame using normalize_entity_record.
 
-    Memory-efficient: processes rows without constructing intermediate DataFrames.
-    Intended as a drop-in replacement for data_builder.records_to_dict().
+    High-performance: uses itertuples for 10-50x speedup over iterrows().
+    Intended as a fast drop-in replacement for data_builder.records_to_dict().
 
     Args:
         df: pandas DataFrame with business entity columns.
@@ -835,14 +861,22 @@ def normalize_dataframe_records(
     Returns:
         List of dicts from normalize_entity_record.
     """
+    if df is None or len(df) == 0:
+        return []
     import pandas as pd
 
+    cols = list(df.columns)
+    id_idx = cols.index(id_col) if id_col in cols else None
+    name_idx = cols.index(name_col) if name_col in cols else None
+    addr_idx = cols.index(address_col) if address_col in cols else None
+    ctry_idx = cols.index(country_col) if country_col in cols else None
+
     results = []
-    for _, row in df.iterrows():
-        eid = str(row.get(id_col, "")) if pd.notna(row.get(id_col)) else ""
-        name = str(row.get(name_col, "")) if pd.notna(row.get(name_col)) else ""
-        addr = str(row.get(address_col, "")) if pd.notna(row.get(address_col)) else ""
-        ctry = str(row.get(country_col, "")) if pd.notna(row.get(country_col)) else ""
+    for row in df.itertuples(index=False, name=None):
+        eid = str(row[id_idx]) if id_idx is not None and pd.notna(row[id_idx]) else ""
+        name = str(row[name_idx]) if name_idx is not None and pd.notna(row[name_idx]) else ""
+        addr = str(row[addr_idx]) if addr_idx is not None and pd.notna(row[addr_idx]) else ""
+        ctry = str(row[ctry_idx]) if ctry_idx is not None and pd.notna(row[ctry_idx]) else ""
         results.append(
             normalize_entity_record(name, addr, entity_id=eid, country=ctry)
         )

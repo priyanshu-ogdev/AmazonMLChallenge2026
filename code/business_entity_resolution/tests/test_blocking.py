@@ -195,6 +195,94 @@ class TestBlockingChannels(unittest.TestCase):
         # Address structural must not match
         self.assertFalse(any("address_structural" in h["blocker_provenance"] for h in hits))
 
+    def test_acronym_word_tokens_not_polluted(self):
+        """Verify common short words ('east', 'side', 'auto', 'cafe', 'and') are not treated as acronyms."""
+        rec1 = BlockingRecord.from_row(
+            entity_id="S1-1",
+            name="East Side Auto Repair",
+            address="123 Main St",
+            country="US",
+        )
+        self.assertNotIn("east", rec1.acronyms)
+        self.assertNotIn("side", rec1.acronyms)
+        self.assertNotIn("auto", rec1.acronyms)
+        self.assertIn("es", rec1.acronyms)
+        self.assertIn("esar", rec1.acronyms)
+
+        rec2 = BlockingRecord.from_row(
+            entity_id="S1-2",
+            name="West End Bakery and Cafe",
+            address="456 Oak Ave",
+            country="US",
+        )
+        self.assertNotIn("and", rec2.acronyms)
+        self.assertNotIn("west", rec2.acronyms)
+        self.assertNotIn("cafe", rec2.acronyms)
+        self.assertNotIn("end", rec2.acronyms)
+
+    def test_channel2_configurable_similarity_floor(self):
+        """Channel 2 respects configurable similarity_floor (e.g. 0.20 for recall recovery)."""
+        blocker = MultiChannelBlocker(similarity_floor=0.20)
+        cand = BlockingRecord.from_row(
+            entity_id="S2-999",
+            name="The Global International Logistics Corporation of North America",
+            address="100 Harbor Dr, Seattle, WA",
+            country="US",
+        )
+        blocker.index_candidate(cand)
+
+        # S1 shares a character overlap ("Global") with candidate
+        s1 = BlockingRecord.from_row(
+            entity_id="S1-999",
+            name="Global Worldwide Enterprises",
+            address="500 Pine St, Seattle, WA",
+            country="US",
+        )
+        hits = blocker.generate_candidates_for_record(s1)
+        self.assertTrue(any(h["candidate_entity_id"] == "S2-999" for h in hits))
+        char_hit = next(h for h in hits if h["candidate_entity_id"] == "S2-999")
+        self.assertIn("char_ngram", char_hit["blocker_provenance"])
+
+    def test_from_row_with_precomputed_stage0_fields(self):
+        """Verify BlockingRecord.from_row preserves precomputed Stage 0 fields directly."""
+        rec = BlockingRecord.from_row(
+            entity_id="S1-PRE",
+            name="Precomputed Name Inc",
+            address="123 Precomputed Way",
+            country="US",
+            norm_name="precomputed name incorporated",
+            norm_address="123 precomputed way",
+            canonical_country="us",
+            is_address_missing=False,
+            postal_code="98101",
+            street_number="123",
+            trailing_segment="Seattle, WA 98101",
+        )
+        self.assertEqual(rec.norm_name, "precomputed name incorporated")
+        self.assertEqual(rec.postal_code, "98101")
+        self.assertEqual(rec.street_number, "123")
+        self.assertFalse(rec.is_address_missing)
+
+    def test_read_tsv_records_quote_resilience(self):
+        """read_tsv_records correctly parses unclosed quotes in TSVs without dropping rows."""
+        import tempfile
+        tsv_content = (
+            "entity_id\tbusiness_name\tbusiness_address\tcountry\n"
+            "S2-001\t\"6 Inch Sub Shop\t123 Main St\tUS\n"
+            "S2-002\tNormal Business Name\t456 Oak Ave\tUS\n"
+        )
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".tsv") as tf:
+            tf.write(tsv_content)
+            temp_path = Path(tf.name)
+        try:
+            from src.blocking import read_tsv_records
+            records = list(read_tsv_records([temp_path]))
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0]["entity_id"], "S2-001")
+            self.assertEqual(records[1]["entity_id"], "S2-002")
+        finally:
+            temp_path.unlink(missing_ok=True)
+
 
 class TestCountryPartitioning(unittest.TestCase):
     """Verify strict country partitioning invariants."""
@@ -453,6 +541,34 @@ class TestEndToEndBlockingExecution(unittest.TestCase):
             data = json.load(f)
             self.assertIn("p95", data["candidates_per_s1"])
 
+    def test_cross_country_fallback_recovers_mismatched_spelling(self):
+        """Verify that an entity with an unrecognized or mismatched country spelling is recovered via fallback."""
+        blocker = MultiChannelBlocker(
+            top_k_sparse=10,
+            top_k_dense=10,
+            max_candidates_per_entity=50,
+            similarity_floor=0.30,
+        )
+        cand = BlockingRecord.from_row(
+            entity_id="S2-999",
+            name="Unique Global Enterprises",
+            address="100 Main St, Paris",
+            country="France",
+        )
+        blocker.index_candidate(cand)
+
+        # S1 has a non-empty, different country tag (e.g. unknown code or typo 'fr-xyz')
+        s1 = BlockingRecord.from_row(
+            entity_id="S1-999",
+            name="Unique Global Enterprises",
+            address="100 Main St, Paris",
+            country="fr-xyz",
+        )
+        candidates = blocker.generate_candidates_for_record(s1)
+        cand_ids = [c["candidate_entity_id"] for c in candidates]
+        self.assertIn("S2-999", cand_ids)
+
 
 if __name__ == "__main__":
     unittest.main()
+

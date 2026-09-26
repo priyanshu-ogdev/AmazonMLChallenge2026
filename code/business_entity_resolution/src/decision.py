@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 from typing import Dict, Iterable
@@ -12,7 +13,7 @@ import pandas as pd
 
 
 def load_source1_ids(path: Path) -> list[str]:
-    frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     if "entity_id" not in frame:
         raise ValueError(f"{path} must contain entity_id")
     ids = [str(x).strip() for x in frame["entity_id"] if str(x).strip()]
@@ -110,7 +111,7 @@ def write_matching_results(
     if output_file is None:
         raise ValueError("output_file must be provided")
 
-    scored = pd.read_csv(scored_file, sep="\t", dtype=str, keep_default_na=False)
+    scored = pd.read_csv(scored_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     if threshold is not None:
         effective_threshold = float(threshold)
     elif metadata_file is not None:
@@ -127,7 +128,7 @@ def write_matching_results(
         injective=injective,
     )
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    result.to_csv(output_file, sep="\t", index=False)
+    result.to_csv(output_file, sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
 
 
 def main() -> None:

@@ -1020,9 +1020,61 @@ class TestLayer2DataBuilder(unittest.TestCase):
         dist = loss._compute_distillation_chunked(features)
         self.assertAlmostEqual(dist.item(), 2.0 / 6.0, places=4)
 
+    def test_resolve_verdict_token_ids_in_context_vs_standalone(self):
+        """Verify resolve_verdict_token_ids resolves in-context continuation token, not standalone."""
+        from src.qwen_matcher_features import resolve_verdict_token_ids
+
+        class MockBpeTokenizer:
+            def __init__(self):
+                # Simulate Byte-level BPE:
+                # Standalone 'Yes' -> [100]
+                # ' Yes' with space -> [101]
+                # 'Match:' -> [50, 51]
+                # 'Match: Yes' -> [50, 51, 101]
+                # Standalone 'No' -> [200]
+                # ' No' with space -> [201]
+                # 'Match: No' -> [50, 51, 201]
+                self.map = {
+                    "Match:": [50, 51],
+                    "Yes": [100],
+                    "No": [200],
+                    " Yes": [101],
+                    " No": [201],
+                    "Match: Yes": [50, 51, 101],
+                    "Match: No": [50, 51, 201],
+                    "Match:Yes": [50, 51, 100],
+                    "Match:No": [50, 51, 200],
+                }
+
+            def encode(self, text, add_special_tokens=False):
+                if text in self.map:
+                    return list(self.map[text])
+                raise KeyError(text)
+
+        tok = MockBpeTokenizer()
+        yes_id, no_id = resolve_verdict_token_ids(tok, prompt_suffix="Match:")
+        # Crucial: in-context continuation of 'Match:' is ' Yes' (101), NOT standalone 'Yes' (100)
+        self.assertEqual(yes_id, 101)
+        self.assertEqual(no_id, 201)
+
+    def test_resolve_verdict_token_ids_error_on_identical(self):
+        """Verify resolve_verdict_token_ids raises ValueError if yes and no resolve to same ID."""
+        from src.qwen_matcher_features import resolve_verdict_token_ids
+
+        class MockBrokenTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                if text == "Match:":
+                    return [50]
+                return [50, 999]  # Both Yes and No map to 999
+
+        tok = MockBrokenTokenizer()
+        with self.assertRaises(ValueError):
+            resolve_verdict_token_ids(tok, prompt_suffix="Match:")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

@@ -47,9 +47,11 @@ from typing import (
 )
 
 from src.normalize import (
+    KNOWN_CANONICAL_COUNTRIES,
     canonicalize_country,
     extract_postal_code,
     extract_structural_fields,
+    is_missing_address,
     normalize_address,
     normalize_name,
     source_from_entity_id,
@@ -62,6 +64,8 @@ MAX_CANDIDATES_PER_ENTITY = 100
 SIMILARITY_FLOOR = 0.30
 MAX_TOKEN_DOC_FREQ = 0.02
 MAX_TOKEN_DOC_COUNT = 5000
+MAX_NGRAM_DOC_FREQ = 0.20
+MAX_NGRAM_DOC_COUNT = 50000
 MIN_TOKEN_LEN = 3
 
 EXACT_BLOCKERS = {
@@ -76,6 +80,20 @@ EXACT_BLOCKERS = {
 }
 
 _WORD_RE = re.compile(r"[\w]+", flags=re.UNICODE)
+
+_KNOWN_ACRONYMS = {
+    "ge", "ibm", "hp", "ups", "fedex", "dhl", "bmw", "sap", "att", "cvs",
+    "pnc", "hsbc", "kpmg", "ey", "pwc", "bbva", "td", "bmo", "cibc", "citi",
+    "ubs", "cs", "amc", "cbs", "nbc", "abc", "cnn", "fox", "espn", "hbo",
+    "mri", "dna", "gmc", "vw", "fca", "byd", "tata", "lg", "nec", "jvc",
+    "sony", "jpm", "bofa", "bnp", "ing", "aig", "axa", "geico", "mci",
+    "ncr", "trw", "itt", "bap", "cat", "jcb", "cnh", "agco",
+}
+
+_ACRONYM_SKIP = {
+    "in", "at", "of", "on", "to", "by", "or", "an", "as", "is", "it",
+    "de", "la", "le", "du", "et", "en", "st", "rd", "and", "the", "for",
+}
 
 
 def _tokenize(text: str) -> List[str]:
@@ -94,15 +112,6 @@ def _char_ngrams(text: str) -> List[str]:
         for i in range(max(0, len(padded) - n + 1)):
             ngrams.append(padded[i : i + n])
     return ngrams
-
-
-def _char_trigrams(text: str) -> Set[str]:
-    """Extract character trigrams with edge padding (backward compatibility)."""
-    compact = re.sub(r"\s+", " ", text or "").strip()
-    if not compact:
-        return set()
-    padded = f"  {compact}  "
-    return {padded[i : i + 3] for i in range(max(0, len(padded) - 2))}
 
 
 @dataclass
@@ -124,10 +133,18 @@ class BlockingRecord:
     token_counts: Counter[str]
     first_2_tokens: Optional[str]
     acronyms: Set[str]
-    ngrams: List[str]
     ngram_counts: Counter[str]
-    trigrams: Set[str]
     first_word: Optional[str]
+
+    @property
+    def ngrams(self) -> List[str]:
+        """Dynamic access to character ngrams without storing duplicate list references."""
+        return list(self.ngram_counts.elements())
+
+    @property
+    def trigrams(self) -> Set[str]:
+        """Dynamic backward-compatible access to character trigrams."""
+        return {g for g in self.ngram_counts if len(g) == 3}
 
     @classmethod
     def from_row(
@@ -136,21 +153,36 @@ class BlockingRecord:
         name: str,
         address: str,
         country: str,
+        norm_name: Optional[str] = None,
+        norm_address: Optional[str] = None,
+        canonical_country: Optional[str] = None,
+        is_address_missing: Optional[bool] = None,
+        postal_code: Optional[str] = None,
+        street_number: Optional[str] = None,
+        trailing_segment: Optional[str] = None,
     ) -> BlockingRecord:
-        n_name = normalize_name(name)
-        n_addr = normalize_address(address)
-        canon_c = canonicalize_country(country)
-        raw_addr = str(address).strip() if address is not None else ""
-        raw_addr_lower = raw_addr.lower()
-        is_addr_missing = (
-            raw_addr_lower in ("nan", "none", "null", "", "no address", "no address available", "not available", "unknown", "n/a", "missing")
-            or len(raw_addr) == 0
-            or raw_addr_lower.startswith("no address")
-        )
-        struct = extract_structural_fields(address)
-        postal = extract_postal_code(address, country=canon_c)
-        street_no = struct.get("street_number")
-        trailing = struct.get("trailing_segment")
+        n_name = norm_name if norm_name is not None else normalize_name(name)
+        n_addr = norm_address if norm_address is not None else normalize_address(address)
+        canon_c = canonical_country if canonical_country is not None else canonicalize_country(country)
+
+        if is_address_missing is not None:
+            is_addr_missing = bool(is_address_missing)
+        else:
+            is_addr_missing = is_missing_address(address)
+
+        if postal_code is not None:
+            postal = postal_code if postal_code else None
+        else:
+            postal = extract_postal_code(address if not is_addr_missing else "", country=canon_c)
+
+        if street_number is not None and trailing_segment is not None:
+            street_no = street_number if street_number else None
+            trailing = trailing_segment if trailing_segment else None
+        else:
+            struct = extract_structural_fields(n_addr if n_addr else (address if not is_addr_missing else ""))
+            street_no = street_number if street_number is not None else struct.get("street_number")
+            trailing = trailing_segment if trailing_segment is not None else struct.get("trailing_segment")
+
         tokens = _tokenize(n_name)
         token_counts = Counter(tokens)
         first_word = tokens[0] if tokens else None
@@ -162,7 +194,7 @@ class BlockingRecord:
         # First-2-Tokens Key
         first_2_tokens = " ".join(content_words[:2]) if len(content_words) >= 2 else None
 
-        # Acronym Keys (both 2-letter prefix, full initials, and explicit short tokens)
+        # Acronym Keys (both 2-letter prefix, full initials, and explicit short acronym tokens)
         acronyms: Set[str] = set()
         if len(content_words) >= 2:
             # 2-letter prefix acronym (e.g. General Electric -> ge)
@@ -172,17 +204,19 @@ class BlockingRecord:
             if 2 <= len(full_acr) <= 6:
                 acronyms.add(full_acr)
 
-        # Explicit short tokens (e.g. 'ge' in 'ge healthcare' or standalone 'ibm')
-        _short_skip = {"in", "at", "of", "on", "to", "by", "or", "an", "as", "is", "it", "de", "la", "le", "du", "et", "en", "st", "rd"}
-        for w in raw_words:
-            if 2 <= len(w) <= 4 and w not in _short_skip:
-                acronyms.add(w)
-
+        # Explicit short acronym tokens (e.g. 'GE' in 'GE Healthcare' or standalone 'IBM')
+        # Only tokens that are all-uppercase in the raw name or in curated _KNOWN_ACRONYMS
+        raw_tokens = _WORD_RE.findall(str(name or ""))
+        for tok in raw_tokens:
+            low = tok.lower()
+            if low in _ACRONYM_SKIP:
+                continue
+            if (tok.isupper() and 2 <= len(tok) <= 5) or low in _KNOWN_ACRONYMS:
+                acronyms.add(low)
 
         # 3-gram and 4-gram character tokens
         ngrams = _char_ngrams(n_name) if len(n_name) >= 3 else []
         ngram_counts = Counter(ngrams)
-        trigrams = set(ngrams)
 
         return cls(
             entity_id=entity_id.strip(),
@@ -201,21 +235,19 @@ class BlockingRecord:
             token_counts=token_counts,
             first_2_tokens=first_2_tokens,
             acronyms=acronyms,
-            ngrams=ngrams,
             ngram_counts=ngram_counts,
-            trigrams=trigrams,
             first_word=first_word,
         )
 
 
-def read_tsv_records(paths: Iterable[Path]) -> Iterator[Dict[str, str]]:
+def read_tsv_records(paths: Iterable[Path]) -> Iterator[Dict[str, Any]]:
     """Yield entity rows from one or more raw challenge TSVs or Layer 0 normalized TSVs."""
     for path in paths:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Input TSV does not exist: {path}")
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            reader = csv.DictReader(handle, delimiter="\t")
+            reader = csv.DictReader(handle, delimiter="\t", quoting=csv.QUOTE_NONE)
             fieldnames = set(reader.fieldnames or [])
             if "entity_id" not in fieldnames:
                 raise ValueError(f"{path} is missing required 'entity_id' column")
@@ -230,11 +262,31 @@ def read_tsv_records(paths: Iterable[Path]) -> Iterator[Dict[str, str]]:
                 name = row.get("business_name") or row.get("raw_name") or row.get("norm_name") or ""
                 addr = row.get("business_address") or row.get("raw_address") or row.get("norm_address") or ""
                 country = row.get("country") or row.get("country_canonical") or ""
+
+                # Optional precomputed Stage 0 fields
+                norm_name = row.get("norm_name")
+                norm_address = row.get("norm_address")
+                canonical_country = row.get("country_canonical")
+                raw_missing = row.get("is_address_missing")
+                is_missing = None
+                if raw_missing is not None and raw_missing != "":
+                    is_missing = str(raw_missing).strip().lower() in ("true", "1", "t")
+                postal_code = row.get("postal_code")
+                street_number = row.get("street_number")
+                trailing_segment = row.get("trailing_segment")
+
                 yield {
                     "entity_id": row.get("entity_id", ""),
                     "business_name": name,
                     "business_address": addr,
                     "country": country,
+                    "norm_name": norm_name,
+                    "norm_address": norm_address,
+                    "canonical_country": canonical_country,
+                    "is_address_missing": is_missing,
+                    "postal_code": postal_code,
+                    "street_number": street_number,
+                    "trailing_segment": trailing_segment,
                 }
 
 
@@ -251,6 +303,8 @@ class MultiChannelBlocker:
         similarity_floor: float = SIMILARITY_FLOOR,
         max_token_doc_freq: float = MAX_TOKEN_DOC_FREQ,
         max_token_doc_count: int = MAX_TOKEN_DOC_COUNT,
+        max_ngram_doc_freq: float = MAX_NGRAM_DOC_FREQ,
+        max_ngram_doc_count: int = MAX_NGRAM_DOC_COUNT,
     ):
         self.top_k_sparse = top_k_sparse
         self.top_k_dense = top_k_dense
@@ -258,6 +312,8 @@ class MultiChannelBlocker:
         self.similarity_floor = similarity_floor
         self.max_token_doc_freq = max_token_doc_freq
         self.max_token_doc_count = max_token_doc_count
+        self.max_ngram_doc_freq = max_ngram_doc_freq
+        self.max_ngram_doc_count = max_ngram_doc_count
 
         # Total indexed candidate records
         self.num_candidates = 0
@@ -328,7 +384,7 @@ class MultiChannelBlocker:
             ][country].append(cid)
 
         # 2. Character 3/4-Gram Inverted Index
-        for gram in set(record.ngrams):
+        for gram in record.ngram_counts:
             self.index_ngrams[gram][country].append(cid)
             self.ngram_doc_counts[gram] += 1
 
@@ -346,10 +402,13 @@ class MultiChannelBlocker:
         index: Dict[Any, Dict[str, List[str]]],
         key: Any,
         s1_country: str,
+        allow_cross_country_fallback: bool = True,
     ) -> List[str]:
         """
         Query an index respecting the country partitioning invariant:
         - If s1_country != "": matching partition + records with missing country ("")
+        - If matching partition has 0 hits and allow_cross_country_fallback is True:
+          softly search across all other partitions to recover spelling variants / cross-country matches!
         - If s1_country == "": global search across all partitions
         """
         sub = index.get(key)
@@ -360,6 +419,17 @@ class MultiChannelBlocker:
             hits = list(sub.get(s1_country, []))
             if "" in sub:
                 hits.extend(sub[""])
+            if not hits and allow_cross_country_fallback:
+                # Soft fallback: if exact partition has NO hits for this key,
+                # search across all other compatible partitions.
+                # Invariant: Disjoint known markets (US vs India) are never crossed.
+                # Open-set and unrecognized country labels are searched to recover typos and ISO3 variants.
+                for c, partition_list in sub.items():
+                    if c == s1_country or c == "":
+                        continue
+                    if s1_country in KNOWN_CANONICAL_COUNTRIES and c in KNOWN_CANONICAL_COUNTRIES:
+                        continue
+                    hits.extend(partition_list)
             return hits
         else:
             # S1 country is missing -> global fallback
@@ -450,12 +520,15 @@ class MultiChannelBlocker:
         # -------------------------------------------------------------
         # Channel 2: Character 3/4-Gram Sub-Linear TF-IDF Retrieval
         # -------------------------------------------------------------
-        if s1.ngrams:
+        if s1.ngram_counts:
             s1_gram_counts = s1.ngram_counts
+            max_allowed_ngram_freq = max(50, int(self.num_candidates * self.max_ngram_doc_freq))
+            max_allowed_ngram_count = min(self.max_ngram_doc_count, max_allowed_ngram_freq)
+
             s1_weights: Dict[str, float] = {}
             for gram, count in s1_gram_counts.items():
                 doc_cnt = self.ngram_doc_counts.get(gram, 0)
-                if doc_cnt == 0:
+                if doc_cnt == 0 or doc_cnt > max_allowed_ngram_count:
                     continue
                 tf = 1.0 + math.log(count)
                 idf = math.log(1.0 + (self.num_candidates - doc_cnt + 0.5) / (doc_cnt + 0.5))
@@ -475,12 +548,12 @@ class MultiChannelBlocker:
                 s1_norm = math.sqrt(sum(w * w for w in s1_weights.values()))
                 if cand_scores and s1_norm > 0:
                     scored_cands = []
-                    for cid, raw_score in cand_scores.most_common(self.top_k_sparse * 2):
+                    for cid, raw_score in cand_scores.most_common(self.top_k_sparse * 3):
                         cand_rec = self.candidate_records[cid]
-                        cand_len = len(cand_rec.ngrams)
+                        cand_len = sum(cand_rec.ngram_counts.values())
                         norm_factor = s1_norm * math.sqrt(max(1, cand_len))
                         sim = min(1.0, raw_score / norm_factor)
-                        if sim >= 0.30:
+                        if sim >= self.similarity_floor:
                             scored_cands.append((cid, sim))
 
                     scored_cands.sort(key=lambda x: -x[1])
@@ -656,41 +729,72 @@ class DenseRetrievalIndex:
             return {}
         import numpy as np
 
-        if country in self.faiss_indexes:
-            index, idxs = self.faiss_indexes[country]
-            k = min(top_k, len(idxs))
-            if k == 0:
-                return {}
-            distances, indices = index.search(emb.reshape(1, -1), k)
-            scores: Dict[str, float] = {}
-            for dist, idx in zip(distances[0], indices[0]):
-                if idx >= 0 and dist >= self.similarity_floor:
-                    cid = self.candidate_ids[idxs[idx]]
-                    scores[cid] = float(dist)
-            return scores
-        elif country in self.partition_indices:
-            idxs = self.partition_indices[country]
-            if not idxs:
-                return {}
-            sub_embs = self.partition_embs.get(country)
-            if sub_embs is None:
-                sub_embs = self.candidate_embs[idxs]
-            dots = np.dot(sub_embs, emb)
-            top_order = np.argsort(-dots)[:top_k]
-            scores = {}
-            for rank_i in top_order:
-                score = float(dots[rank_i])
-                if score >= self.similarity_floor:
-                    scores[self.candidate_ids[idxs[rank_i]]] = score
-            return scores
-        return {}
+        scores: Dict[str, float] = {}
+        target_countries = [country] if country else []
+        if "" in self.partition_indices and "" not in target_countries:
+            target_countries.append("")
+
+        for c in target_countries:
+            if c in self.faiss_indexes:
+                index, idxs = self.faiss_indexes[c]
+                k = min(top_k, len(idxs))
+                if k > 0:
+                    distances, indices = index.search(emb.reshape(1, -1), k)
+                    for dist, idx in zip(distances[0], indices[0]):
+                        if idx >= 0 and dist >= self.similarity_floor:
+                            cid = self.candidate_ids[idxs[idx]]
+                            scores[cid] = max(scores.get(cid, 0.0), float(dist))
+            elif c in self.partition_indices:
+                idxs = self.partition_indices[c]
+                if idxs:
+                    sub_embs = self.partition_embs.get(c)
+                    if sub_embs is None:
+                        sub_embs = self.candidate_embs[idxs]
+                    dots = np.dot(sub_embs, emb)
+                    top_order = np.argsort(-dots)[:top_k]
+                    for rank_i in top_order:
+                        score = float(dots[rank_i])
+                        if score >= self.similarity_floor:
+                            cid = self.candidate_ids[idxs[rank_i]]
+                            scores[cid] = max(scores.get(cid, 0.0), score)
+
+        # Soft fallback: if zero hits in primary partition (e.g. unknown country spelling),
+        # query remaining compatible partitions with a soft 0.95 cross-country discount
+        if not scores:
+            other_countries = [c for c in self.partition_indices if c not in target_countries]
+            for c in other_countries:
+                if country in KNOWN_CANONICAL_COUNTRIES and c in KNOWN_CANONICAL_COUNTRIES:
+                    continue
+                if c in self.faiss_indexes:
+                    index, idxs = self.faiss_indexes[c]
+                    k = min(top_k, len(idxs))
+                    if k > 0:
+                        distances, indices = index.search(emb.reshape(1, -1), k)
+                        for dist, idx in zip(distances[0], indices[0]):
+                            if idx >= 0 and dist >= self.similarity_floor:
+                                cid = self.candidate_ids[idxs[idx]]
+                                scores[cid] = max(scores.get(cid, 0.0), float(dist) * 0.95)
+                elif c in self.partition_indices:
+                    idxs = self.partition_indices[c]
+                    if idxs:
+                        sub_embs = self.partition_embs.get(c)
+                        if sub_embs is None:
+                            sub_embs = self.candidate_embs[idxs]
+                        dots = np.dot(sub_embs, emb)
+                        top_order = np.argsort(-dots)[:top_k]
+                        for rank_i in top_order:
+                            score = float(dots[rank_i])
+                            if score >= self.similarity_floor:
+                                cid = self.candidate_ids[idxs[rank_i]]
+                                scores[cid] = max(scores.get(cid, 0.0), score * 0.95)
+        return scores
 
 
 def load_ground_truth(path: Path) -> Dict[str, Set[str]]:
     """Load ground truth mapping: source1_entity_id -> set of matched_entity_ids."""
     gt: Dict[str, Set[str]] = {}
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
+        reader = csv.DictReader(handle, delimiter="\t", quoting=csv.QUOTE_NONE)
         for row in reader:
             s1_id = row.get("source1_entity_id", "").strip()
             raw_matched = row.get("matched_entity_ids", "").strip()
@@ -737,6 +841,13 @@ def run_blocking(
             name=row["business_name"],
             address=row["business_address"],
             country=row["country"],
+            norm_name=row.get("norm_name"),
+            norm_address=row.get("norm_address"),
+            canonical_country=row.get("canonical_country"),
+            is_address_missing=row.get("is_address_missing"),
+            postal_code=row.get("postal_code"),
+            street_number=row.get("street_number"),
+            trailing_segment=row.get("trailing_segment"),
         )
         blocker.index_candidate(rec)
         cand_count += 1
@@ -785,12 +896,14 @@ def run_blocking(
     with open(candidate_pairs_path, "w", encoding="utf-8", newline="") as pairs_file, \
          open(provenance_path, "w", encoding="utf-8", newline="") as prov_file:
 
-        pairs_writer = csv.writer(pairs_file, delimiter="\t")
+        pairs_writer = csv.writer(pairs_file, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
         pairs_writer.writerow(["source1_entity_id", "candidate_entity_ids"])
 
         prov_writer = csv.DictWriter(
             prov_file,
             delimiter="\t",
+            quoting=csv.QUOTE_NONE,
+            escapechar="\\",
             fieldnames=[
                 "source1_entity_id",
                 "candidate_entity_id",
@@ -813,6 +926,13 @@ def run_blocking(
                 name=row["business_name"],
                 address=row["business_address"],
                 country=row["country"],
+                norm_name=row.get("norm_name"),
+                norm_address=row.get("norm_address"),
+                canonical_country=row.get("canonical_country"),
+                is_address_missing=row.get("is_address_missing"),
+                postal_code=row.get("postal_code"),
+                street_number=row.get("street_number"),
+                trailing_segment=row.get("trailing_segment"),
             )
 
             dense_scores = (

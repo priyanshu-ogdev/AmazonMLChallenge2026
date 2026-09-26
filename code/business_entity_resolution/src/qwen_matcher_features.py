@@ -21,6 +21,7 @@ stack). This module implements inference/feature-extraction only.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 from pathlib import Path
@@ -84,9 +85,74 @@ def format_matcher_prompt(
     )
 
 
+def resolve_verdict_token_ids(
+    tokenizer,
+    prompt_suffix: str = "Match:",
+    yes_word: str = YES_TOKEN,
+    no_word: str = NO_TOKEN,
+) -> Tuple[int, int]:
+    """
+    Resolve the exact in-context token IDs for 'Yes' and 'No' following the prompt suffix.
+
+    Byte-level BPE tokenizers (like Qwen, GPT, LLaMA) encode words differently depending
+    on preceding whitespace and punctuation. Standalone encoding (e.g. tokenizer.encode('Yes'))
+    can resolve to a different token ID than the one the model naturally produces as a
+    continuation after 'Match:'.
+
+    This function tests the in-context continuation ('Match: Yes' and 'Match: No'),
+    extracts the terminal token ID, and verifies that it appends exactly one token to the prefix.
+    If the prompt suffix does not end with space, it tests with leading space first (' Yes' / ' No'),
+    falling back to without space ('Yes' / 'No') if needed.
+    """
+    prefix_clean = prompt_suffix.rstrip()
+    prefix_ids = tokenizer.encode(prefix_clean, add_special_tokens=False)
+
+    candidates_yes = [f"{prefix_clean} {yes_word}", f"{prefix_clean}{yes_word}"]
+    candidates_no = [f"{prefix_clean} {no_word}", f"{prefix_clean}{no_word}"]
+
+    yes_id = None
+    for cand in candidates_yes:
+        ids = tokenizer.encode(cand, add_special_tokens=False)
+        if len(ids) == len(prefix_ids) + 1 and ids[:len(prefix_ids)] == prefix_ids:
+            yes_id = ids[-1]
+            break
+
+    no_id = None
+    for cand in candidates_no:
+        ids = tokenizer.encode(cand, add_special_tokens=False)
+        if len(ids) == len(prefix_ids) + 1 and ids[:len(prefix_ids)] == prefix_ids:
+            no_id = ids[-1]
+            break
+
+    # If contextual continuation didn't match prefix exactly due to BPE merge across colon:
+    if yes_id is None or no_id is None:
+        yes_candidates = [f" {yes_word}", yes_word]
+        no_candidates = [f" {no_word}", no_word]
+        for y_str in yes_candidates:
+            y_ids = tokenizer.encode(y_str, add_special_tokens=False)
+            if len(y_ids) == 1:
+                yes_id = y_ids[0]
+                break
+        for n_str in no_candidates:
+            n_ids = tokenizer.encode(n_str, add_special_tokens=False)
+            if len(n_ids) == 1:
+                no_id = n_ids[0]
+                break
+
+    if yes_id is None or no_id is None:
+        raise ValueError(
+            f"Could not resolve single-token verdict IDs for '{yes_word}'/'{no_word}' "
+            f"in context of '{prompt_suffix}'"
+        )
+    if yes_id == no_id:
+        raise ValueError(f"Resolved identical token ID {yes_id} for both Yes and No")
+
+    return int(yes_id), int(no_id)
+
+
 class QwenMatcherScorer:
     """
-    Loads the LoRA-fine-tuned Qwen3-0.6B checkpoint and computes a sliced
+    Loads the LoRA-fine-tuned (or merged) Qwen3-0.6B checkpoint and computes a sliced
     2-way softmax P(Match) at the verdict token position -- see
     docs/07_stage2b_qwen3_generative_matcher_spec.md Section 5.2.
     """
@@ -114,8 +180,17 @@ class QwenMatcherScorer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "right"
-        base = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.bfloat16)
-        self.model = PeftModel.from_pretrained(base, adapter_path)
+
+        base_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
+        adapter_path_obj = Path(adapter_path)
+        adapter_config = adapter_path_obj / "adapter_config.json"
+        if adapter_config.exists():
+            base = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=base_dtype)
+            self.model = PeftModel.from_pretrained(base, str(adapter_path))
+        else:
+            # Merged or standalone model
+            self.model = AutoModelForCausalLM.from_pretrained(str(adapter_path), torch_dtype=base_dtype)
+
         self.model.eval()
         if device:
             self.model.to(device)
@@ -123,16 +198,12 @@ class QwenMatcherScorer:
         self.max_seq_length = max_seq_length
         self.batch_size = batch_size
 
-        # Resolve the fixed Yes/No label-word token ids once, not per batch.
-        yes_ids = self.tokenizer.encode(YES_TOKEN, add_special_tokens=False)
-        no_ids = self.tokenizer.encode(NO_TOKEN, add_special_tokens=False)
-        if len(yes_ids) != 1 or len(no_ids) != 1:
-            raise ValueError(
-                f"Expected single-token Yes/No for {base_model_name}'s tokenizer; "
-                f"got {yes_ids} / {no_ids}. Adjust YES_TOKEN/NO_TOKEN or the "
-                "prompt template if this tokenizer splits them differently."
-            )
-        self.yes_id, self.no_id = yes_ids[0], no_ids[0]
+        # Resolve the in-context Yes/No label-word token ids once, not per batch.
+        self.yes_id, self.no_id = resolve_verdict_token_ids(
+            self.tokenizer, prompt_suffix="Match:", yes_word=YES_TOKEN, no_word=NO_TOKEN
+        )
+        logger.info(f"Resolved in-context verdict tokens: yes_id={self.yes_id}, no_id={self.no_id}")
+
 
     def score_pairs(self, prompts: Sequence[str]) -> np.ndarray:
         """Return P(Match) in [0, 1] for each prompt, via sliced 2-way softmax."""
@@ -195,7 +266,7 @@ def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
     """
     records: Dict[str, Dict[str, str]] = {}
     for path in paths:
-        frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+        frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
         if "entity_id" not in frame.columns:
             raise ValueError(f"{path} is missing required column: entity_id")
         name_col = next((c for c in ("business_name", "norm_name", "raw_name") if c in frame.columns), None)
@@ -217,7 +288,7 @@ def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
 
 
 def load_candidates(candidate_file: Path) -> List[Tuple[str, str]]:
-    frame = pd.read_csv(candidate_file, sep="\t", dtype=str, keep_default_na=False)
+    frame = pd.read_csv(candidate_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     pairs: List[Tuple[str, str]] = []
     for row in frame.itertuples():
         source1_id = str(row.source1_entity_id).strip()
@@ -276,7 +347,7 @@ def build_qwen_matcher_features(
         }
     )
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    result.to_csv(output_file, sep="\t", index=False)
+    result.to_csv(output_file, sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
     metadata = {
         "adapter_path": adapter_path,
         "base_model_name": base_model_name,

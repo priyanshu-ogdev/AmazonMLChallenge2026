@@ -35,7 +35,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sentence_transformers import SentenceTransformer
-from sentence_transformers.losses import CachedMultipleNegativesRankingLoss
+try:
+    from sentence_transformers.sentence_transformer.losses import CachedMultipleNegativesRankingLoss
+except ImportError:
+    from sentence_transformers.losses import CachedMultipleNegativesRankingLoss
 from typing import Optional, Dict, List, Iterable
 import logging
 

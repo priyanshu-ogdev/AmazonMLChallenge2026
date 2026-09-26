@@ -334,6 +334,51 @@ class TestDownstreamContracts(unittest.TestCase):
             self.assertEqual(out_df[out_df["source1_entity_id"] == "S1-2"].iloc[0]["matched_entity_ids"], "")
             self.assertEqual(out_df[out_df["source1_entity_id"] == "S1-3"].iloc[0]["matched_entity_ids"], "")
 
+    def test_layer2_inv5_tsv_parsing(self):
+        """Verify bge_features and qwen_matcher_features parse TSVs with unescaped double quotes under INV-5."""
+        import tempfile
+        from src.bge_features import load_candidates as bge_load_candidates, load_records as bge_load_records
+        from src.qwen_matcher_features import load_candidates as qwen_load_candidates, load_records as qwen_load_records
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            s1_file = tmp / "source1.tsv"
+            cand_file = tmp / "candidate_pairs.tsv"
+
+            # TSV with literal unescaped double quotes in name and address
+            raw_s1_content = (
+                "entity_id\tbusiness_name\tbusiness_address\tcountry\n"
+                "S1-1\tJoe's \"Best\" Pizza\t100 5th Ave, Suite \"A\"\tUS\n"
+                "S1-2\tRegular Shop\t200 Main St\tUS\n"
+            )
+            s1_file.write_text(raw_s1_content, encoding="utf-8")
+
+            raw_cand_content = (
+                "source1_entity_id\tcandidate_entity_ids\n"
+                "S1-1\tS2-1,S3-1\n"
+                "S1-2\t\n"
+            )
+            cand_file.write_text(raw_cand_content, encoding="utf-8")
+
+            # BGE features
+            bge_records = bge_load_records([s1_file])
+            self.assertIn("S1-1", bge_records)
+            self.assertIn("S1-2", bge_records)
+            bge_pairs = bge_load_candidates(cand_file)
+            self.assertEqual(len(bge_pairs), 2)
+            self.assertEqual(bge_pairs[0], ("S1-1", "S2-1"))
+            self.assertEqual(bge_pairs[1], ("S1-1", "S3-1"))
+
+            # Qwen matcher features
+            qwen_records = qwen_load_records([s1_file])
+            self.assertIn("S1-1", qwen_records)
+            self.assertIn("S1-2", qwen_records)
+            self.assertIn("Joe's \"Best\" Pizza", qwen_records["S1-1"]["name"])
+            qwen_pairs = qwen_load_candidates(cand_file)
+            self.assertEqual(len(qwen_pairs), 2)
+            self.assertEqual(qwen_pairs[0], ("S1-1", "S2-1"))
+            self.assertEqual(qwen_pairs[1], ("S1-1", "S3-1"))
+
 
 if __name__ == "__main__":
     unittest.main()

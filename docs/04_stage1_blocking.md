@@ -91,6 +91,7 @@ flowchart TD
 ### Channel 2: Character N-Gram Sub-Linear TF-IDF Retrieval
 - Extracts character 3-grams and 4-grams with edge padding from normalized business names.
 - Sub-linear term frequency scaling: $\text{tf} = 1 + \log(\text{count})$, weighted by smoothed IDF: $\log(1 + (N - n_t + 0.5)/(n_t + 0.5))$.
+- Enforces an upper document-frequency guard (`MAX_NGRAM_DOC_FREQ = 0.20`, `MAX_NGRAM_DOC_COUNT = 50000`) to prevent ubiquitous edge n-grams from distorting query latency.
 - Queries S1 against the candidate inverted index, retrieving top $K=50$ candidates per entity.
 - Highly resilient to character transpositions, missing vowels, and spelling corruptions.
 
@@ -115,17 +116,18 @@ flowchart TD
 ## 4. Multi-Channel Union, Floor, and Priority Capping
 
 ### 4.1 Candidate Aggregation Rules
-1. **Union All Channels:** Form the initial candidate set $\mathcal{C}_i = \bigcup_{c=1}^4 \mathcal{C}_{i,c}$ for each S1 entity $i$.
+1. **Union All Channels:** Form the initial candidate set $\mathcal{C}_i = \bigcup_{c=1}^5 \mathcal{C}_{i,c}$ for each S1 entity $i$.
 2. **Apply Similarity Floor (`SIMILARITY_FLOOR = 0.30`):**
    - The floor is applied **strictly to candidates introduced solely via dense ANN retrieval**.
    - Candidates discovered via lexical, character TF-IDF, phonetic, or postal channels pass through regardless of dense similarity score. (Discarding lexical/postal matches due to low dense cosine would destroy the very independence multi-channel blocking exists to provide).
 3. **Capacity Cap (`MAX_CANDIDATES_PER_ENTITY = 100`):**
    - To bound downstream feature extraction and scoring compute, candidate shortlists exceeding 100 records are trimmed.
-   - Trimming uses a **deterministic multi-tier priority sort**, never arbitrary file order:
-     1. Highest number of independent matching channels (e.g., candidate retrieved by 3 channels ranks above candidate retrieved by 1).
-     2. Exact name or postal code match flag.
-     3. Maximum channel similarity score.
-     4. Deterministic string sort on `candidate_entity_id` for stable tie-breaking.
+   - Trimming uses a **deterministic 5-tier priority sort**, never arbitrary file order:
+     1. Highest number of independent matching channels (`-blocker_cnt`).
+     2. Exact name or postal code match flag (`-exact_val`).
+     3. Maximum channel similarity score (`-round(best_score, 4)`).
+     4. Best channel rank across matching channels (`best_rank`, lower rank preferred).
+     5. Deterministic string sort on `candidate_entity_id` (`cid`) for stable tie-breaking.
 
 ---
 

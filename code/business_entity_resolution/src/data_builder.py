@@ -127,7 +127,7 @@ def stream_source_tsv(path: str | Path) -> Iterator[Dict[str, Any]]:
     Safe for 5M+ row files without loading into memory.
     """
     with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter="\t")
+        reader = csv.DictReader(f, delimiter="\t", quoting=csv.QUOTE_NONE)
         required = {"entity_id", "business_name", "business_address", "country"}
         missing = required - set(reader.fieldnames or [])
         if missing:
@@ -159,7 +159,7 @@ def normalize_tsv_file(
     buffer = []
 
     with open(out_path, "w", newline="", encoding="utf-8") as out_f:
-        writer = csv.DictWriter(out_f, delimiter="\t", fieldnames=STAGE0_TSV_COLUMNS)
+        writer = csv.DictWriter(out_f, delimiter="\t", fieldnames=STAGE0_TSV_COLUMNS, quoting=csv.QUOTE_NONE, escapechar="\\")
         writer.writeheader()
 
         for rec in stream_source_tsv(in_path):
@@ -283,7 +283,7 @@ def load_entity_country_map(
     country_map = {}
     for chunk in pd.read_csv(
         source1_path, sep="\t", usecols=["entity_id", "country"],
-        chunksize=chunk_size, dtype=str,
+        chunksize=chunk_size, dtype=str, quoting=csv.QUOTE_NONE,
     ):
         for eid, country in zip(chunk["entity_id"], chunk["country"]):
             c_str = str(country) if pd.notna(country) else ""
@@ -304,7 +304,7 @@ def load_records_by_ids(
     logger.info(f"Loading records from {filepath} ({len(entity_ids):,} target IDs)...")
     chunks = []
     total_read = 0
-    for chunk in pd.read_csv(filepath, sep="\t", chunksize=chunk_size, dtype=str):
+    for chunk in pd.read_csv(filepath, sep="\t", chunksize=chunk_size, dtype=str, quoting=csv.QUOTE_NONE):
         matched = chunk[chunk["entity_id"].isin(entity_ids)]
         if len(matched) > 0:
             chunks.append(matched)
@@ -334,7 +334,7 @@ def load_random_sample_by_country(
     all_candidates = []
     c_canon = canonicalize_country(country)
 
-    for chunk in pd.read_csv(filepath, sep="\t", chunksize=chunk_size, dtype=str):
+    for chunk in pd.read_csv(filepath, sep="\t", chunksize=chunk_size, dtype=str, quoting=csv.QUOTE_NONE):
         chunk_c = chunk["country"].fillna("").astype(str).map(canonicalize_country)
         mask = (chunk_c == c_canon) & (~chunk["entity_id"].isin(exclude_ids))
         filtered = chunk[mask]
@@ -357,7 +357,7 @@ def load_random_sample_by_country(
 def load_ground_truth(gt_path: str) -> pd.DataFrame:
     """Load and parse ground truth file, filtering out singletons for pair training."""
     logger.info(f"Loading ground truth from {gt_path}...")
-    gt = pd.read_csv(gt_path, sep="\t", dtype=str)
+    gt = pd.read_csv(gt_path, sep="\t", dtype=str, quoting=csv.QUOTE_NONE)
     logger.info(f"  Total rows: {len(gt):,}")
 
     gt_with_matches = gt[gt["matched_entity_ids"].notna()].copy()
@@ -385,7 +385,7 @@ def load_candidates_map(path: Union[str, Path]) -> Dict[str, List[str]]:
         raise FileNotFoundError(f"Candidate file not found: {path}")
     candidates_map: Dict[str, List[str]] = {}
     with open(path, "r", encoding="utf-8", errors="replace") as f:
-        reader = csv.DictReader(f, delimiter="\t")
+        reader = csv.DictReader(f, delimiter="\t", quoting=csv.QUOTE_NONE)
         for row in reader:
             s1_id = row.get("source1_entity_id", "").strip()
             raw_cands = row.get("candidate_entity_ids", "").strip()
@@ -868,10 +868,10 @@ def run_self_test(test_dir: str = "./tmp_test_data") -> bool:
     ]
 
     # Write synthetic TSVs
-    pd.DataFrame(s1_rows).to_csv(train_dir / "train_source1.tsv", sep="\t", index=False)
-    pd.DataFrame(s2_rows).to_csv(train_dir / "train_source2.tsv", sep="\t", index=False)
-    pd.DataFrame(s3_rows).to_csv(train_dir / "train_source3.tsv", sep="\t", index=False)
-    pd.DataFrame(gt_rows).to_csv(train_dir / "train_ground_truth.tsv", sep="\t", index=False)
+    pd.DataFrame(s1_rows).to_csv(train_dir / "train_source1.tsv", sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
+    pd.DataFrame(s2_rows).to_csv(train_dir / "train_source2.tsv", sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
+    pd.DataFrame(s3_rows).to_csv(train_dir / "train_source3.tsv", sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
+    pd.DataFrame(gt_rows).to_csv(train_dir / "train_ground_truth.tsv", sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
 
     print("[1] Testing Stage 0 streaming normalization...")
     norm_out = test_path / "stage0_normalized"

@@ -14,6 +14,7 @@ Implements the complete Layer 3 pipeline:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 from pathlib import Path
@@ -219,7 +220,7 @@ def extract_feature_importances(
 
 
 def load_ground_truth(path: Path) -> Dict[str, set[str]]:
-    frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     required = {"source1_entity_id", "matched_entity_ids"}
     missing = required - set(frame.columns)
     if missing:
@@ -254,7 +255,7 @@ def attach_labels(
 def merge_feature_file(features: pd.DataFrame, path: Optional[Path]) -> pd.DataFrame:
     if path is None:
         return features
-    extra = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    extra = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     required = {"source1_entity_id", "candidate_entity_id"}
     missing = required - set(extra.columns)
     if missing:
@@ -476,7 +477,7 @@ def score_candidates(
             f"Corrupt stage3_metadata.json in {artifact_dir}: missing required keys {sorted(missing_keys)}"
         )
 
-    frame = pd.read_csv(feature_file, sep="\t", dtype=str, keep_default_na=False)
+    frame = pd.read_csv(feature_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     frame = merge_feature_file(frame, qwen_file)
     frame = merge_feature_file(frame, bge_file)
     # qwen_matcher_file is Stage 2b (stretch, docs/07_stage2b_...): pass None
@@ -882,7 +883,7 @@ def run_training(
             "one_drop": 0,
         })
 
-    frame = pd.read_csv(feature_file, sep="\t", dtype=str, keep_default_na=False)
+    frame = pd.read_csv(feature_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     frame = merge_feature_file(frame, qwen_file)
     frame = merge_feature_file(frame, bge_file)
     # Stage 2b (stretch): only merged when the held-out-country gate passed
@@ -939,7 +940,7 @@ def run_training(
     output_dir.mkdir(parents=True, exist_ok=True)
     model.save_model(str(output_dir / "gbm.json"))
     oof.assign(calibrated_score=calibrated).to_csv(
-        output_dir / "oof_predictions.tsv", sep="\t", index=False
+        output_dir / "oof_predictions.tsv", sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\"
     )
 
     # Held-out country cross-evaluation diagnostic
@@ -1096,7 +1097,7 @@ def main() -> None:
             records=records,
         )
         args.output_file.parent.mkdir(parents=True, exist_ok=True)
-        scored.to_csv(args.output_file, sep="\t", index=False)
+        scored.to_csv(args.output_file, sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
         print(f"Scored {len(scored)} candidate pairs -> {args.output_file}")
 
 

@@ -247,6 +247,56 @@ class TestLayer0Normalization(unittest.TestCase):
         self.assertEqual(source_from_entity_id("INVALID-123"), "")
         self.assertEqual(source_from_entity_id(""), "")
 
+    def test_tsv_unclosed_quote_resilience(self):
+        """INV-5: Stray leading quote in business name must not swallow subsequent rows."""
+        import csv
+        import io
+        tsv_data = (
+            "entity_id\tbusiness_name\tbusiness_address\tcountry\n"
+            "S2-000001\t\"6 Inch Sub Shop\t123 Main St\tUS\n"
+            "S2-000002\tNormal Business Name\t456 Oak Ave\tUS\n"
+        )
+        reader = csv.DictReader(io.StringIO(tsv_data), delimiter="\t", quoting=csv.QUOTE_NONE)
+        rows = list(reader)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["entity_id"], "S2-000001")
+        self.assertEqual(rows[1]["entity_id"], "S2-000002")
+        self.assertEqual(rows[1]["business_name"], "Normal Business Name")
+
+    def test_street_number_s3_hash_prefix(self):
+        """Street number extraction correctly handles S3-style '##' address prefixes."""
+        struct = extract_structural_fields("##1234 Willow Oak Lane, Fl. 0, Saint Louis, Missouri 63108")
+        self.assertEqual(struct.get("street_number"), "1234")
+        self.assertEqual(struct.get("trailing_segment"), "Missouri 63108")
+
+        rec = normalize_entity_record("Willow Oak Clinic", "##8 Willow Oak Lane, Saint Louis, MO 63108")
+        self.assertEqual(rec["street_number"], "8")
+
+    def test_postal_code_us_street_number_guard(self):
+        """US postal extraction does not falsely treat a 5-digit leading street number as a ZIP code."""
+        addr_no_zip = "12045 Main St, Springfield, IL"
+        postal = extract_postal_code(addr_no_zip, country="us")
+        self.assertIsNone(postal)
+
+        addr_with_zip = "12045 Main St, Springfield, IL 62701"
+        postal_real = extract_postal_code(addr_with_zip, country="us")
+        self.assertEqual(postal_real, "62701")
+
+    def test_is_missing_address_canonical_coverage(self):
+        """Canonical missing address check detects all vendor placeholder strings."""
+        from src.normalize import is_missing_address
+        placeholders = [
+            "", "   ", None, "nan", "NaN", "null", "NULL", "none",
+            "no address", "no address available", "not available",
+            "unknown", "n/a", "N/A", "missing", "Missing Address"
+        ]
+        for p in placeholders:
+            self.assertTrue(is_missing_address(p), f"Failed to identify '{p}' as missing address")
+
+        real_addresses = ["123 Main St", "PO Box 45", "MG Road Bangalore"]
+        for a in real_addresses:
+            self.assertFalse(is_missing_address(a), f"Falsely identified '{a}' as missing address")
+
 
 if __name__ == "__main__":
     unittest.main()

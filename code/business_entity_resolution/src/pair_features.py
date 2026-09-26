@@ -9,6 +9,7 @@ and other learned statistics belong in the Stage 3 fold-specific pipeline.
 from __future__ import annotations
 
 import argparse
+import csv
 import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -215,7 +216,7 @@ def pair_feature_row(
 def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
     records: Dict[str, Dict[str, str]] = {}
     for path in paths:
-        frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+        frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
         if "entity_id" not in frame.columns:
             raise ValueError(f"{path} is missing required column: entity_id")
         name_col = next((c for c in ("business_name", "raw_name", "norm_name") if c in frame.columns), None)
@@ -243,7 +244,7 @@ def build_pair_features(
     provenance_file: Optional[Path] = None,
 ) -> pd.DataFrame:
     """Build features for every candidate pair, failing on invalid references."""
-    candidates = pd.read_csv(candidate_file, sep="\t", dtype=str, keep_default_na=False)
+    candidates = pd.read_csv(candidate_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     required = {"source1_entity_id", "candidate_entity_ids"}
     missing = required - set(candidates.columns)
     if missing:
@@ -252,7 +253,7 @@ def build_pair_features(
     provenance: Dict[Tuple[str, str], Tuple[str, Optional[float], Optional[float], Optional[int]]] = {}
     if provenance_file:
         provenance_frame = pd.read_csv(
-            provenance_file, sep="\t", dtype=str, keep_default_na=False
+            provenance_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE
         )
         required_provenance = {
             "source1_entity_id",
@@ -376,7 +377,7 @@ def build_pair_features(
     ]
     result = pd.DataFrame(rows, columns=feature_columns)
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    result.to_csv(output_file, sep="\t", index=False)
+    result.to_csv(output_file, sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
     return result
 
 
