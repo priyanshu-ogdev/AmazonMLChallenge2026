@@ -382,17 +382,36 @@ def build_pair_features(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build Stage 2c pair features")
-    parser.add_argument("--source1", type=Path, required=True)
-    parser.add_argument("--source2", type=Path, required=True)
-    parser.add_argument("--source3", type=Path, required=True)
+    parser.add_argument("--source1", type=Path, nargs="+", required=True)
+    parser.add_argument("--candidate-sources", type=Path, nargs="+", default=None,
+                        help="Candidate source TSV paths (e.g. source2.tsv source3.tsv)")
+    parser.add_argument("--source2", type=Path, default=None, help="Candidate source 2 TSV")
+    parser.add_argument("--source3", type=Path, default=None, help="Candidate source 3 TSV")
     parser.add_argument("--candidate-file", type=Path, required=True)
-    parser.add_argument("--output-file", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=None, help="Output TSV path (alias)")
+    parser.add_argument("--output-file", type=Path, default=None, help="Output TSV path")
     parser.add_argument("--provenance-file", type=Path, default=None)
     args = parser.parse_args()
+
+    output_path = args.output_file or args.output
+    if not output_path:
+        parser.error("Either --output-file or --output is required")
+
+    candidate_sources = list(args.candidate_sources or [])
+    if args.source2:
+        candidate_sources.append(args.source2)
+    if args.source3:
+        candidate_sources.append(args.source3)
+    if not candidate_sources:
+        parser.error("Either --candidate-sources or --source2/--source3 is required")
+
+    source1_paths = list(args.source1) if isinstance(args.source1, list) else [args.source1]
+    all_input_paths = source1_paths + candidate_sources
+
     build_pair_features(
-        load_records([args.source1, args.source2, args.source3]),
+        load_records(all_input_paths),
         args.candidate_file,
-        args.output_file,
+        output_path,
         args.provenance_file,
     )
 

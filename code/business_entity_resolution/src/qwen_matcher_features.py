@@ -286,9 +286,13 @@ def main() -> None:
         description="Compute Stage 2b Qwen3-0.6B generative-matcher features (stretch goal)"
     )
     parser.add_argument("--source1", type=Path, nargs="+", required=True)
-    parser.add_argument("--candidate-sources", type=Path, nargs="+", required=True)
+    parser.add_argument("--candidate-sources", type=Path, nargs="+", default=None,
+                        help="Candidate source TSV paths (e.g. source2.tsv source3.tsv)")
+    parser.add_argument("--source2", type=Path, default=None, help="Candidate source 2 TSV (alias)")
+    parser.add_argument("--source3", type=Path, default=None, help="Candidate source 3 TSV (alias)")
     parser.add_argument("--candidate-file", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=None, help="Output TSV path")
+    parser.add_argument("--output-file", type=Path, default=None, help="Output TSV path (alias)")
     parser.add_argument("--adapter-path", type=str, required=True,
                          help="Path to the LoRA adapter checkpoint that passed the held-out-country gate")
     parser.add_argument("--base-model-name", type=str, default=DEFAULT_MODEL)
@@ -297,12 +301,24 @@ def main() -> None:
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
+    output_path = args.output or args.output_file
+    if not output_path:
+        parser.error("Either --output or --output-file is required")
+
+    candidate_sources = list(args.candidate_sources or [])
+    if args.source2:
+        candidate_sources.append(args.source2)
+    if args.source3:
+        candidate_sources.append(args.source3)
+    if not candidate_sources:
+        parser.error("Either --candidate-sources or --source2/--source3 is required")
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     build_qwen_matcher_features(
         source1_paths=args.source1,
-        candidate_paths=args.candidate_sources,
+        candidate_paths=candidate_sources,
         candidate_file=args.candidate_file,
-        output_file=args.output,
+        output_file=output_path,
         adapter_path=args.adapter_path,
         base_model_name=args.base_model_name,
         max_seq_length=args.max_seq_length,

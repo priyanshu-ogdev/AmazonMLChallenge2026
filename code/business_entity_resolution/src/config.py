@@ -208,3 +208,57 @@ class VRAMBudget:
         available = self.total_vram_gb - overhead
         # Need at least 4GB for activations/batch at physical_batch=48, seq_len=80
         return available >= 4.0
+
+
+@dataclass
+class QwenMatcherVRAMBudget:
+    """
+    VRAM budget verification for Stage 2b Qwen3-0.6B Causal Matcher on RTX 3060 12GB.
+    Computed directly from model architecture and sliced verdict-token design.
+
+    From docs/07_stage2b_qwen3_generative_matcher_spec.md (Section 4):
+    - Base weights (bf16, frozen backbone): 596M × 2 bytes = 1.19 GB
+    - Reference teacher weights (bf16, frozen for self-distillation): 596M × 2 bytes = 1.19 GB
+    - LoRA trainable params (r=64, all-linear): ~10.2M × 4 bytes = 0.04 GB
+    - LoRA optimizer (AdamW: fp32 master + 2 moments): ~10.2M × 8 bytes = 0.08 GB
+    - Sliced verdict logits ([48, 1, 152064] fp32 student + teacher): ~0.06 GB (~58 MB vs ~6.54 GB)
+    - Forward activations (batch 48, seq 224, gradient checkpointing): ~1.85 GB
+    - PyTorch & CUDA workspace: ~0.85 GB
+    - Total peak VRAM: ~5.26 GB
+    - Headroom: ~6.74 GB (>56% safety margin on RTX 3060 12GB)
+    """
+    total_vram_gb: float = 12.0
+    base_model_gb: float = 1.19
+    lora_params_gb: float = 0.04
+    lora_optimizer_gb: float = 0.08
+    frozen_teacher_gb: float = 1.19
+    activations_gb: float = 1.85
+    sliced_logits_gb: float = 0.06
+    cuda_workspace_gb: float = 0.85
+
+    @property
+    def fixed_overhead_gb(self) -> float:
+        return self.base_model_gb + self.lora_params_gb + self.lora_optimizer_gb
+
+    @property
+    def fixed_overhead_with_distillation_gb(self) -> float:
+        return self.fixed_overhead_gb + self.frozen_teacher_gb
+
+    @property
+    def peak_vram_gb(self) -> float:
+        return (
+            self.fixed_overhead_with_distillation_gb
+            + self.activations_gb
+            + self.sliced_logits_gb
+            + self.cuda_workspace_gb
+        )
+
+    @property
+    def available_headroom_gb(self) -> float:
+        return self.total_vram_gb - self.peak_vram_gb
+
+    def verify(self, use_distillation: bool = True) -> bool:
+        peak = self.peak_vram_gb if use_distillation else (self.peak_vram_gb - self.frozen_teacher_gb)
+        # Needs at least 4GB headroom for safety on 12GB RTX 3060
+        return (self.total_vram_gb - peak) >= 4.0
+

@@ -203,11 +203,14 @@ def build_qwen_features(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build Qwen Stage 2a-ii auxiliary pair features")
-    parser.add_argument("--source1", type=Path, required=True)
-    parser.add_argument("--source2", type=Path, required=True)
-    parser.add_argument("--source3", type=Path, required=True)
+    parser.add_argument("--source1", type=Path, nargs="+", required=True)
+    parser.add_argument("--candidate-sources", type=Path, nargs="+", default=None,
+                        help="Candidate source TSV paths (e.g. source2.tsv source3.tsv)")
+    parser.add_argument("--source2", type=Path, default=None, help="Candidate source 2 TSV")
+    parser.add_argument("--source3", type=Path, default=None, help="Candidate source 3 TSV")
     parser.add_argument("--candidate-file", type=Path, required=True)
-    parser.add_argument("--output-file", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=None, help="Output TSV path (alias)")
+    parser.add_argument("--output-file", type=Path, default=None, help="Output TSV path")
     parser.add_argument("--model-name", default=DEFAULT_MODEL)
     parser.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
     parser.add_argument("--max-seq-length", type=int, default=256)
@@ -215,12 +218,26 @@ def main() -> None:
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
+    output_path = args.output_file or args.output
+    if not output_path:
+        parser.error("Either --output-file or --output is required")
+
+    candidate_sources = list(args.candidate_sources or [])
+    if args.source2:
+        candidate_sources.append(args.source2)
+    if args.source3:
+        candidate_sources.append(args.source3)
+    if not candidate_sources:
+        parser.error("Either --candidate-sources or --source2/--source3 is required")
+
+    source1_paths = list(args.source1) if isinstance(args.source1, list) else [args.source1]
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     build_qwen_features(
-        source1_paths=[args.source1],
-        candidate_paths=[args.source2, args.source3],
+        source1_paths=source1_paths,
+        candidate_paths=candidate_sources,
         candidate_file=args.candidate_file,
-        output_file=args.output_file,
+        output_file=output_path,
         model_name=args.model_name,
         instruction=args.instruction,
         max_seq_length=args.max_seq_length,

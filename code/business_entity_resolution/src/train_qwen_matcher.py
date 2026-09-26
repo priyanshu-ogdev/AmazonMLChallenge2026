@@ -101,26 +101,22 @@ def build_labeled_training_pairs(
         target_list = eval_samples if is_eval else train_samples
 
         # 1. True positive pairs
-        for pos_id in pos_ids:
-            if pos_id not in records:
-                continue
+        valid_pos_ids = [pid for pid in pos_ids if pid in records]
+        for pos_id in valid_pos_ids:
             pos_rec = records[pos_id]
             prompt = format_matcher_prompt(s1_rec, pos_rec)
             target_list.append({"prompt": prompt, "label": 1, "country": country})
 
-            # 2. Hard negative pairs from blocking output
-            cand_pool = candidates_map.get(s1, [])
-            neg_candidates = [c for c in cand_pool if c not in pos_ids and c in records]
-            if neg_candidates:
-                chosen_negs = (
-                    rng.sample(neg_candidates, min(negatives_per_positive, len(neg_candidates)))
-                    if len(neg_candidates) > negatives_per_positive
-                    else neg_candidates
-                )
-                for neg_id in chosen_negs:
-                    neg_rec = records[neg_id]
-                    neg_prompt = format_matcher_prompt(s1_rec, neg_rec)
-                    target_list.append({"prompt": neg_prompt, "label": 0, "country": country})
+        # 2. Hard negative pairs from blocking output (sampled once per S1 entity)
+        cand_pool = candidates_map.get(s1, [])
+        neg_candidates = [c for c in cand_pool if c not in pos_ids and c in records]
+        if neg_candidates:
+            n_sample = min(negatives_per_positive, len(neg_candidates))
+            chosen_negs = rng.sample(neg_candidates, n_sample) if len(neg_candidates) > n_sample else neg_candidates
+            for neg_id in chosen_negs:
+                neg_rec = records[neg_id]
+                neg_prompt = format_matcher_prompt(s1_rec, neg_rec)
+                target_list.append({"prompt": neg_prompt, "label": 0, "country": country})
 
     rng.shuffle(train_samples)
     rng.shuffle(eval_samples)
@@ -340,12 +336,14 @@ def train_qwen_matcher(
 
     # 5. Optimizer and scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
-    total_steps = (len(train_pairs) // (batch_size * grad_accum_steps)) * epochs
+    num_batches_per_epoch = math.ceil(len(train_pairs) / batch_size) if train_pairs else 1
+    steps_per_epoch = math.ceil(num_batches_per_epoch / grad_accum_steps)
+    total_steps = steps_per_epoch * epochs
     warmup_steps = int(total_steps * 0.1)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=max(1, total_steps))
 
     # 6. Training loop
-    logger.info(f"Starting Stage 2b Qwen matcher training: {epochs} epochs, {len(train_pairs)} pairs, {total_steps} total steps")
+    logger.info(f"Starting Stage 2b Qwen matcher training: {epochs} epochs, {len(train_pairs)} pairs, {total_steps} total steps ({steps_per_epoch} steps/epoch)")
     global_step = 0
     train_losses = []
 
@@ -412,7 +410,7 @@ def train_qwen_matcher(
                         f"CE Loss: {ce_loss.item():.4f} | Distill Loss: {distill_loss.item():.4f}"
                     )
 
-        avg_loss = epoch_loss / max(1, (len(train_pairs) // batch_size))
+        avg_loss = epoch_loss / max(1, num_batches_per_epoch)
         train_losses.append(avg_loss)
         logger.info(f"Epoch {epoch+1} Complete. Mean Loss: {avg_loss:.4f}")
 

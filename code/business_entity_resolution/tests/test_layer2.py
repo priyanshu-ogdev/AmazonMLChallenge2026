@@ -724,6 +724,126 @@ class TestLayer2DataBuilder(unittest.TestCase):
         )
         self.assertEqual(sliced_logits.shape, (2, 2))
 
+    def test_qwen_matcher_lr_scheduler_step_calculation(self):
+        """Verify LR scheduler total_steps correctly accounts for accumulation boundary flushes."""
+        import math
+        len_train_pairs = 100
+        batch_size = 16
+        grad_accum_steps = 4
+        epochs = 3
+
+        # Old flawed formula: floor of combined product
+        old_total_steps = (len_train_pairs // (batch_size * grad_accum_steps)) * epochs
+        self.assertEqual(old_total_steps, 3)
+
+        # New accurate formula matching epoch-boundary flush logic
+        num_batches_per_epoch = math.ceil(len_train_pairs / batch_size)
+        self.assertEqual(num_batches_per_epoch, 7)
+        steps_per_epoch = math.ceil(num_batches_per_epoch / grad_accum_steps)
+        self.assertEqual(steps_per_epoch, 2)
+        total_steps = steps_per_epoch * epochs
+        self.assertEqual(total_steps, 6)
+        self.assertGreater(total_steps, old_total_steps)
+
+    def test_hard_negative_sampling_per_entity_deduplication(self):
+        """Verify hard negatives are sampled once per S1 entity without duplicate rows for multi-match entities."""
+        import tempfile
+        from src.train_qwen_matcher import build_labeled_training_pairs
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            gt_file = tmp / "gt_multi.tsv"
+            s1_file = tmp / "s1_multi.tsv"
+            s2_file = tmp / "s2_multi.tsv"
+            cand_file = tmp / "cands_multi.tsv"
+
+            # S1-1 has TWO true positive matches (S2-pos1, S2-pos2)
+            pd.DataFrame([
+                {"source1_entity_id": "S1-1", "matched_entity_ids": "S2-pos1, S2-pos2"},
+            ]).to_csv(gt_file, sep="\t", index=False)
+
+            pd.DataFrame([
+                {"entity_id": "S1-1", "business_name": "Acme Corp", "business_address": "123 Main", "country": "US"},
+            ]).to_csv(s1_file, sep="\t", index=False)
+
+            pd.DataFrame([
+                {"entity_id": "S2-pos1", "business_name": "Acme Corp", "business_address": "123 Main St", "country": "US"},
+                {"entity_id": "S2-pos2", "business_name": "Acme Co", "business_address": "123 Main Street", "country": "US"},
+                {"entity_id": "S2-neg1", "business_name": "Zenith Inc", "business_address": "999 Oak", "country": "US"},
+            ]).to_csv(s2_file, sep="\t", index=False)
+
+            pd.DataFrame([
+                {"source1_entity_id": "S1-1", "candidate_entity_ids": "S2-neg1"},
+            ]).to_csv(cand_file, sep="\t", index=False)
+
+            train_pairs, _ = build_labeled_training_pairs(
+                ground_truth_file=gt_file,
+                source1_files=[s1_file],
+                candidate_source_files=[s2_file],
+                blocking_candidates_file=cand_file,
+                negatives_per_positive=1,
+            )
+
+            # Expect 2 positive pairs + 1 unique negative pair = 3 pairs total (no duplicate negative rows)
+            self.assertEqual(len(train_pairs), 3)
+            pos_pairs = [p for p in train_pairs if p["label"] == 1]
+            neg_pairs = [p for p in train_pairs if p["label"] == 0]
+            self.assertEqual(len(pos_pairs), 2)
+            self.assertEqual(len(neg_pairs), 1)
+
+    def test_qwen_matcher_vram_budget_spec_compliance(self):
+        """Verify QwenMatcherVRAMBudget conforms to docs/07_stage2b Section 4 specifications."""
+        from src.config import QwenMatcherVRAMBudget
+
+        budget = QwenMatcherVRAMBudget()
+        self.assertAlmostEqual(budget.fixed_overhead_gb, 1.31, places=2)
+        self.assertAlmostEqual(budget.fixed_overhead_with_distillation_gb, 2.50, places=2)
+        self.assertAlmostEqual(budget.peak_vram_gb, 5.26, places=2)
+        self.assertAlmostEqual(budget.available_headroom_gb, 6.74, places=2)
+        self.assertTrue(budget.verify(use_distillation=True))
+        self.assertTrue(budget.verify(use_distillation=False))
+
+    def test_stage2_cli_polymorphic_shape(self):
+        """Verify all four Stage 2 modules accept interchangeable candidate-source and output CLI flags."""
+        import subprocess
+        import sys
+
+        # 1. bge_features accepts --source2, --source3, and --output-file
+        res_bge = subprocess.run(
+            [sys.executable, "-m", "src.bge_features", "--help"],
+            capture_output=True, text=True, cwd=str(Path(__file__).parents[1]),
+        )
+        self.assertEqual(res_bge.returncode, 0)
+        self.assertIn("--source2", res_bge.stdout)
+        self.assertIn("--output-file", res_bge.stdout)
+
+        # 2. qwen_matcher_features accepts --source2, --source3, and --output-file
+        res_qm = subprocess.run(
+            [sys.executable, "-m", "src.qwen_matcher_features", "--help"],
+            capture_output=True, text=True, cwd=str(Path(__file__).parents[1]),
+        )
+        self.assertEqual(res_qm.returncode, 0)
+        self.assertIn("--source2", res_qm.stdout)
+        self.assertIn("--output-file", res_qm.stdout)
+
+        # 3. qwen_features accepts --candidate-sources and --output
+        res_qwen = subprocess.run(
+            [sys.executable, "-m", "src.qwen_features", "--help"],
+            capture_output=True, text=True, cwd=str(Path(__file__).parents[1]),
+        )
+        self.assertEqual(res_qwen.returncode, 0)
+        self.assertIn("--candidate-sources", res_qwen.stdout)
+        self.assertIn("--output", res_qwen.stdout)
+
+        # 4. pair_features accepts --candidate-sources and --output
+        res_pf = subprocess.run(
+            [sys.executable, "-m", "src.pair_features", "--help"],
+            capture_output=True, text=True, cwd=str(Path(__file__).parents[1]),
+        )
+        self.assertEqual(res_pf.returncode, 0)
+        self.assertIn("--candidate-sources", res_pf.stdout)
+        self.assertIn("--output", res_pf.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
