@@ -521,17 +521,32 @@ def normalize_name(name: str) -> str:
     return name.strip()
 
 
+MISSING_ADDRESS_SENTINELS = {
+    "",
+    "nan",
+    "none",
+    "null",
+    "no address",
+    "no address available",
+    "not available",
+    "unknown",
+    "n/a",
+    "missing",
+    "[no_address]",
+}
+
+
 def is_missing_address(address: Optional[str]) -> bool:
     """
-    Canonical missing address detection across Layer 0 and Layer 1.
-    Returns True if address is None, empty, NaN/null sentinels, or placeholder text.
+    Check if an address value is null, empty, or a known missing-address sentinel.
+    S2/S3 feeds contain values like 'NaN', 'None', 'no address', 'not available', 'N/A', etc.
     """
     if address is None:
         return True
     addr = str(address).strip().lower()
     return (
-        addr in ("nan", "none", "null", "", "no address", "no address available", "not available", "unknown", "n/a", "missing")
-        or len(addr) == 0
+        not addr
+        or addr in MISSING_ADDRESS_SENTINELS
         or addr.startswith("no address")
         or addr.startswith("missing")
     )
@@ -559,7 +574,7 @@ def normalize_address(address: str) -> str:
     """
     if is_missing_address(address):
         return ""
-    address = _unicode_normalize(address)
+    address = _unicode_normalize(str(address).strip())
     address = _strip_urls(address)
     address = _clean_typography_and_case(address)
     address = _strip_address_hash_prefix(address)
@@ -595,11 +610,16 @@ def normalize_entity(name: str, address: str) -> str:
     norm_address = normalize_address(address)
     is_missing = is_missing_address(address)
 
-    if not norm_name and (is_missing or not norm_address):
-        return "[NO_ADDRESS]"
-    if is_missing or not norm_address:
+    if norm_name and norm_address:
+        return f"{norm_name} | {norm_address}"
+    elif norm_name and is_missing:
         return f"{norm_name} | [NO_ADDRESS]"
-    return f"{norm_name} | {norm_address}"
+    elif norm_name:
+        return norm_name
+    elif norm_address:
+        return norm_address
+    else:
+        return "[NO_ADDRESS]"
 
 
 # ---------------------------------------------------------------------------

@@ -93,6 +93,26 @@ $s1File = Join-Path $DATASET_DIR "$Split\${Split}_source1.tsv"
 $s2File = Join-Path $DATASET_DIR "$Split\${Split}_source2.tsv"
 $s3File = Join-Path $DATASET_DIR "$Split\${Split}_source3.tsv"
 
+# Check if pre-normalized Stage 0 TSVs are available in candidate parent or standard output
+$stage0Candidates = @(
+    (Join-Path $candParent "stage0_normalized"),
+    (Join-Path $candParent "stage0_normalized\$Split"),
+    (Join-Path $DEFAULT_OUT "phase1_blocking_$Split\stage0_normalized"),
+    (Join-Path $DEFAULT_OUT "phase1_blocking_$Split\stage0_normalized\$Split")
+)
+foreach ($st0 in $stage0Candidates) {
+    $candS1 = Join-Path $st0 "${Split}_source1_normalized.tsv"
+    $candS2 = Join-Path $st0 "${Split}_source2_normalized.tsv"
+    $candS3 = Join-Path $st0 "${Split}_source3_normalized.tsv"
+    if ((Test-Path $candS1) -and (Test-Path $candS2) -and (Test-Path $candS3)) {
+        $s1File = $candS1
+        $s2File = $candS2
+        $s3File = $candS3
+        Write-Info "Using Stage 0 normalized files for pair features: $st0"
+        break
+    }
+}
+
 $pairFeaturesOut        = Join-Path $OutputDir "pair_features.tsv"
 $bgeFeaturesOut         = Join-Path $OutputDir "bge_pair_features.tsv"
 $qwenFeaturesOut        = Join-Path $OutputDir "qwen_pair_features.tsv"

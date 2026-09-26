@@ -29,6 +29,7 @@ if str(repo_root) not in sys.path:
 from src.blocking import (
     BlockingRecord,
     MultiChannelBlocker,
+    read_tsv_records,
     run_blocking,
     main,
 )
@@ -567,6 +568,71 @@ class TestEndToEndBlockingExecution(unittest.TestCase):
         candidates = blocker.generate_candidates_for_record(s1)
         cand_ids = [c["candidate_entity_id"] for c in candidates]
         self.assertIn("S2-999", cand_ids)
+
+    def test_stage0_prenormalized_fields_utilization(self):
+        """Verify read_tsv_records and BlockingRecord.from_row reuse pre-normalized Stage 0 fields."""
+        norm_tsv = self.test_dir / "stage0_test.tsv"
+        with open(norm_tsv, "w", encoding="utf-8") as f:
+            f.write(
+                "entity_id\tsource\tcountry\tcountry_canonical\traw_name\traw_address\t"
+                "norm_name\tnorm_address\tencoder_text\tis_address_missing\tpostal_code\t"
+                "street_number\ttrailing_segment\tdigit_runs\tname_token_count\taddress_token_count\n"
+            )
+            f.write(
+                "S2-PRE1\tS2\tUnited States\tus\tAcme Corp Inc\t100 Main St\t"
+                "custom_norm_acme\t100 main street\tcustom_norm_acme | 100 main street\t0\t90210\t"
+                "100\tmain street\t100\t3\t3\n"
+            )
+            f.write(
+                "S2-PRE2\tS2\tFrance\tfrance\tBoutique XYZ\tNone\t"
+                "boutique xyz\t\tboutique xyz | [NO_ADDRESS]\t1\t\t"
+                "\t\t\t2\t0\n"
+            )
+
+        rows = list(read_tsv_records([norm_tsv]))
+        self.assertEqual(len(rows), 2)
+        row1, row2 = rows[0], rows[1]
+
+        self.assertEqual(row1["norm_name"], "custom_norm_acme")
+        self.assertEqual(row1["postal_code"], "90210")
+        self.assertEqual(row1["street_number"], "100")
+        self.assertFalse(row1["is_address_missing"])
+
+        rec1 = BlockingRecord.from_row(
+            entity_id=row1["entity_id"],
+            name=row1["business_name"],
+            address=row1["business_address"],
+            country=row1["country"],
+            norm_name=row1.get("norm_name"),
+            norm_address=row1.get("norm_address"),
+            canonical_country=row1.get("canonical_country"),
+            postal_code=row1.get("postal_code"),
+            street_number=row1.get("street_number"),
+            trailing_segment=row1.get("trailing_segment"),
+            is_address_missing=row1.get("is_address_missing"),
+        )
+        self.assertEqual(rec1.norm_name, "custom_norm_acme")
+        self.assertEqual(rec1.postal_code, "90210")
+        self.assertEqual(rec1.street_number, "100")
+        self.assertFalse(rec1.is_address_missing)
+
+        rec2 = BlockingRecord.from_row(
+            entity_id=row2["entity_id"],
+            name=row2["business_name"],
+            address=row2["business_address"],
+            country=row2["country"],
+            norm_name=row2.get("norm_name"),
+            norm_address=row2.get("norm_address"),
+            canonical_country=row2.get("canonical_country"),
+            postal_code=row2.get("postal_code"),
+            street_number=row2.get("street_number"),
+            trailing_segment=row2.get("trailing_segment"),
+            is_address_missing=row2.get("is_address_missing"),
+        )
+        self.assertEqual(rec2.norm_name, "boutique xyz")
+        self.assertEqual(rec2.norm_address, "")
+        self.assertTrue(rec2.is_address_missing)
+        self.assertIsNone(rec2.postal_code)
 
 
 if __name__ == "__main__":

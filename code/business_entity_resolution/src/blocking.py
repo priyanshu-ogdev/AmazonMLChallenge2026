@@ -156,15 +156,14 @@ class BlockingRecord:
         norm_name: Optional[str] = None,
         norm_address: Optional[str] = None,
         canonical_country: Optional[str] = None,
-        is_address_missing: Optional[bool] = None,
         postal_code: Optional[str] = None,
         street_number: Optional[str] = None,
         trailing_segment: Optional[str] = None,
+        is_address_missing: Optional[bool] = None,
     ) -> BlockingRecord:
         n_name = norm_name if norm_name is not None else normalize_name(name)
         n_addr = norm_address if norm_address is not None else normalize_address(address)
-        canon_c = canonical_country if canonical_country is not None else canonicalize_country(country)
-
+        canon_c = canonical_country if (canonical_country is not None and canonical_country != "") else canonicalize_country(country)
         if is_address_missing is not None:
             is_addr_missing = bool(is_address_missing)
         else:
@@ -175,14 +174,13 @@ class BlockingRecord:
         else:
             postal = extract_postal_code(address if not is_addr_missing else "", country=canon_c)
 
-        if street_number is not None and trailing_segment is not None:
+        if street_number is not None or trailing_segment is not None:
             street_no = street_number if street_number else None
             trailing = trailing_segment if trailing_segment else None
         else:
             struct = extract_structural_fields(n_addr if n_addr else (address if not is_addr_missing else ""))
-            street_no = street_number if street_number is not None else struct.get("street_number")
-            trailing = trailing_segment if trailing_segment is not None else struct.get("trailing_segment")
-
+            street_no = struct.get("street_number")
+            trailing = struct.get("trailing_segment")
         tokens = _tokenize(n_name)
         token_counts = Counter(tokens)
         first_word = tokens[0] if tokens else None
@@ -258,36 +256,27 @@ def read_tsv_records(paths: Iterable[Path]) -> Iterator[Dict[str, Any]]:
             if not has_addr:
                 raise ValueError(f"{path} is missing address column (expected business_address, raw_address, or norm_address)")
 
+            is_stage0 = "norm_name" in fieldnames and "norm_address" in fieldnames
             for row in reader:
                 name = row.get("business_name") or row.get("raw_name") or row.get("norm_name") or ""
                 addr = row.get("business_address") or row.get("raw_address") or row.get("norm_address") or ""
                 country = row.get("country") or row.get("country_canonical") or ""
-
-                # Optional precomputed Stage 0 fields
-                norm_name = row.get("norm_name")
-                norm_address = row.get("norm_address")
-                canonical_country = row.get("country_canonical")
-                raw_missing = row.get("is_address_missing")
-                is_missing = None
-                if raw_missing is not None and raw_missing != "":
-                    is_missing = str(raw_missing).strip().lower() in ("true", "1", "t")
-                postal_code = row.get("postal_code")
-                street_number = row.get("street_number")
-                trailing_segment = row.get("trailing_segment")
-
-                yield {
+                rec: Dict[str, Any] = {
                     "entity_id": row.get("entity_id", ""),
                     "business_name": name,
                     "business_address": addr,
                     "country": country,
-                    "norm_name": norm_name,
-                    "norm_address": norm_address,
-                    "canonical_country": canonical_country,
-                    "is_address_missing": is_missing,
-                    "postal_code": postal_code,
-                    "street_number": street_number,
-                    "trailing_segment": trailing_segment,
                 }
+                if is_stage0:
+                    rec["norm_name"] = row.get("norm_name", "")
+                    rec["norm_address"] = row.get("norm_address", "")
+                    rec["canonical_country"] = row.get("country_canonical", "")
+                    rec["postal_code"] = row.get("postal_code", "")
+                    rec["street_number"] = row.get("street_number", "")
+                    rec["trailing_segment"] = row.get("trailing_segment", "")
+                    raw_miss = row.get("is_address_missing")
+                    rec["is_address_missing"] = str(raw_miss).strip().lower() in ("1", "true", "t") if raw_miss is not None else False
+                yield rec
 
 
 class MultiChannelBlocker:
@@ -844,10 +833,10 @@ def run_blocking(
             norm_name=row.get("norm_name"),
             norm_address=row.get("norm_address"),
             canonical_country=row.get("canonical_country"),
-            is_address_missing=row.get("is_address_missing"),
             postal_code=row.get("postal_code"),
             street_number=row.get("street_number"),
             trailing_segment=row.get("trailing_segment"),
+            is_address_missing=row.get("is_address_missing"),
         )
         blocker.index_candidate(rec)
         cand_count += 1
@@ -929,10 +918,10 @@ def run_blocking(
                 norm_name=row.get("norm_name"),
                 norm_address=row.get("norm_address"),
                 canonical_country=row.get("canonical_country"),
-                is_address_missing=row.get("is_address_missing"),
                 postal_code=row.get("postal_code"),
                 street_number=row.get("street_number"),
                 trailing_segment=row.get("trailing_segment"),
+                is_address_missing=row.get("is_address_missing"),
             )
 
             dense_scores = (
