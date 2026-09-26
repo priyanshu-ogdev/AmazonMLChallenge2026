@@ -740,6 +740,14 @@ class MultiChannelBlocker:
     def load_index(cls, path: Path) -> "MultiChannelBlocker":
         """Restore a serialized index from disk (see save_index)."""
         path = Path(path)
+        if not path.exists() or path.stat().st_size == 0:
+            parts = sorted(path.parent.glob(f"{path.name}.part*"))
+            if parts:
+                print(f"[CACHE] Reassembling {path.name} from {len(parts)} split parts...", flush=True)
+                with open(path, "wb") as outfile:
+                    for p in parts:
+                        with open(p, "rb") as infile:
+                            shutil.copyfileobj(infile, outfile)
         t0 = time.time()
         with open(path, "rb") as fh:
             payload = pickle.load(fh)

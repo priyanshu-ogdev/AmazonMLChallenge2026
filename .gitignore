@@ -62,12 +62,14 @@ tensorboard/
 !output/**/*.csv
 !output/**/*.pkl
 !output/**/*.pickle
+!output/**/*.part*
 !output/**/*.pt
 !output/**/*.pth
 !output/**/*.bin
 !output/**/*.safetensors
 !output/**/*.onnx
 !output/**/*.npz
+output/**/candidate_index.pkl
 output/**/_tmp_worker_chunks/
 output/**/checkpoint_backup/
 output/**/*.tmp
