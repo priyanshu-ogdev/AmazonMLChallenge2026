@@ -337,6 +337,8 @@ def macro_f05(
     threshold: float,
     all_source1_ids: Optional[Sequence[str]] = None,
     ground_truth: Optional[Dict[str, Set[str]]] = None,
+    candidate_ids: Optional[Sequence[str]] = None,
+    injective: bool = False,
 ) -> float:
     if len(source1_ids) != len(scores) or len(scores) != len(labels):
         raise ValueError("source1_ids, scores, and labels must have equal length")
@@ -344,6 +346,46 @@ def macro_f05(
         raise ValueError("scores must contain only finite values")
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("threshold must be within [0, 1]")
+
+    if injective and candidate_ids is not None:
+        if len(candidate_ids) != len(source1_ids):
+            raise ValueError("candidate_ids must have equal length to source1_ids")
+        s_arr = np.asarray(scores, dtype=float)
+        mask = s_arr >= threshold
+        claimed: Set[str] = set()
+        injective_matches: Dict[str, List[int]] = {}
+        if mask.any():
+            passed_indices = np.where(mask)[0]
+            passed_scores = s_arr[passed_indices]
+            order = passed_indices[np.argsort(-passed_scores, kind="stable")]
+            for idx in order:
+                c = str(candidate_ids[idx]).strip()
+                s = str(source1_ids[idx]).strip()
+                if c == s:
+                    continue  # Self-match prevention
+                if c not in claimed:
+                    claimed.add(c)
+                    injective_matches.setdefault(s, []).append(int(labels[idx]))
+
+        if ground_truth is not None:
+            all_eids = set(ground_truth.keys())
+        elif all_source1_ids is not None:
+            all_eids = set(all_source1_ids)
+        else:
+            all_eids = set(source1_ids)
+
+        entity_scores = []
+        for eid in all_eids:
+            if ground_truth is not None and eid in ground_truth:
+                actual_count = len(ground_truth[eid])
+            else:
+                actual_count = sum(1 for s, l in zip(source1_ids, labels) if s == eid and l == 1)
+            pred_labels = injective_matches.get(eid, [])
+            pred_count = len(pred_labels)
+            tp = sum(pred_labels)
+            entity_scores.append(compute_entity_f05(pred_count, actual_count, tp))
+        return float(np.mean(entity_scores)) if entity_scores else 0.0
+
     grouped: Dict[str, List[Tuple[float, int]]] = {}
     for entity_id, score, label in zip(source1_ids, scores, labels):
         grouped.setdefault(entity_id, []).append((float(score), int(label)))
@@ -374,7 +416,9 @@ def choose_threshold(
     scores: np.ndarray,
     all_source1_ids: Optional[Sequence[str]] = None,
     ground_truth: Optional[Dict[str, Set[str]]] = None,
-) -> Tuple[float, float]:
+    injective: bool = True,
+    return_diagnostics: bool = False,
+) -> Tuple[float, float] | Tuple[float, float, Dict[str, Any]]:
     if "source1_entity_id" not in frame or "label" not in frame:
         raise ValueError("threshold frame must contain source1_entity_id and label")
     scores = np.asarray(scores, dtype=float)
@@ -442,7 +486,75 @@ def choose_threshold(
 
     values = [_eval_threshold(threshold) for threshold in candidates]
     index = int(np.argmax(values))
-    return float(candidates[index]), float(values[index])
+    best_indep_th = float(candidates[index])
+    best_indep_f05 = float(values[index])
+
+    th_diag: Dict[str, Any] = {
+        "threshold_independent": best_indep_th,
+        "macro_f05_independent": best_indep_f05,
+    }
+
+    has_cand = "candidate_entity_id" in frame.columns
+    if injective and has_cand:
+        cand_col = frame["candidate_entity_id"].values
+        order = np.argsort(-scores, kind="stable")
+        sorted_scores = scores[order]
+        sorted_s1 = s1_col[order]
+        sorted_cand = cand_col[order]
+        sorted_labels = labels_col[order]
+
+        actual_map: Dict[str, int] = {}
+        for eid in all_eids:
+            if ground_truth is not None and eid in ground_truth:
+                actual_map[eid] = len(ground_truth[eid])
+            else:
+                s_list, l_list = active_grouped.get(eid, ([], []))
+                actual_map[eid] = sum(l_list)
+
+        base_singletons = sum(1.0 for eid in all_eids if actual_map[eid] == 0)
+
+        def _eval_injective_th(th: float) -> float:
+            if total_entities == 0:
+                return 0.0
+            cutoff = int(np.searchsorted(-sorted_scores, -th, side="right"))
+            claimed: Set[str] = set()
+            entity_preds: Dict[str, int] = {}
+            entity_tps: Dict[str, int] = {}
+            for i in range(cutoff):
+                c = str(sorted_cand[i]).strip()
+                s = str(sorted_s1[i]).strip()
+                if c == s:
+                    continue  # Self-match prevention matching decision.py
+                if c not in claimed:
+                    claimed.add(c)
+                    entity_preds[s] = entity_preds.get(s, 0) + 1
+                    if sorted_labels[i] == 1:
+                        entity_tps[s] = entity_tps.get(s, 0) + 1
+
+            total_f05 = float(base_singletons)
+            for s, pred_cnt in entity_preds.items():
+                act_cnt = actual_map.get(s, 0)
+                tp = entity_tps.get(s, 0)
+                if act_cnt == 0:
+                    total_f05 -= 1.0
+                else:
+                    total_f05 += compute_entity_f05(pred_cnt, act_cnt, tp)
+            return total_f05 / total_entities
+
+        inj_values = [_eval_injective_th(threshold) for threshold in candidates]
+        inj_index = int(np.argmax(inj_values))
+        best_inj_th = float(candidates[inj_index])
+        best_inj_f05 = float(inj_values[inj_index])
+        th_diag["threshold_injective"] = best_inj_th
+        th_diag["macro_f05_injective"] = best_inj_f05
+        th_diag["injective_lift"] = float(best_inj_f05 - best_indep_f05)
+        chosen_th, chosen_f05 = best_inj_th, best_inj_f05
+    else:
+        chosen_th, chosen_f05 = best_indep_th, best_indep_f05
+
+    if return_diagnostics:
+        return chosen_th, chosen_f05, th_diag
+    return chosen_th, chosen_f05
 
 
 def score_candidates(
@@ -912,8 +1024,8 @@ def run_training(
         oof["oof_score"].to_numpy(), oof["label"].to_numpy()
     )
     calibrated = apply_calibrator(calibrator, oof["oof_score"].to_numpy())
-    threshold, f05 = choose_threshold(
-        oof, calibrated, ground_truth=ground_truth
+    threshold, f05, th_diag = choose_threshold(
+        oof, calibrated, ground_truth=ground_truth, return_diagnostics=True
     )
     best_iters = [
         fold["best_iteration"]
@@ -1019,6 +1131,12 @@ def run_training(
         "oof_positive_count": int(labeled["label"].sum()),
         "threshold": threshold,
         "macro_f05": f05,
+        "threshold_diagnostics": th_diag,
+        "threshold_injective": th_diag.get("threshold_injective", threshold),
+        "macro_f05_injective": th_diag.get("macro_f05_injective", f05),
+        "threshold_independent": th_diag.get("threshold_independent", threshold),
+        "macro_f05_independent": th_diag.get("macro_f05_independent", f05),
+        "injective_lift": th_diag.get("injective_lift", 0.0),
         "average_precision": float(
             average_precision_score(labeled["label"], oof["oof_score"])
         ),

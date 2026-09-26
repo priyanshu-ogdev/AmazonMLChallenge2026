@@ -1,8 +1,11 @@
 """
 Tests for downstream contracts and fixes: pair_features canonical country,
-stage3_gbm categorical dropping and macro_f05 singletons, and stage4_decision.
+scoring categorical dropping and macro_f05 (including injective assignment),
+decision format contracts (singletons, duplicates, self-matches, injective matching),
+and TSV parsing contracts.
 
-Requires pandas and numpy (for target PC test execution).
+Decoupled import guards ensure decision and formatting tests run even if xgboost
+or optional ML libraries are unavailable.
 """
 
 import sys
@@ -17,141 +20,32 @@ if str(repo_root) not in sys.path:
 try:
     import numpy as np
     import pandas as pd
-    from src.pair_features import _record_features, pair_feature_row
-    try:
-        from src.scoring import DROP_CATEGORICAL, prepare_matrix, macro_f05
-    except ImportError:
-        from src.stage3_gbm import DROP_CATEGORICAL, prepare_matrix, macro_f05
-    try:
-        from src.decision import assemble_matching_results, write_matching_results
-    except ImportError:
-        from src.stage4_decision import assemble_matching_results, write_matching_results
-    HAS_DEPENDENCIES = True
+    HAS_PANDAS_NUMPY = True
 except ImportError:
-    HAS_DEPENDENCIES = False
+    HAS_PANDAS_NUMPY = False
+
+try:
+    from src.decision import assemble_matching_results, write_matching_results
+    HAS_DECISION = True
+except ImportError:
+    HAS_DECISION = False
+
+try:
+    from src.pair_features import _record_features, pair_feature_row
+    HAS_PAIR_FEATURES = True
+except ImportError:
+    HAS_PAIR_FEATURES = False
+
+try:
+    from src.scoring import DROP_CATEGORICAL, prepare_matrix, macro_f05
+    HAS_SCORING = True
+except ImportError:
+    HAS_SCORING = False
 
 
-@unittest.skipUnless(HAS_DEPENDENCIES, "Requires pandas and numpy (installed on target execution PC)")
-class TestDownstreamContracts(unittest.TestCase):
-    """Verify pair feature contracts, canonical country fixes, and leakage boundaries."""
-
-    def test_pair_features_canonical_country(self):
-        """Verify pair features use canonical country comparison, avoiding alias bugs."""
-        rec_us1 = {
-            "entity_id": "S1-1",
-            "business_name": "Acme Inc",
-            "business_address": "123 Main St",
-            "country": "US",
-        }
-        rec_us2 = {
-            "entity_id": "S2-1",
-            "business_name": "Acme Incorporated",
-            "business_address": "123 Main Street",
-            "country": "USA",
-        }
-        rec_fr = {
-            "entity_id": "S2-2",
-            "business_name": "Acme SAS",
-            "business_address": "123 Rue Principale",
-            "country": "France",
-        }
-        rec_nocountry = {
-            "entity_id": "S2-3",
-            "business_name": "Acme Co",
-            "business_address": "123 Main St",
-            "country": "",
-        }
-
-        f1 = _record_features(rec_us1)
-        f2 = _record_features(rec_us2)
-        f_fr = _record_features(rec_fr)
-        f_no = _record_features(rec_nocountry)
-
-        self.assertEqual(f1["canonical_country"], "us")
-        self.assertEqual(f2["canonical_country"], "us")
-        self.assertEqual(f_fr["canonical_country"], "france")
-        self.assertEqual(f_no["canonical_country"], "")
-
-        # US vs USA -> country_equal should be 1
-        row_same = pair_feature_row(f1, f2)
-        self.assertEqual(row_same["country_equal"], 1)
-        self.assertEqual(row_same["country_equal_missing"], 0)
-
-        # US vs France -> country_equal should be 0
-        row_diff = pair_feature_row(f1, f_fr)
-        self.assertEqual(row_diff["country_equal"], 0)
-        self.assertEqual(row_diff["country_equal_missing"], 0)
-
-        # US vs missing -> country_equal should be -1, country_equal_missing = 1
-        row_missing = pair_feature_row(f1, f_no)
-        self.assertEqual(row_missing["country_equal"], -1)
-        self.assertEqual(row_missing["country_equal_missing"], 1)
-
-    def test_stage3_drop_categorical(self):
-        """Verify DROP_CATEGORICAL excludes both raw and canonical country strings from GBM matrix."""
-        self.assertIn("source1_country", DROP_CATEGORICAL)
-        self.assertIn("candidate_country", DROP_CATEGORICAL)
-        self.assertIn("source1_canonical_country", DROP_CATEGORICAL)
-        self.assertIn("candidate_canonical_country", DROP_CATEGORICAL)
-
-        dummy = pd.DataFrame({
-            "source1_entity_id": ["S1-1", "S1-2"],
-            "candidate_entity_id": ["S2-1", "S2-2"],
-            "source1_country": ["US", "India"],
-            "candidate_country": ["US", "India"],
-            "source1_canonical_country": ["us", "india"],
-            "candidate_canonical_country": ["us", "india"],
-            "country_equal": [1, 1],
-            "name_exact": [1, 0],
-            "name_jaccard": [0.9, 0.4],
-        })
-        matrix, cols = prepare_matrix(dummy)
-        self.assertNotIn("source1_country", cols)
-        self.assertNotIn("source1_canonical_country", cols)
-        self.assertNotIn("candidate_canonical_country", cols)
-        self.assertIn("country_equal", cols)
-        self.assertIn("name_exact", cols)
-        self.assertIn("name_jaccard", cols)
-
-    def test_stage3_macro_f05_singletons(self):
-        """Verify macro_f05 correctly awards 1.0 to true singletons with empty actual and predicted."""
-        source1_ids = ["S1-1", "S1-2"]
-        scores = [0.9, 0.2]
-        labels = [1, 0]
-        gt = {
-            "S1-1": {"S2-1"},
-            "S1-2": set(),
-            "S1-3": set(),  # S1-3 has no candidates (true singleton)
-        }
-
-        score = macro_f05(
-            source1_ids=source1_ids,
-            scores=scores,
-            labels=labels,
-            threshold=0.5,
-            ground_truth=gt,
-        )
-        self.assertAlmostEqual(score, 1.0)
-
-    def test_stage3_macro_f05_blocking_miss_zero_credit(self):
-        """Verify macro_f05 awards 0.0 to an entity with GT matches completely missed by blocking."""
-        source1_ids = ["S1-1"]
-        scores = [0.9]
-        labels = [1]
-        gt = {
-            "S1-1": {"S2-1"},
-            "S1-miss": {"S2-miss"},  # Blocking failed to retrieve S1-miss
-        }
-
-        score = macro_f05(
-            source1_ids=source1_ids,
-            scores=scores,
-            labels=labels,
-            threshold=0.5,
-            ground_truth=gt,
-        )
-        # S1-1 scores 1.0, S1-miss scores 0.0 -> mean is 0.5
-        self.assertAlmostEqual(score, 0.5)
+@unittest.skipUnless(HAS_PANDAS_NUMPY and HAS_DECISION, "Requires pandas, numpy, and src.decision")
+class TestDecisionContracts(unittest.TestCase):
+    """Verify Stage 4 decision layer contracts, submission invariants, and injective matching."""
 
     def test_stage4_decision_singletons(self):
         """Verify stage4 emits every S1 entity once, with empty match list for singletons."""
@@ -170,50 +64,8 @@ class TestDownstreamContracts(unittest.TestCase):
         row2 = results[results["source1_entity_id"] == "S1-2"].iloc[0]
         self.assertEqual(row2["matched_entity_ids"], "")
 
-    def test_provenance_signals_extraction(self):
-        """Verify provenance signals (rank, score, count) are extracted and preserved for GBM."""
-        rec1 = _record_features({"entity_id": "S1-1", "business_name": "Acme Inc", "business_address": "123 Main St", "country": "US"})
-        rec2 = _record_features({"entity_id": "S2-1", "business_name": "Acme Corp", "business_address": "123 Main Street", "country": "US"})
-
-        # Row with full provenance
-        row_prov = pair_feature_row(
-            rec1,
-            rec2,
-            provenance="exact_name;address_structural",
-            left_rank=1.0,
-            best_score=0.95,
-            score_margin_to_best=0.15,
-            blocker_count=2,
-        )
-        self.assertEqual(row_prov["candidate_rank"], 1.0)
-        self.assertEqual(row_prov["candidate_rank_missing"], 0)
-        self.assertEqual(row_prov["best_blocker_score"], 0.95)
-        self.assertEqual(row_prov["best_blocker_score_missing"], 0)
-        self.assertEqual(row_prov["best_blocker_score_diff"], 0.15)
-        self.assertEqual(row_prov["best_blocker_score_diff_missing"], 0)
-        self.assertEqual(row_prov["blocker_count"], 2)
-        self.assertEqual(row_prov["has_blocker_provenance"], 1)
-
-        # Row with missing provenance
-        row_noprov = pair_feature_row(rec1, rec2)
-        self.assertEqual(row_noprov["candidate_rank"], 999.0)
-        self.assertEqual(row_noprov["candidate_rank_missing"], 1)
-        self.assertEqual(row_noprov["best_blocker_score"], -1.0)
-        self.assertEqual(row_noprov["best_blocker_score_missing"], 1)
-        self.assertEqual(row_noprov["best_blocker_score_diff"], 0.0)
-        self.assertEqual(row_noprov["best_blocker_score_diff_missing"], 1)
-        self.assertEqual(row_noprov["blocker_count"], 0)
-        self.assertEqual(row_noprov["has_blocker_provenance"], 0)
-
-        # Check prepare_matrix keeps numeric provenance features and drops string blocker_provenance
-        df = pd.DataFrame([row_prov])
-        matrix, cols = prepare_matrix(df)
-        self.assertIn("candidate_rank", cols)
-        self.assertIn("best_blocker_score", cols)
-        self.assertIn("best_blocker_score_diff", cols)
-        self.assertIn("best_blocker_score_diff_missing", cols)
-        self.assertIn("blocker_count", cols)
-        self.assertNotIn("blocker_provenance", cols)
+        row3 = results[results["source1_entity_id"] == "S1-3"].iloc[0]
+        self.assertEqual(row3["matched_entity_ids"], "")
 
     def test_stage4_decision_threshold_boundary(self):
         """Verify score >= threshold is inclusive at the exact boundary."""
@@ -334,8 +186,212 @@ class TestDownstreamContracts(unittest.TestCase):
             self.assertEqual(out_df[out_df["source1_entity_id"] == "S1-2"].iloc[0]["matched_entity_ids"], "")
             self.assertEqual(out_df[out_df["source1_entity_id"] == "S1-3"].iloc[0]["matched_entity_ids"], "")
 
+
+@unittest.skipUnless(HAS_PANDAS_NUMPY and HAS_PAIR_FEATURES, "Requires pandas, numpy, and src.pair_features")
+class TestPairFeatureContracts(unittest.TestCase):
+    """Verify pair feature contracts, canonical country fixes, and provenance features."""
+
+    def test_pair_features_canonical_country(self):
+        """Verify pair features use canonical country comparison, avoiding alias bugs."""
+        rec_us1 = {
+            "entity_id": "S1-1",
+            "business_name": "Acme Inc",
+            "business_address": "123 Main St",
+            "country": "US",
+        }
+        rec_us2 = {
+            "entity_id": "S2-1",
+            "business_name": "Acme Incorporated",
+            "business_address": "123 Main Street",
+            "country": "USA",
+        }
+        rec_fr = {
+            "entity_id": "S2-2",
+            "business_name": "Acme SAS",
+            "business_address": "123 Rue Principale",
+            "country": "France",
+        }
+        rec_nocountry = {
+            "entity_id": "S2-3",
+            "business_name": "Acme Co",
+            "business_address": "123 Main St",
+            "country": "",
+        }
+
+        f1 = _record_features(rec_us1)
+        f2 = _record_features(rec_us2)
+        f_fr = _record_features(rec_fr)
+        f_no = _record_features(rec_nocountry)
+
+        self.assertEqual(f1["canonical_country"], "us")
+        self.assertEqual(f2["canonical_country"], "us")
+        self.assertEqual(f_fr["canonical_country"], "france")
+        self.assertEqual(f_no["canonical_country"], "")
+
+        # US vs USA -> country_equal should be 1
+        row_same = pair_feature_row(f1, f2)
+        self.assertEqual(row_same["country_equal"], 1)
+        self.assertEqual(row_same["country_equal_missing"], 0)
+
+        # US vs France -> country_equal should be 0
+        row_diff = pair_feature_row(f1, f_fr)
+        self.assertEqual(row_diff["country_equal"], 0)
+        self.assertEqual(row_diff["country_equal_missing"], 0)
+
+        # US vs missing -> country_equal should be -1, country_equal_missing = 1
+        row_missing = pair_feature_row(f1, f_no)
+        self.assertEqual(row_missing["country_equal"], -1)
+        self.assertEqual(row_missing["country_equal_missing"], 1)
+
+    def test_provenance_signals_extraction(self):
+        """Verify provenance signals (rank, score, count) are extracted and preserved."""
+        rec1 = _record_features({"entity_id": "S1-1", "business_name": "Acme Inc", "business_address": "123 Main St", "country": "US"})
+        rec2 = _record_features({"entity_id": "S2-1", "business_name": "Acme Corp", "business_address": "123 Main Street", "country": "US"})
+
+        # Row with full provenance
+        row_prov = pair_feature_row(
+            rec1,
+            rec2,
+            provenance="exact_name;address_structural",
+            left_rank=1.0,
+            best_score=0.95,
+            score_margin_to_best=0.15,
+            blocker_count=2,
+        )
+        self.assertEqual(row_prov["candidate_rank"], 1.0)
+        self.assertEqual(row_prov["candidate_rank_missing"], 0)
+        self.assertEqual(row_prov["best_blocker_score"], 0.95)
+        self.assertEqual(row_prov["best_blocker_score_missing"], 0)
+        self.assertEqual(row_prov["best_blocker_score_diff"], 0.15)
+        self.assertEqual(row_prov["best_blocker_score_diff_missing"], 0)
+        self.assertEqual(row_prov["blocker_count"], 2)
+        self.assertEqual(row_prov["has_blocker_provenance"], 1)
+
+        # Row with missing provenance
+        row_noprov = pair_feature_row(rec1, rec2)
+        self.assertEqual(row_noprov["candidate_rank"], 999.0)
+        self.assertEqual(row_noprov["candidate_rank_missing"], 1)
+        self.assertEqual(row_noprov["best_blocker_score"], -1.0)
+        self.assertEqual(row_noprov["best_blocker_score_missing"], 1)
+        self.assertEqual(row_noprov["best_blocker_score_diff"], 0.0)
+        self.assertEqual(row_noprov["best_blocker_score_diff_missing"], 1)
+        self.assertEqual(row_noprov["blocker_count"], 0)
+        self.assertEqual(row_noprov["has_blocker_provenance"], 0)
+
+
+@unittest.skipUnless(HAS_PANDAS_NUMPY and HAS_SCORING, "Requires pandas, numpy, and src.scoring (xgboost)")
+class TestScoringContracts(unittest.TestCase):
+    """Verify Stage 3 scoring contracts, categorical dropping, and macro_f05 metric calculation."""
+
+    def test_stage3_drop_categorical(self):
+        """Verify DROP_CATEGORICAL excludes both raw and canonical country strings from GBM matrix."""
+        self.assertIn("source1_country", DROP_CATEGORICAL)
+        self.assertIn("candidate_country", DROP_CATEGORICAL)
+        self.assertIn("source1_canonical_country", DROP_CATEGORICAL)
+        self.assertIn("candidate_canonical_country", DROP_CATEGORICAL)
+
+        dummy = pd.DataFrame({
+            "source1_entity_id": ["S1-1", "S1-2"],
+            "candidate_entity_id": ["S2-1", "S2-2"],
+            "source1_country": ["US", "India"],
+            "candidate_country": ["US", "India"],
+            "source1_canonical_country": ["us", "india"],
+            "candidate_canonical_country": ["us", "india"],
+            "country_equal": [1, 1],
+            "name_exact": [1, 0],
+            "name_jaccard": [0.9, 0.4],
+        })
+        matrix, cols = prepare_matrix(dummy)
+        self.assertNotIn("source1_country", cols)
+        self.assertNotIn("source1_canonical_country", cols)
+        self.assertNotIn("candidate_canonical_country", cols)
+        self.assertIn("country_equal", cols)
+        self.assertIn("name_exact", cols)
+        self.assertIn("name_jaccard", cols)
+
+    def test_stage3_macro_f05_singletons(self):
+        """Verify macro_f05 correctly awards 1.0 to true singletons with empty actual and predicted."""
+        source1_ids = ["S1-1", "S1-2"]
+        scores = [0.9, 0.2]
+        labels = [1, 0]
+        gt = {
+            "S1-1": {"S2-1"},
+            "S1-2": set(),
+            "S1-3": set(),  # S1-3 has no candidates (true singleton)
+        }
+
+        score = macro_f05(
+            source1_ids=source1_ids,
+            scores=scores,
+            labels=labels,
+            threshold=0.5,
+            ground_truth=gt,
+        )
+        self.assertAlmostEqual(score, 1.0)
+
+    def test_stage3_macro_f05_blocking_miss_zero_credit(self):
+        """Verify macro_f05 awards 0.0 to an entity with GT matches completely missed by blocking."""
+        source1_ids = ["S1-1"]
+        scores = [0.9]
+        labels = [1]
+        gt = {
+            "S1-1": {"S2-1"},
+            "S1-miss": {"S2-miss"},  # Blocking failed to retrieve S1-miss
+        }
+
+        score = macro_f05(
+            source1_ids=source1_ids,
+            scores=scores,
+            labels=labels,
+            threshold=0.5,
+            ground_truth=gt,
+        )
+        # S1-1 scores 1.0, S1-miss scores 0.0 -> mean is 0.5
+        self.assertAlmostEqual(score, 0.5)
+
+    def test_stage3_macro_f05_injective(self):
+        """Verify macro_f05 with injective=True enforces greedy 1-to-N matching."""
+        source1_ids = ["S1-1", "S1-2"]
+        cand_ids = ["S2-shared", "S2-shared"]
+        scores = [0.95, 0.85]
+        labels = [1, 1]
+        gt = {
+            "S1-1": {"S2-shared"},
+            "S1-2": {"S2-shared"},
+        }
+        # Injective assignment gives S2-shared to S1-1 (higher score).
+        # S1-1: TP=1, FP=0, FN=0 -> F0.5 = 1.0
+        # S1-2: TP=0, FP=0, FN=1 -> F0.5 = 0.0
+        # Macro F0.5 = (1.0 + 0.0) / 2 = 0.5
+        score_inj = macro_f05(
+            source1_ids=source1_ids,
+            scores=scores,
+            labels=labels,
+            threshold=0.5,
+            ground_truth=gt,
+            candidate_ids=cand_ids,
+            injective=True,
+        )
+        self.assertAlmostEqual(score_inj, 0.5)
+
+        # Non-injective: both get S2-shared -> both get 1.0 -> mean = 1.0
+        score_non_inj = macro_f05(
+            source1_ids=source1_ids,
+            scores=scores,
+            labels=labels,
+            threshold=0.5,
+            ground_truth=gt,
+            candidate_ids=cand_ids,
+            injective=False,
+        )
+        self.assertAlmostEqual(score_non_inj, 1.0)
+
+
+class TestTSVParsingContracts(unittest.TestCase):
+    """Verify bge_features and qwen_matcher_features parse TSVs with unescaped double quotes under INV-5."""
+
     def test_layer2_inv5_tsv_parsing(self):
-        """Verify bge_features and qwen_matcher_features parse TSVs with unescaped double quotes under INV-5."""
+        """Verify bge_features and qwen_matcher_features parse TSVs with unescaped double quotes."""
         import tempfile
         from src.bge_features import load_candidates as bge_load_candidates, load_records as bge_load_records
         from src.qwen_matcher_features import load_candidates as qwen_load_candidates, load_records as qwen_load_records

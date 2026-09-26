@@ -42,6 +42,12 @@ directions pass the retrieval gate.
 limits, self-distillation, country-balanced data, hard negatives, and a
 held-out-country acceptance gate, combined with precision-first pair scoring.
 
+### 2.3 Rule Compliance & External Data Independence
+
+- **No External Lookups**: No external databases, registry queries, online geocoders, or API lookups are performed at any stage. All processing is self-contained.
+- **Linguistic Token Normalization**: Rule-based normalization maps in `src/normalize.py` (`LEGAL_SUFFIX_MAP`, `ADDRESS_SUFFIX_MAP`, `_DIRECTION_ABBREV`) are closed-vocabulary language token contractions (e.g., `Corp` -> `corporation`, `Rd` -> `road`, `St` -> `street`). They serve solely as deterministic text canonicalization (akin to stemming or lowercasing), not business identity lookups or external business databases, fully honoring competition constraints.
+- **Model Size and License Constraints**: All foundation models (`BAAI/bge-m3` [MIT], `Qwen/Qwen3-Embedding-0.6B` [Apache-2.0], and `Qwen/Qwen3-0.6B` [Apache-2.0]) are <= 0.6B parameters (well below the 8B parameter ceiling) and permissible under commercial open-source licenses.
+
 ---
 
 ## 3. Candidate Generation (Blocking)
@@ -70,8 +76,10 @@ Candidate recall is measured by country and source before model training.
 
 **Model type:** Regularized GBM over pair features; BGE-M3 is the Stage 2a
 feature generator, not the final match decision-maker.
-**Threshold selection method:** Entity-level macro-F0.5 optimization on
-out-of-fold predictions, with singletons included.
+**Threshold selection & assignment method:**
+- Entity-level macro-F0.5 optimization on out-of-fold predictions, with singletons included.
+- Injective-aware threshold selection: τ* is tuned directly under greedy 1-to-N bipartite assignment matching the production decision layer, tracking the injective lift diagnostic.
+- Calibration: Sigmoid/isotonic calibration fit on out-of-fold predictions; an honest leak-free cross-fitted calibration diagnostic (`cross_fitted_calibration_metrics`) is tracked in metadata.
 
 ---
 
