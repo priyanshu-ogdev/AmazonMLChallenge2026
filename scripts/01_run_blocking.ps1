@@ -81,9 +81,24 @@ $s1File = $s1Raw
 $s2File = $s2Raw
 $s3File = $s3Raw
 
+$stage0Out = Join-Path $OutputDir "stage0_normalized"
+$s1Norm = Join-Path $stage0Out "${Split}_source1_normalized.tsv"
+if (-not (Test-Path $s1Norm)) { $s1Norm = Join-Path $stage0Out "$Split\${Split}_source1_normalized.tsv" }
+if (-not (Test-Path $s1Norm)) { $s1Norm = Join-Path $stage0Out "${Split}_source1_norm.tsv" }
+if (-not (Test-Path $s1Norm)) { $s1Norm = Join-Path $stage0Out "$Split\${Split}_source1_norm.tsv" }
+
+$s2Norm = Join-Path $stage0Out "${Split}_source2_normalized.tsv"
+if (-not (Test-Path $s2Norm)) { $s2Norm = Join-Path $stage0Out "$Split\${Split}_source2_normalized.tsv" }
+if (-not (Test-Path $s2Norm)) { $s2Norm = Join-Path $stage0Out "${Split}_source2_norm.tsv" }
+if (-not (Test-Path $s2Norm)) { $s2Norm = Join-Path $stage0Out "$Split\${Split}_source2_norm.tsv" }
+
+$s3Norm = Join-Path $stage0Out "${Split}_source3_normalized.tsv"
+if (-not (Test-Path $s3Norm)) { $s3Norm = Join-Path $stage0Out "$Split\${Split}_source3_normalized.tsv" }
+if (-not (Test-Path $s3Norm)) { $s3Norm = Join-Path $stage0Out "${Split}_source3_norm.tsv" }
+if (-not (Test-Path $s3Norm)) { $s3Norm = Join-Path $stage0Out "$Split\${Split}_source3_norm.tsv" }
+
 if ($RunStage0) {
     Write-Step "1.0" "Running Stage 0 Streaming Normalization on $Split..."
-    $stage0Out = Join-Path $OutputDir "stage0_normalized"
     Ensure-Directory $stage0Out
 
     $stage0Args = @(
@@ -93,25 +108,17 @@ if ($RunStage0) {
         "--splits", $Split
     )
     Invoke-PythonModule "src.data_builder" $stage0Args "Stage 0 Normalization" -DryRun $DryRun -PythonExe $python
+}
 
-    $s1Norm = Join-Path $stage0Out "${Split}_source1_normalized.tsv"
-    if (-not (Test-Path $s1Norm)) { $s1Norm = Join-Path $stage0Out "$Split\${Split}_source1_normalized.tsv" }
-    if (-not (Test-Path $s1Norm)) { $s1Norm = Join-Path $stage0Out "${Split}_source1_norm.tsv" }
-    if (-not (Test-Path $s1Norm)) { $s1Norm = Join-Path $stage0Out "$Split\${Split}_source1_norm.tsv" }
-
-    $s2Norm = Join-Path $stage0Out "${Split}_source2_normalized.tsv"
-    if (-not (Test-Path $s2Norm)) { $s2Norm = Join-Path $stage0Out "$Split\${Split}_source2_normalized.tsv" }
-    if (-not (Test-Path $s2Norm)) { $s2Norm = Join-Path $stage0Out "${Split}_source2_norm.tsv" }
-    if (-not (Test-Path $s2Norm)) { $s2Norm = Join-Path $stage0Out "$Split\${Split}_source2_norm.tsv" }
-
-    $s3Norm = Join-Path $stage0Out "${Split}_source3_normalized.tsv"
-    if (-not (Test-Path $s3Norm)) { $s3Norm = Join-Path $stage0Out "$Split\${Split}_source3_normalized.tsv" }
-    if (-not (Test-Path $s3Norm)) { $s3Norm = Join-Path $stage0Out "${Split}_source3_norm.tsv" }
-    if (-not (Test-Path $s3Norm)) { $s3Norm = Join-Path $stage0Out "$Split\${Split}_source3_norm.tsv" }
-
-    if (Test-Path $s1Norm) { $s1File = $s1Norm; Write-Info "Using Stage 0 S1 normalized: $s1File" }
-    if (Test-Path $s2Norm) { $s2File = $s2Norm; Write-Info "Using Stage 0 S2 normalized: $s2File" }
-    if (Test-Path $s3Norm) { $s3File = $s3Norm; Write-Info "Using Stage 0 S3 normalized: $s3File" }
+if ((Test-Path $s1Norm) -and (Test-Path $s2Norm) -and (Test-Path $s3Norm)) {
+    $s1File = $s1Norm
+    $s2File = $s2Norm
+    $s3File = $s3Norm
+    Write-Info "Using Stage 0 S1 normalized: $s1File"
+    Write-Info "Using Stage 0 S2 normalized: $s2File"
+    Write-Info "Using Stage 0 S3 normalized: $s3File"
+} else {
+    Write-Info "Using raw input files (Stage 0 normalized files not present or not requested)."
 }
 
 # Run Stage 1 Multi-Channel Blocker

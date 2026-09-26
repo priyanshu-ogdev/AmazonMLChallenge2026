@@ -306,7 +306,10 @@ class MultiChannelBlocker:
 
         # Total indexed candidate records
         self.num_candidates = 0
-        self.candidate_records: Dict[str, BlockingRecord] = {}
+        # Compact mapping of candidate entity ID -> ngram count / length for cosine normalization
+        self.candidate_ngram_lens: Dict[str, int] = {}
+        # Backwards-compatibility alias
+        self.candidate_records = self.candidate_ngram_lens
 
         # Country partition tracking
         # canonical_country -> set of candidate entity IDs
@@ -339,20 +342,25 @@ class MultiChannelBlocker:
 
     def index_candidate(self, record: BlockingRecord) -> None:
         """Add a candidate record (from S2 or S3) to all blocking indexes."""
-        cid = record.entity_id
+        cid = sys.intern(record.entity_id)
         country = record.canonical_country
-        self.candidate_records[cid] = record
+        self.candidate_ngram_lens[cid] = sum(record.ngram_counts.values()) if record.ngram_counts else max(1, len(record.norm_name) - 2)
         self.num_candidates += 1
-        self.all_candidate_ids.add(cid)
         self.country_partitions[country].add(cid)
 
-        # 1. Exact & Structural Name Keys
+        # 1. Exact & Structural Name Keys (cap postings at 1000 to prevent degenerate key explosion)
         if record.norm_name:
-            self.index_exact_name[record.norm_name][country].append(cid)
+            sub = self.index_exact_name[record.norm_name][country]
+            if len(sub) < 1000:
+                sub.append(cid)
         if record.first_2_tokens:
-            self.index_first_2_tokens[record.first_2_tokens][country].append(cid)
+            sub = self.index_first_2_tokens[record.first_2_tokens][country]
+            if len(sub) < 1000:
+                sub.append(cid)
         for acr in record.acronyms:
-            self.index_acronym[acr][country].append(cid)
+            sub = self.index_acronym[acr][country]
+            if len(sub) < 1000:
+                sub.append(cid)
 
         # Composite Keys
         if record.norm_name and record.postal_code:
@@ -372,15 +380,25 @@ class MultiChannelBlocker:
                 (record.first_word, record.street_number, record.trailing_segment)
             ][country].append(cid)
 
-        # 2. Character 3/4-Gram Inverted Index
+        # 2. Character 3/4-Gram Inverted Index (with stop-ngram memory eviction)
         for gram in record.ngram_counts:
-            self.index_ngrams[gram][country].append(cid)
-            self.ngram_doc_counts[gram] += 1
+            cnt = self.ngram_doc_counts[gram] + 1
+            self.ngram_doc_counts[gram] = cnt
+            if cnt <= self.max_ngram_doc_count:
+                self.index_ngrams[gram][country].append(cid)
+            elif cnt == self.max_ngram_doc_count + 1:
+                # Exceeded stop-ngram threshold; drop postings to reclaim memory!
+                self.index_ngrams.pop(gram, None)
 
-        # 3. Token Inverted Index
+        # 3. Token Inverted Index (with stop-token memory eviction)
         for tok in set(record.tokens):
-            self.index_tokens[tok][country].append(cid)
-            self.token_doc_counts[tok] += 1
+            cnt = self.token_doc_counts[tok] + 1
+            self.token_doc_counts[tok] = cnt
+            if cnt <= self.max_token_doc_count:
+                self.index_tokens[tok][country].append(cid)
+            elif cnt == self.max_token_doc_count + 1:
+                # Exceeded stop-token threshold; drop postings to reclaim memory!
+                self.index_tokens.pop(tok, None)
 
         # 4. Address Structural Key (postal + street number, bypassed if missing address)
         if not record.is_address_missing and record.postal_code and record.street_number:
@@ -527,19 +545,13 @@ class MultiChannelBlocker:
                 cand_scores: Counter[str] = Counter()
                 for gram, w_s1 in s1_weights.items():
                     for cid in self._query_partitioned_index(self.index_ngrams, gram, country):
-                        cand_rec = self.candidate_records.get(cid)
-                        if not cand_rec:
-                            continue
-                        c_cnt = cand_rec.ngram_counts.get(gram, 1)
-                        c_tf = 1.0 + math.log(c_cnt)
-                        cand_scores[cid] += w_s1 * c_tf
+                        cand_scores[cid] += w_s1
 
                 s1_norm = math.sqrt(sum(w * w for w in s1_weights.values()))
                 if cand_scores and s1_norm > 0:
                     scored_cands = []
                     for cid, raw_score in cand_scores.most_common(self.top_k_sparse * 3):
-                        cand_rec = self.candidate_records[cid]
-                        cand_len = sum(cand_rec.ngram_counts.values())
+                        cand_len = self.candidate_ngram_lens.get(cid, 25)
                         norm_factor = s1_norm * math.sqrt(max(1, cand_len))
                         sim = min(1.0, raw_score / norm_factor)
                         if sim >= self.similarity_floor:
@@ -571,9 +583,7 @@ class MultiChannelBlocker:
                 for tok, w_s1 in s1_token_weights.items():
                     cands = self._query_partitioned_index(self.index_tokens, tok, country)
                     for cid in cands:
-                        cand_rec = self.candidate_records.get(cid)
-                        c_tf = (1.0 + math.log(cand_rec.token_counts.get(tok, 1))) if cand_rec else 1.0
-                        token_scores[cid] += w_s1 * c_tf
+                        token_scores[cid] += w_s1
 
                 total_s1_weight = sum(s1_token_weights.values())
                 if token_scores and total_s1_weight > 0.0:
@@ -588,9 +598,7 @@ class MultiChannelBlocker:
         if not s1.is_address_missing and s1.postal_code and s1.street_number:
             key = (s1.postal_code, s1.street_number)
             for rank, cid in enumerate(self._query_partitioned_index(self.index_address_structural, key, country), 1):
-                cand = self.candidate_records.get(cid)
-                if cand and not cand.is_address_missing:
-                    record_hit(cid, "address_structural", 0.85, rank, is_exact=False)
+                record_hit(cid, "address_structural", 0.85, rank, is_exact=False)
 
         # -------------------------------------------------------------
         # Channel 5: Dense Retrieval Hook (if provided)
@@ -624,8 +632,7 @@ class MultiChannelBlocker:
             best_rank = info["best_rank"]
             provenance_str = ",".join(sorted(info["blockers"]))
 
-            cand_rec = self.candidate_records.get(cid)
-            cand_source = cand_rec.source if cand_rec else source_from_entity_id(cid)
+            cand_source = source_from_entity_id(cid)
 
             # Sort key (multi-tier priority sort per docs/04 spec)
             sort_key = (
@@ -840,10 +847,10 @@ def run_blocking(
         )
         blocker.index_candidate(rec)
         cand_count += 1
-        if cand_count % 200000 == 0:
-            print(f"  Indexed {cand_count:,} candidate records...")
+        if cand_count % 100000 == 0:
+            print(f"  Indexed {cand_count:,} candidate records...", flush=True)
 
-    print(f"Finished indexing {cand_count:,} candidate records across {len(blocker.country_partitions)} country partitions.")
+    print(f"Finished indexing {cand_count:,} candidate records across {len(blocker.country_partitions)} country partitions.", flush=True)
 
     # 1b. Initialize Dense Retrieval Index if provided
     dense_index: Optional[DenseRetrievalIndex] = None
@@ -966,8 +973,8 @@ def run_blocking(
                         for blk in c["blocker_provenance"].split(","):
                             gt_by_channel[blk] += 1
 
-            if s1_count % 50000 == 0:
-                print(f"  Processed {s1_count:,} S1 entities -> {total_pairs:,} total candidate pairs...")
+            if s1_count % 25000 == 0:
+                print(f"  Processed {s1_count:,} / {len(source1_paths)} S1 entities -> {total_pairs:,} total candidate pairs...", flush=True)
 
     candidate_counts.sort()
     n_s1 = len(candidate_counts)

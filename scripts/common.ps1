@@ -136,18 +136,24 @@ function Invoke-PythonModule {
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-    # Set PYTHONPATH so src modules resolve reliably
+    # Set PYTHONPATH so src modules resolve reliably, and force unbuffered output
     $oldPythonPath = $env:PYTHONPATH
+    $oldUnbuffered = $env:PYTHONUNBUFFERED
     $env:PYTHONPATH = "$CODE_DIR;$PROJECT_ROOT"
+    $env:PYTHONUNBUFFERED = "1"
 
     try {
         Push-Location $CODE_DIR
-        & $PythonExe $allArgs
+        # Run python unbuffered and pipe through Write-Host so Start-Transcript captures all output live
+        & $PythonExe -u $allArgs 2>&1 | ForEach-Object {
+            Write-Host "$_"
+        }
         $exitCode = $LASTEXITCODE
     }
     finally {
         Pop-Location
         $env:PYTHONPATH = $oldPythonPath
+        $env:PYTHONUNBUFFERED = $oldUnbuffered
         $stopwatch.Stop()
     }
 
@@ -250,16 +256,21 @@ function Invoke-PythonScript {
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
     $oldPythonPath = $env:PYTHONPATH
+    $oldUnbuffered = $env:PYTHONUNBUFFERED
     $env:PYTHONPATH = "$CODE_DIR;$PROJECT_ROOT"
+    $env:PYTHONUNBUFFERED = "1"
 
     try {
         Push-Location $PROJECT_ROOT
-        & $PythonExe $ScriptPath $Arguments
+        & $PythonExe -u $ScriptPath $Arguments 2>&1 | ForEach-Object {
+            Write-Host "$_"
+        }
         $exitCode = $LASTEXITCODE
     }
     finally {
         Pop-Location
         $env:PYTHONPATH = $oldPythonPath
+        $env:PYTHONUNBUFFERED = $oldUnbuffered
         $stopwatch.Stop()
     }
 
