@@ -108,7 +108,7 @@ In training data, true matches exclusively share the same country. A tree model 
 
 ### 4.2 Monotonic Constraints
 To prevent decision trees from learning spurious non-monotonic artifacts (e.g., predicting that higher name similarity decreases match probability), we enforce directionality constraints:
-- **`+1` (Positive Monotonicity):** Enforced on all similarity signals (`name_exact`, `address_exact`, `name_jaccard`, `name_edit_similarity`, `address_jaccard`, `address_edit_similarity`, `postal_equal`, `bge_cosine`, `qwen_cosine`, `qwen_matcher_prob`, `best_blocker_score`, `blocker_count`). Increasing similarity can only increase or maintain match probability.
+- **`+1` (Positive Monotonicity):** Enforced on all similarity signals and blocker retrieval provenance (`name_exact`, `address_exact`, `name_jaccard`, `name_overlap`, `name_edit_similarity`, `name_char_trigram_jaccard`, `address_jaccard`, `address_overlap`, `address_edit_similarity`, `address_char_trigram_jaccard`, `name_number_overlap`, `address_number_overlap`, `postal_equal`, `bge_cosine`, `qwen_cosine`, `qwen_matcher_prob`, `tfidf_cosine`, `best_blocker_score`, `blocker_count`, `has_blocker_provenance`). Increasing similarity or having candidate retrieval provenance can only increase or maintain match probability.
 - **`-1` (Negative Monotonicity):** Enforced on margin/contradiction gap features (`best_blocker_score_diff`, `candidate_rank`, `rank_margin_from_best`, `same_name_different_address`, `same_address_different_name`, `name_length_abs_diff`, `address_length_abs_diff`). A larger gap to the top candidate or higher rank index decreases confidence.
 - **`0` (Unconstrained):** Applied to indicator flags (`*_missing`, `*_missing_either`), source flags (`source_is_s3`), candidate counts, and `country_equal`. (Monotonic constraints on `country_equal` are strictly prohibited to prevent shortcut learning).
 
@@ -130,7 +130,7 @@ flowchart LR
 
 ### 5.1 Platt Scaling (Sigmoid Fitting)
 Fits a 1-dimensional logistic regression model on the raw model logits $z_i$:
-$$P_{\text{calibrated}}(y_i = 1 \mid z_i) = \frac{1}{1 + \exp(A \cdot z_i + B)}$$
+$$P_{\text{calibrated}}(y_i = 1 \mid z_i) = \frac{1}{1 + \exp(-(A \cdot z_i + B))}$$
 Because Platt scaling only fits two parameters ($A$ and $B$), it is immune to overfitting on small validation slices.
 
 ### 5.2 Isotonic Regression
@@ -140,7 +140,7 @@ Isotonic regression offers higher capacity but will severely overfit if calibrat
 
 ### 5.3 Macro $F_{0.5}$ Threshold Optimization with Fast Singleton Accounting
 In `src/scoring.py`'s `choose_threshold()`, candidates are swept across thresholds $\tau \in [0.05, 0.95]$ with step $0.01$. The search is accelerated to sub-second runtime via pre-grouped entity pair indices and exact analytical singleton credit tracking:
-- S1 entities with true matches $Y_i \neq \emptyset$: $F_{0.5} = \frac{1.25 \cdot \text{TP}}{1.25 \cdot \text{TP} + 0.25 \cdot \text{FP} + \text{FN}}$
+- S1 entities with true matches $Y_i \neq \emptyset$: $F_{0.5} = \frac{1.25 \cdot \text{TP}}{1.25 \cdot \text{TP} + 0.25 \cdot \text{FN} + \text{FP}}$ (derived from $F_\beta = \frac{(1+\beta^2)P \cdot R}{\beta^2 P + R}$ with $\beta=0.5$, penalizing false positives with full weight while false negatives receive reduced $0.25$ weight).
 - True singleton S1 entities ($Y_i = \emptyset$): Score $1.0$ if no candidate exceeds $\tau$, and $0.0$ if any false positive candidate is accepted.
 Pre-computing the base singleton credit reduces the evaluation from $418\text{M}$ inner loops down to vectorized dictionary lookups with exact numerical fidelity.
 
@@ -150,7 +150,7 @@ Pre-computing the base singleton credit reduces the evaluation from $418\text{M}
 
 - **DART (Dropouts meet Multiple Additive Regression Trees):** Rashmi & Gilad-Bachrach (*AISTATS 2015*). DART mutes a random subset of previous trees during each boosting round, preventing early trees from dominating the ensemble.
   - *Runtime Implementation:* `src/scoring.py` natively supports `--booster gbtree` and `--booster dart` (`rate_drop=0.10`, `skip_drop=0.50`, `sample_type="uniform"`, `normalize_type="tree"`).
-  - *Booster Invariance Assertion:* At training and load time, `actual_booster == booster` is asserted, and the booster choice is persisted in `stage3_metadata.json`. At inference time, `load_model()` explicitly instantiates the matching booster class before loading weights.
+  - *Booster Invariance Assertion:* At both training and load time, `actual_booster == booster` is asserted symmetrically for both `gbtree` and `dart`, and the booster choice is persisted in `stage3_metadata.json`. At inference time, `load_model()` explicitly instantiates the matching booster class before loading weights.
   - *Comparative Diagnostic:* Passing `--compare-dart` triggers an automated comparative benchmark running both GBDT and DART through cross-country diagnostics (US $\leftrightarrow$ India) to empirically test whether tree dropout mitigates out-of-domain degradation.
 - **Focal Loss / Beta-Weighted Loss:** Tested only if standard `binary:logistic` fails to separate hard negatives. When testing focal loss, `scale_pos_weight` must be completely removed.
 
@@ -163,7 +163,7 @@ A critical distinction must be maintained between the **rigor of our cross-valid
 ### 7.1 Cross-Validation Diagnostic Rigor
 1. **Zero Entity Leakage:** `StratifiedGroupKFold` guarantees no $S_1$ entity appears in both training and validation folds.
 2. **Zero Early-Stopping Leakage:** In each outer fold of `train_oof`, early stopping is monitored exclusively on an inner grouped split carved out of the training indices. The outer validation fold is scored only after model selection is frozen.
-3. **Cross-Country Proxy Diagnostic:** `evaluate_held_out_country_diagnostic` trains strictly on US records and evaluates on India records (and reverse), measuring how much performance degrades when the entity distribution shifts across borders.
+3. **Cross-Country Proxy Diagnostic:** `evaluate_held_out_country_diagnostic` performs leave-one-country-out cross-evaluation across all qualifying training countries (US $\leftrightarrow$ India). Critically, it executes with the model's active anti-shortcut defenses enabled (`country_mask_rate` stochastic masking and `use_monotone_constraints`), measuring how much performance degrades when the entity distribution shifts across borders without relying on domestic tabular shortcuts.
 
 ### 7.2 The Real-World Generalization Caveat (France: 0% Train, 15% Test)
 - While the cross-country diagnostic provides the strongest possible internal sanity check, **US $\leftrightarrow$ India transfer is a heuristic proxy, not a mathematical guarantee of transfer to France**.

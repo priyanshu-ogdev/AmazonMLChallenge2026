@@ -75,14 +75,21 @@ def assemble_matching_results(
             order = np.argsort(-passed_scores, kind="stable")
             claimed_targets: set[str] = set()
             for idx in order:
-                cand = str(passed_cand[idx])
+                cand = str(passed_cand[idx]).strip()
+                s1 = str(passed_s1[idx]).strip()
+                if cand == s1:
+                    continue
                 if cand not in claimed_targets:
-                    s1 = passed_s1[idx]
                     matches[s1].append(cand)
                     claimed_targets.add(cand)
         else:
-            for s1, cand in zip(passed_s1, passed_cand):
-                matches[s1].append(str(cand))
+            for s1_val, cand_val in zip(passed_s1, passed_cand):
+                s1 = str(s1_val).strip()
+                cand = str(cand_val).strip()
+                if cand == s1:
+                    continue
+                if cand not in matches[s1]:
+                    matches[s1].append(cand)
 
     return pd.DataFrame(
         {
@@ -95,17 +102,28 @@ def assemble_matching_results(
 def write_matching_results(
     scored_file: Path,
     source1_file: Path,
-    metadata_file: Path,
-    output_file: Path,
+    metadata_file: Optional[Path] = None,
+    output_file: Optional[Path] = None,
+    threshold: Optional[float] = None,
     injective: bool = True,
 ) -> None:
+    if output_file is None:
+        raise ValueError("output_file must be provided")
+
     scored = pd.read_csv(scored_file, sep="\t", dtype=str, keep_default_na=False)
-    with open(metadata_file, encoding="utf-8") as handle:
-        metadata = json.load(handle)
+    if threshold is not None:
+        effective_threshold = float(threshold)
+    elif metadata_file is not None:
+        with open(metadata_file, encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        effective_threshold = float(metadata["threshold"])
+    else:
+        raise ValueError("Either metadata_file or threshold must be provided")
+
     result = assemble_matching_results(
         scored,
         load_source1_ids(source1_file),
-        float(metadata["threshold"]),
+        effective_threshold,
         injective=injective,
     )
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -114,10 +132,11 @@ def write_matching_results(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Assemble Stage 4 matching results")
-    parser.add_argument("--scored", type=Path, required=True)
-    parser.add_argument("--source1", type=Path, required=True)
-    parser.add_argument("--metadata", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--scored", type=Path, required=True, help="Path to scored candidates TSV")
+    parser.add_argument("--source1", type=Path, required=True, help="Path to Source-1 TSV (to extract full S1 ID list)")
+    parser.add_argument("--metadata", type=Path, default=None, help="Path to stage3_metadata.json (required unless --threshold is given)")
+    parser.add_argument("--output", type=Path, required=True, help="Path to output matching_results.tsv")
+    parser.add_argument("--threshold", type=float, default=None, help="Explicit decision threshold (overrides metadata threshold)")
     parser.add_argument(
         "--no-injective",
         dest="injective",
@@ -126,7 +145,16 @@ def main() -> None:
         help="Disable greedy 1-to-N injective bipartite matching (default: enabled)",
     )
     args = parser.parse_args()
-    write_matching_results(args.scored, args.source1, args.metadata, args.output, injective=args.injective)
+    if args.metadata is None and args.threshold is None:
+        parser.error("Either --metadata or --threshold must be provided")
+    write_matching_results(
+        args.scored,
+        args.source1,
+        metadata_file=args.metadata,
+        output_file=args.output,
+        threshold=args.threshold,
+        injective=args.injective,
+    )
 
 
 if __name__ == "__main__":

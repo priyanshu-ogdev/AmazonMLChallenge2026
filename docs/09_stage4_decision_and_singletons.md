@@ -26,6 +26,8 @@ Stage 4 is **strictly deterministic**:
       --source1 dataset/test/test_source1.tsv `
       --metadata output/phase3_gbm/stage3_metadata.json `
       --output output/matching_results.tsv
+  # Or with explicit threshold override:
+  #   --threshold 0.75
   ```
 
 ---

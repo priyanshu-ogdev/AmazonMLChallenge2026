@@ -1130,6 +1130,59 @@ class TestStage3Scoring(unittest.TestCase):
             self.assertIn("Booster unavailable", res["error"])
             self.assertTrue(any("Failed to extract feature importances" in msg for msg in cm.output))
 
+    def test_evaluate_held_out_country_diagnostic_three_countries(self):
+        """Verify evaluate_held_out_country_diagnostic evaluates all qualifying countries without dropping beyond 2."""
+        rows = []
+        countries = ["us", "india", "gb"]
+        for idx, country in enumerate(countries, start=1):
+            rows.append({
+                "source1_entity_id": f"S1-{idx}a",
+                "candidate_entity_id": f"S2-{idx}a",
+                "source1_canonical_country": country,
+                "label": 1,
+                "name_jaccard": 0.9,
+            })
+            rows.append({
+                "source1_entity_id": f"S1-{idx}b",
+                "candidate_entity_id": f"S2-{idx}b",
+                "source1_canonical_country": country,
+                "label": 0,
+                "name_jaccard": 0.1,
+            })
+        df = pd.DataFrame(rows)
+        res = evaluate_held_out_country_diagnostic(df, ["name_jaccard"], n_estimators=10)
+        self.assertIn("train_others_eval_us", res)
+        self.assertIn("train_others_eval_india", res)
+        self.assertIn("train_others_eval_gb", res)
+        self.assertIn("mean_held_out_country_ap", res)
+
+    def test_booster_invariance_assertion_on_mismatch(self):
+        """Verify score_candidates raises AssertionError if loaded booster does not match metadata booster."""
+        import unittest.mock as mock
+        artifact_dir = self.output_dir / "mismatch_booster_test"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        feat_file = artifact_dir / "feat.tsv"
+        pd.DataFrame([
+            {"source1_entity_id": "S1-1", "candidate_entity_id": "S2-1", "name_jaccard": 0.8}
+        ]).to_csv(feat_file, sep="\t", index=False)
+
+        (artifact_dir / "gbm.json").write_text("{}", encoding="utf-8")
+        meta = {
+            "booster": "dart",
+            "feature_columns": ["name_jaccard"],
+            "calibrator_parameters": {"name": "platt", "coef": 1.0, "intercept": 0.0},
+            "threshold": 0.5,
+        }
+        with open(artifact_dir / "stage3_metadata.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+
+        mock_xgb = mock.MagicMock()
+        mock_xgb.get_params.return_value = {"booster": "gbtree"}
+        with mock.patch("src.scoring.xgb.XGBClassifier", return_value=mock_xgb):
+            with self.assertRaises(AssertionError) as ctx:
+                score_candidates(feature_file=feat_file, artifact_dir=artifact_dir)
+            self.assertIn("Expected loaded model booster to be 'dart', got 'gbtree'", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

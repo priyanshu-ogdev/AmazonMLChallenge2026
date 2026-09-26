@@ -23,9 +23,9 @@ try:
     except ImportError:
         from src.stage3_gbm import DROP_CATEGORICAL, prepare_matrix, macro_f05
     try:
-        from src.decision import assemble_matching_results
+        from src.decision import assemble_matching_results, write_matching_results
     except ImportError:
-        from src.stage4_decision import assemble_matching_results
+        from src.stage4_decision import assemble_matching_results, write_matching_results
     HAS_DEPENDENCIES = True
 except ImportError:
     HAS_DEPENDENCIES = False
@@ -276,6 +276,63 @@ class TestDownstreamContracts(unittest.TestCase):
         row2_non = results_non_injective[results_non_injective["source1_entity_id"] == "S1-2"].iloc[0]
         self.assertEqual(row1_non["matched_entity_ids"], "S2-shared")
         self.assertEqual(row2_non["matched_entity_ids"], "S2-shared")
+
+    def test_stage4_decision_self_match_prevention(self):
+        """Verify candidate pairs where candidate_entity_id == source1_entity_id are ignored."""
+        scored = pd.DataFrame({
+            "source1_entity_id": ["S1-1", "S1-1"],
+            "candidate_entity_id": ["S1-1", "S2-valid"],
+            "calibrated_score": [0.99, 0.85],
+        })
+        results = assemble_matching_results(scored, ["S1-1"], threshold=0.50, injective=True)
+        self.assertEqual(results.iloc[0]["matched_entity_ids"], "S2-valid")
+
+        results_non = assemble_matching_results(scored, ["S1-1"], threshold=0.50, injective=False)
+        self.assertEqual(results_non.iloc[0]["matched_entity_ids"], "S2-valid")
+
+    def test_stage4_decision_duplicate_pairs_validation(self):
+        """Verify assemble_matching_results rejects input tables with duplicate candidate pairs."""
+        scored = pd.DataFrame({
+            "source1_entity_id": ["S1-1", "S1-1"],
+            "candidate_entity_id": ["S2-cand", "S2-cand"],
+            "calibrated_score": [0.90, 0.80],
+        })
+        with self.assertRaises(ValueError) as ctx:
+            assemble_matching_results(scored, ["S1-1"], threshold=0.50)
+        self.assertIn("duplicate candidate pairs", str(ctx.exception))
+
+    def test_stage4_decision_threshold_override(self):
+        """Verify write_matching_results operates with explicit threshold without metadata_file."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            scored_path = tmp / "scored.tsv"
+            s1_path = tmp / "source1.tsv"
+            out_path = tmp / "matching_results.tsv"
+
+            pd.DataFrame({
+                "source1_entity_id": ["S1-1", "S1-2"],
+                "candidate_entity_id": ["S2-1", "S2-2"],
+                "calibrated_score": [0.75, 0.45],
+            }).to_csv(scored_path, sep="\t", index=False)
+
+            pd.DataFrame({
+                "entity_id": ["S1-1", "S1-2", "S1-3"],
+            }).to_csv(s1_path, sep="\t", index=False)
+
+            # Pass threshold=0.50 explicitly, metadata_file=None
+            write_matching_results(
+                scored_file=scored_path,
+                source1_file=s1_path,
+                metadata_file=None,
+                output_file=out_path,
+                threshold=0.50,
+            )
+            out_df = pd.read_csv(out_path, sep="\t", dtype=str, keep_default_na=False)
+            self.assertEqual(len(out_df), 3)
+            self.assertEqual(out_df[out_df["source1_entity_id"] == "S1-1"].iloc[0]["matched_entity_ids"], "S2-1")
+            self.assertEqual(out_df[out_df["source1_entity_id"] == "S1-2"].iloc[0]["matched_entity_ids"], "")
+            self.assertEqual(out_df[out_df["source1_entity_id"] == "S1-3"].iloc[0]["matched_entity_ids"], "")
 
 
 if __name__ == "__main__":

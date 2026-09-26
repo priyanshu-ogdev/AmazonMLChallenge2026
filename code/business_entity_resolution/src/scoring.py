@@ -506,6 +506,10 @@ def score_candidates(
     model_booster = metadata.get("booster") or metadata.get("params", {}).get("booster", "gbtree")
     model = xgb.XGBClassifier(booster=model_booster)
     model.load_model(str(gbm_path))
+    actual_booster = model.get_params().get("booster")
+    assert actual_booster == model_booster, (
+        f"Expected loaded model booster to be '{model_booster}', got '{actual_booster}'"
+    )
     raw = model.predict_proba(matrix)[:, 1]
     calibrated = apply_saved_calibrator(
         metadata["calibrator_parameters"], raw
@@ -567,7 +571,13 @@ def evaluate_held_out_country_diagnostic(
 
     diagnostic_results = {}
     cross_ap = []
-    for eval_country in valid_countries[:2]:
+    if len(valid_countries) > 2:
+        logger.info(
+            "Found %d qualifying countries for held-out diagnostic: %s. Evaluating all.",
+            len(valid_countries),
+            valid_countries,
+        )
+    for eval_country in valid_countries:
         train_mask = frame[country_col] != eval_country
         valid_mask = frame[country_col] == eval_country
         if not train_mask.any() or not valid_mask.any():
@@ -922,10 +932,9 @@ def run_training(
         output_dir=output_dir,
     )
     actual_booster = model.get_params().get("booster")
-    if booster == "dart":
-        assert actual_booster == "dart", (
-            f"Expected fitted model booster to be 'dart', got {actual_booster}"
-        )
+    assert actual_booster == booster, (
+        f"Expected fitted model booster to be '{booster}', got '{actual_booster}'"
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     model.save_model(str(output_dir / "gbm.json"))
