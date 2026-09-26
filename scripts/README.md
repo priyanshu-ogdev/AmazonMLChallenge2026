@@ -107,6 +107,18 @@ powershell -ExecutionPolicy Bypass -File scripts/02b_train_and_eval_bi_encoder.p
 - Margin pass rate at 0.10 ≥ 0.60
 - *If gate fails (NO-GO):* halts pipeline without silently deploying a degraded model.
 
+### `02b2_train_and_eval_qwen_matcher.ps1` (Stretch Goal)
+Fine-tunes Qwen3-0.6B with LoRA (r=64, rsLoRA, sliced verdict CE + sliced KL distillation) and enforces the cross-country gate.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/02b2_train_and_eval_qwen_matcher.ps1 `
+    -Epochs 3 `
+    -BatchSize 16 `
+    -GradAccumSteps 2 `
+    -LearningRate 5e-5 `
+    -LoraR 64 `
+    -DistillWeight 0.10
+```
+
 ### `02c_extract_pair_features.ps1`
 Extracts deterministic pair features, dense embeddings, and optional Stage 2b generative-matcher probabilities for candidate pairs.
 ```powershell

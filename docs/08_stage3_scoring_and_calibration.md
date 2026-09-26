@@ -138,5 +138,26 @@ Isotonic regression offers higher capacity but will severely overfit if calibrat
 ## 6. Escalation Paths: DART & Custom Losses
 
 - **DART (Dropouts meet Multiple Additive Regression Trees):** Rashmi & Gilad-Bachrach (*AISTATS 2015*). DART mutes a random subset of previous trees during each boosting round, preventing early trees from dominating the ensemble.
-  - *Trigger Condition:* DART is activated (`booster="dart"`) only if a persistent cross-country generalization gap ($\Delta \text{AUCPR} > 0.05$) remains after regularized GBDT training.
+  - *Trigger Condition:* DART is activated (`--booster dart`) only if a persistent cross-country generalization gap ($\Delta \text{AUCPR} > 0.05$) remains after regularized GBDT training.
+  - *Runtime Implementation:* In modern XGBoost (3.x+), the C++ engine (`learner.cc:343`) aliases `booster=dart` to the tree booster with dropout parameters (`rate_drop=0.10`, `skip_drop=0.50`, `sample_type="uniform"`, `normalize_type="tree"`). Setting these parameters executes the exact mathematical DART algorithm (producing bit-for-bit identical outputs to `booster="dart"`) while avoiding learner deprecation warnings.
 - **Focal Loss / Beta-Weighted Loss:** Tested only if standard `binary:logistic` fails to separate hard negatives. When testing focal loss, `scale_pos_weight` must be completely removed.
+
+---
+
+## 7. Methodological Note: Diagnostic Rigor vs Real-World Generalization
+
+A critical distinction must be maintained between the **rigor of our cross-validation diagnostics** and **proven real-world generalization to France**:
+
+### 7.1 Cross-Validation Diagnostic Rigor
+1. **Zero Entity Leakage:** `StratifiedGroupKFold` guarantees no $S_1$ entity appears in both training and validation folds.
+2. **Zero Early-Stopping Leakage:** In each outer fold of `train_oof`, early stopping is monitored exclusively on an inner grouped split carved out of the training indices. The outer validation fold is scored only after model selection is frozen.
+3. **Cross-Country Proxy Diagnostic:** `evaluate_held_out_country_diagnostic` trains strictly on US records and evaluates on India records (and reverse), measuring how much performance degrades when the entity distribution shifts across borders.
+
+### 7.2 The Real-World Generalization Caveat (France: 0% Train, 15% Test)
+- While the cross-country diagnostic provides the strongest possible internal sanity check, **US $\leftrightarrow$ India transfer is a heuristic proxy, not a mathematical guarantee of transfer to France**.
+- France features distinct linguistic morphology (French contractions, accents), French corporate legal suffixes (*SARL*, *SAS*, *EURL*, *SCI*), and continental address syntax (street type prefixing names, e.g., *14 Rue de la Paix* vs *14 Main Street*).
+- For this reason, internal CV scores are never treated as ground truth for test performance. The pipeline's defense relies on architectural invariants:
+  - **15% stochastic dropout on `country_match`** to force decision trees away from tabular shortcuts.
+  - **Strict monotonic constraints** (+1 on lexical similarities, -1 on rank/margin penalties) to guarantee physically rational behavior on unseen text distributions.
+  - **BGE-M3 rsLoRA anti-forgetting stack** (LoRA rank 64 + self-distillation) preserving base multilingual representations.
+

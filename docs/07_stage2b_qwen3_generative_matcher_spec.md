@@ -127,5 +127,20 @@ $$P(\text{Match}) = \text{Softmax}\left(\left[z_{\text{No}}, z_{\text{Yes}}\righ
 This emits a clean scalar probability $P(\text{Match}) \in [0.0, 1.0]$ merged into the Stage 2 feature table.
 
 ### 5.3 Confirmation of the France Gate
-- **Go/No-Go Gate:** The fine-tuned Qwen3-0.6B matcher must achieve a macro AUCPR on the held-out country within $\le 5\%$ relative of in-domain performance.
+- **Go/No-Go Gate:** The fine-tuned Qwen3-0.6B matcher must achieve a macro AUCPR on the held-out country within $\le 5\%$ relative of in-domain performance (AP $\ge 0.75$, Acc $\ge 0.80$).
 - **Fallback Policy:** If the model exhibits distribution collapse on unseen country records, **the feature is completely dropped from Stage 3**.
+
+---
+
+## 6. Implementation Modules & Pipeline Orchestration
+
+Stage 2b is implemented across two Python modules and a standalone PowerShell pipeline script:
+
+1. **Training & Gate Evaluation:** [`code/business_entity_resolution/src/train_qwen_matcher.py`](file:///d:/AmazonMLChallenge2026/code/business_entity_resolution/src/train_qwen_matcher.py)
+   - Prepares pair prompts with `[COL]`/`[VAL]` serialization and mines hard negatives from Stage 1 blocking.
+   - Computes sliced verdict-token Cross-Entropy loss + sliced KL self-distillation.
+   - Evaluates cross-country gate (US $\leftrightarrow$ India) and saves PEFT LoRA adapter checkpoint with metadata.
+2. **Feature Extraction:** [`code/business_entity_resolution/src/qwen_matcher_features.py`](file:///d:/AmazonMLChallenge2026/code/business_entity_resolution/src/qwen_matcher_features.py)
+   - Loads fine-tuned adapter into base model and scores candidate pairs via sliced 2-way softmax.
+3. **Pipeline Script:** [`scripts/02b2_train_and_eval_qwen_matcher.ps1`](file:///d:/AmazonMLChallenge2026/scripts/02b2_train_and_eval_qwen_matcher.ps1)
+   - Orchestrates Stage 2b training, gate check, and artifact export before Phase 2c feature merging.

@@ -34,7 +34,7 @@ A claim that something is "verified" or "corrected" is not itself proof. Every t
 |---|---|---|
 | **DEC-1: Stage 2a Primary Encoder** | **BGE-M3 rsLoRA (Rank 64)** is the primary fine-tuned dense representation (Stage 2a-i). | Pre-trained on 100+ languages; adapted via LoRA on competition pairs; gated by two-direction cross-country validation. |
 | **DEC-2: Qwen3-Embedding Role** | **Qwen3-Embedding-0.6B** is designated exclusively as an **auxiliary dense feature (Stage 2a-ii)**. | Evaluated with symmetric prompts; included in Stage 3 only if it provides orthogonal signal over BGE-M3. |
-| **DEC-3: Stage 2b Cross-Record Matcher** | **Qwen3-0.6B Causal LM** (arXiv:2607.24688) replaces legacy Ditto as Stage 2b. | **Stretch goal only:** Executed strictly behind baseline steps 1–5; sliced verdict-token logits reduce memory to ~29 MB. |
+| **DEC-3: Stage 2b Cross-Record Matcher** | **Qwen3-0.6B Causal LM** (arXiv:2607.24688) replaces legacy Ditto as Stage 2b. | **Stretch goal only:** Implemented in `train_qwen_matcher.py` & `02b2_train_and_eval_qwen_matcher.ps1`; sliced verdict-token logits reduce memory to ~29 MB. Evaluated via cross-country gate. |
 | **DEC-4: Open-Set Country Representation** | Country is strictly treated as an open set of string labels. | Raw country strings are never fed to classifiers. Evaluated solely via the symmetric boolean indicator `country_match`. |
 | **DEC-5: Zero External Data** | External geocoders, commercial APIs, and external datasets are strictly prohibited. | Pipeline is self-contained within competition TSVs. |
 
@@ -44,8 +44,8 @@ A claim that something is "verified" or "corrected" is not itself proof. Every t
 |---|---|---|
 | **OP-1: Decision Threshold $\tau^*$** | Cutoff in $[0.05, 0.95]$ | Evaluated via 91-point sweep over out-of-fold calibrated probabilities maximizing Macro $F_{0.5}$. |
 | **OP-2: Country-Match Masking Rate** | Dropout rate in $[0.10, 0.20]$ | Tested on cross-country validation (US $\leftrightarrow$ India); rate maximizing held-out AUCPR is locked in. |
-| **OP-3: Hard Negatives per Positive** | Ratio $k \in [3, 5]$ | Monitored via bi-encoder proxy margin pass rate at $\Delta \ge 0.30$. |
-| **OP-4: DART Boosting Escalation** | Standard `gbtree` vs `dart` | Standard GBDT by default; DART activated only if cross-country generalization gap exceeds $0.05$. |
+| **OP-3: Hard Negatives per Positive** | Ratio $k \in [1, 5]$ (committed default $k=2$) | Monitored via bi-encoder proxy margin pass rate at $\Delta \ge 0.30$. |
+| **OP-4: DART Boosting Escalation** | Standard `gbtree` vs `dart` | Standard GBDT by default; DART activated only if cross-country generalization gap exceeds $0.05$. (In XGBoost 3.x, tree booster with dropout executes DART). |
 
 ---
 

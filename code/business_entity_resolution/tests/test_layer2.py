@@ -597,6 +597,79 @@ class TestLayer2DataBuilder(unittest.TestCase):
         self.assertEqual(frozen.eval_calls, 2)
         self.assertEqual(model.eval_calls, 2)
 
+    def test_build_labeled_training_pairs_and_slicing(self):
+        """Verify train_qwen_matcher pair extraction, prompt formatting, and logits slicing."""
+        import tempfile
+        import torch
+        from src.train_qwen_matcher import build_labeled_training_pairs, compute_sliced_logits
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            gt_file = tmp / "gt.tsv"
+            s1_file = tmp / "s1.tsv"
+            s2_file = tmp / "s2.tsv"
+            cand_file = tmp / "cands.tsv"
+
+            pd.DataFrame([
+                {"source1_entity_id": "S1-1", "matched_entity_ids": "S2-1"},
+            ]).to_csv(gt_file, sep="\t", index=False)
+
+            pd.DataFrame([
+                {"entity_id": "S1-1", "business_name": "Target Store", "business_address": "1000 Nicollet", "country": "US"},
+            ]).to_csv(s1_file, sep="\t", index=False)
+
+            pd.DataFrame([
+                {"entity_id": "S2-1", "business_name": "Target Store", "business_address": "1000 Nicollet Mall", "country": "US"},
+                {"entity_id": "S2-neg", "business_name": "Walmart", "business_address": "500 Terry", "country": "US"},
+            ]).to_csv(s2_file, sep="\t", index=False)
+
+            pd.DataFrame([
+                {"source1_entity_id": "S1-1", "candidate_entity_ids": "S2-neg"},
+            ]).to_csv(cand_file, sep="\t", index=False)
+
+            train_pairs, _ = build_labeled_training_pairs(
+                ground_truth_file=gt_file,
+                source1_files=[s1_file],
+                candidate_source_files=[s2_file],
+                blocking_candidates_file=cand_file,
+                negatives_per_positive=1,
+            )
+
+            self.assertEqual(len(train_pairs), 2)
+            labels = {p["label"] for p in train_pairs}
+            self.assertEqual(labels, {0, 1})
+            for p in train_pairs:
+                self.assertIn("Task: Do the following two records refer to the same business entity?", p["prompt"])
+                self.assertTrue(p["prompt"].endswith("Match:"))
+
+        # Test sliced logits computation
+        class MockQwen(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lm_head = torch.nn.Linear(16, 100, bias=False)
+
+            def forward(self, input_ids, attention_mask, output_hidden_states=True):
+                b, s = input_ids.shape
+                hidden = torch.randn(b, s, 16)
+                class Out:
+                    pass
+                out = Out()
+                out.hidden_states = [hidden]
+                return out
+
+        mock_model = MockQwen()
+        input_ids = torch.tensor([[1, 2, 3, 0], [1, 2, 0, 0]], dtype=torch.long)
+        attention_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]], dtype=torch.long)
+
+        sliced_logits = compute_sliced_logits(
+            model=mock_model,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            no_id=10,
+            yes_id=20,
+        )
+        self.assertEqual(sliced_logits.shape, (2, 2))
+
 
 if __name__ == "__main__":
     unittest.main()
