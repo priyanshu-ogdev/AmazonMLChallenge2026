@@ -152,15 +152,24 @@ class QwenMatcherScorer:
                     encoded = {k: v.to(self.device) for k, v in encoded.items()}
                 # Verdict-token slicing (spec Section 4.2): only the final
                 # non-padded position's hidden state is projected through the LM
-                # head, making inference robust regardless of padding side and
-                # reducing logits memory from ~3.27 GB to ~29 MB.
+                # head, reducing logits memory from ~3.27 GB to ~29 MB.
+                # For right-padding, attention_mask.sum(dim=1) - 1 points to the terminal token.
+                # For left-padding, the terminal non-padded token is at index S - 1.
                 outputs = self.model(
                     input_ids=encoded["input_ids"],
                     attention_mask=encoded["attention_mask"],
                     output_hidden_states=True,
                 )
                 hidden_states = outputs.hidden_states[-1]
-                last_token_idx = encoded["attention_mask"].sum(dim=1) - 1
+                if getattr(self.tokenizer, "padding_side", "right") == "left":
+                    last_token_idx = torch.full(
+                        (encoded["input_ids"].size(0),),
+                        encoded["input_ids"].size(1) - 1,
+                        dtype=torch.long,
+                        device=encoded["input_ids"].device,
+                    )
+                else:
+                    last_token_idx = encoded["attention_mask"].sum(dim=1) - 1
                 batch_idx = torch.arange(encoded["input_ids"].size(0), device=encoded["input_ids"].device)
                 terminal_hidden = hidden_states[batch_idx, last_token_idx, :].unsqueeze(1)
 

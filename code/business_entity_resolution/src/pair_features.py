@@ -144,10 +144,10 @@ def pair_feature_row(
         "candidate_canonical_country": canon_right,
         "source_is_s3": int(str(right["entity_id"]).startswith("S3-")),
         # country_equal uses canonicalized form: handles US/USA/us and
-        # France/FR correctly. Value is 0/1; None is stored as -1 to allow
+        # France/FR correctly. Value is 0.0/1.0; None is stored as -1.0 to allow
         # the GBM to learn a missing-country branch.
         "country_equal": (
-            -1 if match_flag is None else int(match_flag)
+            -1.0 if match_flag is None else (1.0 if match_flag else 0.0)
         ),
         "country_equal_missing": int(match_flag is None),
         "left_country_missing": int(not left["country"]),

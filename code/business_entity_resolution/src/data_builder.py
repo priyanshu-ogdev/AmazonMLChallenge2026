@@ -597,8 +597,8 @@ def build_training_data(config: DataConfig) -> Dict[str, Any]:
         canonicalize=True,
     )
 
-    gt["country"] = gt["source1_entity_id"].map(country_map)
-    gt = gt.dropna(subset=["country"])
+    gt["country"] = gt["source1_entity_id"].map(country_map).fillna("")
+    gt = gt[gt["country"].astype(str).str.strip() != ""]
 
     countries = sorted(gt["country"].unique())
     logger.info(f"Canonical countries in training data: {countries}")
@@ -751,22 +751,26 @@ def build_training_data(config: DataConfig) -> Dict[str, Any]:
 
     # Execute primary split
     directions_info = []
+    primary_prefix = f"{primary_train_country}_train_{primary_eval_country}_eval_" if config.bidirectional_gate else ""
     primary_info = build_direction_artifacts(
         primary_train_country, primary_eval_country,
-        prefix="us_train_india_eval_" if config.bidirectional_gate else "",
+        prefix=primary_prefix,
         is_primary=True,
     )
+    primary_info["prefix"] = primary_prefix
     directions_info.append(primary_info)
 
     # If bidirectional gate is requested and reverse direction is possible
     if config.bidirectional_gate and len(countries) >= 2:
         reverse_train_country = primary_eval_country
         reverse_eval_country = primary_train_country
+        reverse_prefix = f"{reverse_train_country}_train_{reverse_eval_country}_eval_"
         reverse_info = build_direction_artifacts(
             reverse_train_country, reverse_eval_country,
-            prefix="india_train_us_eval_",
+            prefix=reverse_prefix,
             is_primary=False,
         )
+        reverse_info["prefix"] = reverse_prefix
         directions_info.append(reverse_info)
 
     # 6. Build all pairs for full training dataset (both countries)

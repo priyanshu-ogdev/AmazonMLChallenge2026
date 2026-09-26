@@ -438,6 +438,73 @@ class TestLayer2EvaluationAndMetrics(unittest.TestCase):
             self.assertEqual(res["decision"], "NO-GO")
             self.assertTrue(any("Margin pass" in r for r in res["reasons"]))
 
+    def test_evaluate_single_direction_relative_gate_criteria(self):
+        """Verify Go/No-Go gate enforces >=15% margin gain and max 5% recall gap vs baseline."""
+        class MockFtModel:
+            def encode(self, texts, **kwargs):
+                res = []
+                for t in texts:
+                    if "Query" in t or "Pos" in t:
+                        res.append([1.0, 0.0])
+                    else:
+                        res.append([0.0, 1.0])
+                return np.array(res, dtype=np.float32)
+
+        class MockBaseModel:
+            def encode(self, texts, **kwargs):
+                res = []
+                for t in texts:
+                    if "Query" in t:
+                        res.append([1.0, 0.0])
+                    elif "Pos" in t:
+                        res.append([0.8, 0.6])
+                    else:
+                        res.append([0.6, 0.8])
+                return np.array(res, dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            p = Path(tmp_dir)
+            with open(p / "eval_queries.json", "w") as f:
+                json.dump({"Q1": "Query 1"}, f)
+            corpus_dict = {"C1": "Pos 1"}
+            for idx in range(2, 16):
+                corpus_dict[f"C{idx}"] = f"Neg {idx}"
+            with open(p / "eval_corpus.json", "w") as f:
+                json.dump(corpus_dict, f)
+            with open(p / "eval_relevant.json", "w") as f:
+                json.dump({"Q1": ["C1"]}, f)
+
+            # Case A: Good fine-tuned vs baseline -> GO
+            res_go = _evaluate_single_direction(
+                model=MockFtModel(),
+                base_model=MockBaseModel(),
+                data_dir=str(p),
+                prefix="",
+                direction_name="test_go",
+            )
+            self.assertEqual(res_go["decision"], "GO")
+
+            # Case B: Gap > 0.05 degradation -> NO-GO
+            class MockDegradedModel:
+                def encode(self, texts, **kwargs):
+                    res = []
+                    for t in texts:
+                        if "Query" in t or "Neg" in t:
+                            res.append([1.0, 0.0])
+                        else:
+                            res.append([0.0, 1.0])
+                    return np.array(res, dtype=np.float32)
+
+            res_nogo_gap = _evaluate_single_direction(
+                model=MockDegradedModel(),
+                base_model=MockFtModel(),
+                data_dir=str(p),
+                prefix="",
+                direction_name="test_nogo_gap",
+            )
+            self.assertEqual(res_nogo_gap["decision"], "NO-GO")
+            self.assertTrue(any("exceeding max degradation gap" in r or "below absolute" in r for r in res_nogo_gap["reasons"]))
+
 
 class TestLayer2DataBuilder(unittest.TestCase):
     """Test bi-encoder training pair extraction and IR evaluation dataset building."""
@@ -847,6 +914,111 @@ class TestLayer2DataBuilder(unittest.TestCase):
         self.assertEqual(res_pf.returncode, 0)
         self.assertIn("--candidate-sources", res_pf.stdout)
         self.assertIn("--output", res_pf.stdout)
+
+    def test_country_equal_float_dtype(self):
+        """Verify country_equal is explicitly float {-1.0, 0.0, 1.0} per schema doc."""
+        from src.pair_features import pair_feature_row
+        l = {"entity_id": "S1-1", "canonical_country": "us", "country": "US", "name": "A", "address": "B", "name_tokens": {"a"}, "address_tokens": {"b"}, "name_numbers": set(), "address_numbers": set(), "name_trigrams": {"a"}, "address_trigrams": {"b"}, "postal": ""}
+        r_same = {"entity_id": "S2-1", "canonical_country": "us", "country": "USA", "name": "A", "address": "B", "name_tokens": {"a"}, "address_tokens": {"b"}, "name_numbers": set(), "address_numbers": set(), "name_trigrams": {"a"}, "address_trigrams": {"b"}, "postal": ""}
+        r_diff = {"entity_id": "S2-2", "canonical_country": "fr", "country": "FR", "name": "A", "address": "B", "name_tokens": {"a"}, "address_tokens": {"b"}, "name_numbers": set(), "address_numbers": set(), "name_trigrams": {"a"}, "address_trigrams": {"b"}, "postal": ""}
+        r_none = {"entity_id": "S2-3", "canonical_country": "", "country": "", "name": "A", "address": "B", "name_tokens": {"a"}, "address_tokens": {"b"}, "name_numbers": set(), "address_numbers": set(), "name_trigrams": {"a"}, "address_trigrams": {"b"}, "postal": ""}
+
+        p_same = pair_feature_row(l, r_same)
+        p_diff = pair_feature_row(l, r_diff)
+        p_none = pair_feature_row(l, r_none)
+
+        self.assertIsInstance(p_same["country_equal"], float)
+        self.assertEqual(p_same["country_equal"], 1.0)
+        self.assertIsInstance(p_diff["country_equal"], float)
+        self.assertEqual(p_diff["country_equal"], 0.0)
+        self.assertIsInstance(p_none["country_equal"], float)
+        self.assertEqual(p_none["country_equal"], -1.0)
+
+    def test_compute_sliced_logits_left_and_right_padding(self):
+        """Verify compute_sliced_logits correctly identifies terminal prompt position for both padding sides."""
+        from src.train_qwen_matcher import compute_sliced_logits
+        import torch
+        import torch.nn as nn
+
+        class DummyModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lm_head = nn.Identity()
+
+            def forward(self, input_ids, attention_mask=None, output_hidden_states=False):
+                B, S = input_ids.shape
+                t = torch.arange(S, dtype=torch.float32).unsqueeze(0).repeat(B, 1)
+                hidden = torch.stack([t, t * 10], dim=-1)
+                class Out:
+                    pass
+                out = Out()
+                out.hidden_states = [hidden]
+                return out
+
+        model = DummyModel()
+        input_ids_r = torch.tensor([[10, 20, 30, 0]], dtype=torch.long)
+        mask_r = torch.tensor([[1, 1, 1, 0]], dtype=torch.long)
+        logits_r = compute_sliced_logits(model, input_ids_r, mask_r, no_id=0, yes_id=1, padding_side="right")
+        self.assertAlmostEqual(logits_r[0, 0].item(), 2.0)
+        self.assertAlmostEqual(logits_r[0, 1].item(), 20.0)
+
+        input_ids_l = torch.tensor([[0, 10, 20, 30]], dtype=torch.long)
+        mask_l = torch.tensor([[0, 1, 1, 1]], dtype=torch.long)
+        logits_l = compute_sliced_logits(model, input_ids_l, mask_l, no_id=0, yes_id=1, padding_side="left")
+        self.assertAlmostEqual(logits_l[0, 0].item(), 3.0)
+        self.assertAlmostEqual(logits_l[0, 1].item(), 30.0)
+
+    def test_distillation_sample_weighted_accumulation(self):
+        """Verify _compute_distillation_chunked accumulates sample-weighted sum across chunks."""
+        from src.losses import DistillationCachedMNRL
+        from unittest.mock import patch
+        import torch
+        import torch.nn as nn
+
+        class DummyST(nn.Module):
+            def __init__(self, emb_map):
+                super().__init__()
+                self.emb_map = emb_map
+
+            def forward(self, features):
+                idx = features["idx"]
+                return {"sentence_embedding": self.emb_map[idx]}
+
+        curr_embs = torch.tensor([
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ])
+        froz_embs = torch.tensor([
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+        ])
+        curr_m = DummyST(curr_embs)
+        froz_m = DummyST(froz_embs)
+
+        def mock_init(loss_self, *args, **kwargs):
+            torch.nn.Module.__init__(loss_self)
+            loss_self.model = curr_m
+            loss_self.frozen_model = froz_m
+            loss_self.mini_batch_size = 4
+            loss_self.distill_anchor_positive_only = False
+
+        with patch.object(DistillationCachedMNRL, "__init__", mock_init):
+            loss = DistillationCachedMNRL()
+
+        features = [{
+            "input_ids": torch.zeros((6, 2)),
+            "idx": torch.arange(6),
+        }]
+        dist = loss._compute_distillation_chunked(features)
+        self.assertAlmostEqual(dist.item(), 2.0 / 6.0, places=4)
 
 
 if __name__ == "__main__":

@@ -162,9 +162,11 @@ class EvalConfig:
         default_factory=lambda: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
     )
 
-    # Go/no-go gate thresholds
+    # Go/no-go gate thresholds (docs/06 Section 7.2)
     min_recall_at_10: float = 0.80  # Minimum Recall@10 on held-out country
-    max_country_gap: float = 0.10  # Max allowed gap between in-domain and held-out
+    max_country_gap: float = 0.05  # Max allowed relative gap between in-domain and held-out (5%)
+    min_margin_improvement_at_30: float = 0.15  # Min relative improvement in margin_pass@0.30 vs baseline (+15%)
+    min_margin_pass_at_10: float = 0.60  # Minimum absolute margin pass@0.10 floor
 
     # Whether to run reverse direction (train India, eval US)
     run_reverse: bool = False

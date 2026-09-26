@@ -206,6 +206,10 @@ def _evaluate_single_direction(
     batch_size: int = 64,
     k_values: list = None,
     margin_thresholds: list = None,
+    min_recall_10: float = 0.80,
+    max_country_gap: float = 0.05,
+    min_margin_gain: float = 0.15,
+    min_margin_pass_10: float = 0.60,
 ) -> Dict:
     """Evaluate one direction (e.g. US->India or India->US) against gate criteria."""
     if k_values is None:
@@ -242,34 +246,57 @@ def _evaluate_single_direction(
         )
         dir_results["baseline"] = {**base_retrieval, **base_margin}
 
-    # Direction-specific check
-    ft_recall_10 = dir_results["fine_tuned"].get("recall@10", 0)
+    # Direction-specific check (docs/06 Section 7.2 Gate Acceptance Criteria)
+    ft_recall_10 = dir_results["fine_tuned"].get("recall@10", 0.0)
     decision = "GO"
     reasons = []
 
-    if ft_recall_10 < 0.80:
+    if ft_recall_10 < min_recall_10:
         decision = "NO-GO"
-        reasons.append(f"[{direction_name}] Recall@10 ({ft_recall_10:.4f}) below minimum threshold (0.80)")
+        reasons.append(
+            f"[{direction_name}] Recall@10 ({ft_recall_10:.4f}) below absolute minimum threshold ({min_recall_10:.2f})"
+        )
 
     if base_model and "baseline" in dir_results:
-        base_recall_10 = dir_results["baseline"].get("recall@10", 0)
+        base_recall_10 = dir_results["baseline"].get("recall@10", 0.0)
         gap = base_recall_10 - ft_recall_10
-        if gap > 0.10:
+        if gap > max_country_gap:
             decision = "NO-GO"
             reasons.append(
                 f"[{direction_name}] Fine-tuned Recall@10 ({ft_recall_10:.4f}) is {gap:.4f} worse than "
-                f"baseline ({base_recall_10:.4f}), exceeding max gap (0.10)"
+                f"baseline ({base_recall_10:.4f}), exceeding max degradation gap ({max_country_gap:.2f})"
             )
-        elif gap > 0.05:
+        elif gap > 0.0:
             reasons.append(
-                f"[{direction_name}] WARNING: Fine-tuned Recall@10 ({ft_recall_10:.4f}) is {gap:.4f} worse "
-                f"than baseline ({base_recall_10:.4f}). Close to threshold."
+                f"[{direction_name}] WARNING: Fine-tuned Recall@10 ({ft_recall_10:.4f}) is slightly below "
+                f"baseline ({base_recall_10:.4f}) by {gap:.4f} (within {max_country_gap:.2f} tolerance)."
             )
 
-    margin_pass = dir_results["fine_tuned"].get("margin_pass@0.10", 0)
-    if margin_pass < 0.60:
+        # Margin pass rate check at Delta >= 0.30 relative to baseline
+        base_margin_30 = dir_results["baseline"].get("margin_pass@0.30", 0.0)
+        ft_margin_30 = dir_results["fine_tuned"].get("margin_pass@0.30", 0.0)
+        if base_margin_30 > 0.0:
+            rel_margin_gain = (ft_margin_30 - base_margin_30) / base_margin_30
+            if rel_margin_gain < min_margin_gain:
+                decision = "NO-GO"
+                reasons.append(
+                    f"[{direction_name}] Margin pass@0.30 relative improvement ({rel_margin_gain * 100:.1f}%) "
+                    f"is below required +{min_margin_gain * 100:.1f}% relative to baseline "
+                    f"(base={base_margin_30:.4f}, ft={ft_margin_30:.4f})"
+                )
+        elif ft_margin_30 <= 0.0:
+            decision = "NO-GO"
+            reasons.append(
+                f"[{direction_name}] Margin pass@0.30 ({ft_margin_30:.4f}) too low — model cannot separate pos/neg with margin 0.30"
+            )
+
+    # Absolute margin pass@0.10 floor check
+    margin_pass_10 = dir_results["fine_tuned"].get("margin_pass@0.10", 0.0)
+    if margin_pass_10 < min_margin_pass_10:
         decision = "NO-GO"
-        reasons.append(f"[{direction_name}] Margin pass@0.10 ({margin_pass:.4f}) too low — model can't separate pos/neg")
+        reasons.append(
+            f"[{direction_name}] Margin pass@0.10 ({margin_pass_10:.4f}) too low (< {min_margin_pass_10:.2f}) — model can't separate pos/neg"
+        )
 
     dir_results["decision"] = decision
     dir_results["reasons"] = reasons
@@ -284,14 +311,18 @@ def evaluate_model(
     k_values: list = None,
     margin_thresholds: list = None,
     direction: str = "default",
+    min_recall_10: float = 0.80,
+    max_country_gap: float = 0.05,
+    min_margin_gain: float = 0.15,
+    min_margin_pass_10: float = 0.60,
 ) -> Dict:
     """
     Full evaluation pipeline for the held-out country gate.
 
     Supports:
       - "default": evaluates the standard eval_*.json files
-      - "us_to_india": evaluates us_train_india_eval_ prefix
-      - "india_to_us": evaluates india_train_us_eval_ prefix
+      - "us_to_india": evaluates primary split prefix
+      - "india_to_us": evaluates reverse split prefix
       - "bidirectional": evaluates BOTH directions and enforces 2-way gate acceptance
     """
     from sentence_transformers import SentenceTransformer
@@ -303,14 +334,33 @@ def evaluate_model(
     model = SentenceTransformer(model_path)
     base_model = SentenceTransformer(baseline_model) if baseline_model else None
 
+    # Resolve dynamic direction prefixes from country_split_info.json if present
+    split_info_file = Path(data_dir) / "country_split_info.json"
+    p_train = "us"
+    p_eval = "india"
+    if split_info_file.exists():
+        try:
+            with open(split_info_file, "r", encoding="utf-8") as f:
+                s_info = json.load(f)
+                p_train = s_info.get("primary_train_country", "us")
+                p_eval = s_info.get("primary_eval_country", "india")
+        except Exception:
+            pass
+
+    pri_prefix = f"{p_train}_train_{p_eval}_eval_"
+    rev_prefix = f"{p_eval}_train_{p_train}_eval_"
+    if not (Path(data_dir) / f"{pri_prefix}eval_queries.json").exists() and (Path(data_dir) / "us_train_india_eval_eval_queries.json").exists():
+        pri_prefix = "us_train_india_eval_"
+        rev_prefix = "india_train_us_eval_"
+
     results = {}
     all_reasons = []
     overall_decision = "GO"
 
     if direction == "bidirectional":
         directions = [
-            ("us_train_india_eval_", "US->India (eval on India)"),
-            ("india_train_us_eval_", "India->US (eval on US)"),
+            (pri_prefix, f"{p_train.upper()}->{p_eval.upper()} (eval on {p_eval.upper()})"),
+            (rev_prefix, f"{p_eval.upper()}->{p_train.upper()} (eval on {p_train.upper()})"),
         ]
         results["directions"] = {}
         for prefix, name in directions:
@@ -323,6 +373,10 @@ def evaluate_model(
                 batch_size=batch_size,
                 k_values=k_values,
                 margin_thresholds=margin_thresholds,
+                min_recall_10=min_recall_10,
+                max_country_gap=max_country_gap,
+                min_margin_gain=min_margin_gain,
+                min_margin_pass_10=min_margin_pass_10,
             )
             results["directions"][name] = res
             if res["decision"] != "GO":
@@ -331,12 +385,12 @@ def evaluate_model(
     else:
         prefix = ""
         name = "default"
-        if direction == "us_to_india":
-            prefix = "us_train_india_eval_"
-            name = "US->India"
-        elif direction == "india_to_us":
-            prefix = "india_train_us_eval_"
-            name = "India->US"
+        if direction in ("us_to_india", "primary"):
+            prefix = pri_prefix
+            name = f"{p_train.upper()}->{p_eval.upper()}"
+        elif direction in ("india_to_us", "reverse"):
+            prefix = rev_prefix
+            name = f"{p_eval.upper()}->{p_train.upper()}"
 
         res = _evaluate_single_direction(
             model=model,
@@ -347,6 +401,10 @@ def evaluate_model(
             batch_size=batch_size,
             k_values=k_values,
             margin_thresholds=margin_thresholds,
+            min_recall_10=min_recall_10,
+            max_country_gap=max_country_gap,
+            min_margin_gain=min_margin_gain,
+            min_margin_pass_10=min_margin_pass_10,
         )
         results = res
         overall_decision = res["decision"]

@@ -23,6 +23,7 @@ from src.scoring import (
     attach_labels,
     build_monotonic_constraints,
     choose_threshold,
+    compute_entity_f05,
     evaluate_held_out_country_diagnostic,
     extract_feature_importances,
     fit_final,
@@ -1079,6 +1080,55 @@ class TestStage3Scoring(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             score_candidates(feature_file=feat_file, artifact_dir=bad_dir)
         self.assertIn("missing required keys", str(ctx.exception))
+
+    def test_compute_entity_f05_cases(self):
+        """Verify compute_entity_f05 correctly handles all edge cases."""
+        # True singleton: 0 predicted, 0 actual -> 1.0
+        self.assertEqual(compute_entity_f05(0, 0, 0), 1.0)
+        # Missed matches: 0 predicted, >0 actual -> 0.0
+        self.assertEqual(compute_entity_f05(0, 3, 0), 0.0)
+        # False positives on singleton: >0 predicted, 0 actual -> 0.0
+        self.assertEqual(compute_entity_f05(2, 0, 0), 0.0)
+        # Perfect match: 2 predicted, 2 actual, 2 tp -> 1.0
+        self.assertEqual(compute_entity_f05(2, 2, 2), 1.0)
+        # Precision 0.5 (1/2), Recall 1.0 (1/1) -> F0.5 = (1.25 * 0.5 * 1.0) / (0.25 * 0.5 + 1.0) = 5/9
+        self.assertAlmostEqual(compute_entity_f05(2, 1, 1), 5.0 / 9.0)
+
+    def test_evaluate_held_out_country_diagnostic_anti_shortcut(self):
+        """Verify evaluate_held_out_country_diagnostic executes with monotone constraints and country masking."""
+        df = pd.DataFrame([
+            {"source1_entity_id": "S1-1", "candidate_entity_id": "S2-1", "source1_canonical_country": "us", "country_equal": 1.0, "country_equal_missing": 0.0, "name_jaccard": 0.9, "label": 1},
+            {"source1_entity_id": "S1-1", "candidate_entity_id": "S2-2", "source1_canonical_country": "us", "country_equal": 1.0, "country_equal_missing": 0.0, "name_jaccard": 0.1, "label": 0},
+            {"source1_entity_id": "S1-2", "candidate_entity_id": "S2-3", "source1_canonical_country": "us", "country_equal": 1.0, "country_equal_missing": 0.0, "name_jaccard": 0.8, "label": 1},
+            {"source1_entity_id": "S1-2", "candidate_entity_id": "S2-4", "source1_canonical_country": "us", "country_equal": 1.0, "country_equal_missing": 0.0, "name_jaccard": 0.2, "label": 0},
+            {"source1_entity_id": "S1-3", "candidate_entity_id": "S2-5", "source1_canonical_country": "india", "country_equal": 1.0, "country_equal_missing": 0.0, "name_jaccard": 0.85, "label": 1},
+            {"source1_entity_id": "S1-3", "candidate_entity_id": "S2-6", "source1_canonical_country": "india", "country_equal": 1.0, "country_equal_missing": 0.0, "name_jaccard": 0.15, "label": 0},
+            {"source1_entity_id": "S1-4", "candidate_entity_id": "S2-7", "source1_canonical_country": "india", "country_equal": 1.0, "country_equal_missing": 0.0, "name_jaccard": 0.75, "label": 1},
+            {"source1_entity_id": "S1-4", "candidate_entity_id": "S2-8", "source1_canonical_country": "india", "country_equal": 1.0, "country_equal_missing": 0.0, "name_jaccard": 0.05, "label": 0},
+        ])
+        features = ["country_equal", "country_equal_missing", "name_jaccard"]
+        res = evaluate_held_out_country_diagnostic(
+            df,
+            features,
+            country_mask_rate=0.25,
+            use_monotone_constraints=True,
+            n_estimators=50,
+        )
+        self.assertIn("mean_held_out_country_ap", res)
+        self.assertIn("train_others_eval_us", res)
+        self.assertIn("train_others_eval_india", res)
+
+    def test_extract_feature_importances_warning_on_error(self):
+        """Verify extract_feature_importances logs warning and returns error dictionary when booster fails."""
+        import unittest.mock as mock
+        bad_model = mock.MagicMock()
+        bad_model.get_booster.side_effect = RuntimeError("Booster unavailable")
+
+        with self.assertLogs("src.scoring", level="WARNING") as cm:
+            res = extract_feature_importances(bad_model, ["feat_a"])
+            self.assertIn("error", res)
+            self.assertIn("Booster unavailable", res["error"])
+            self.assertTrue(any("Failed to extract feature importances" in msg for msg in cm.output))
 
 
 if __name__ == "__main__":

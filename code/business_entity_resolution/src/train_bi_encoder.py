@@ -257,11 +257,29 @@ def train(
     # -----------------------------------------------------------------------
     # Load dataset
     # -----------------------------------------------------------------------
+    split_info_file = data_path / "country_split_info.json"
+    p_train = "us"
+    p_eval = "india"
+    if split_info_file.exists():
+        try:
+            with open(split_info_file, "r", encoding="utf-8") as f:
+                s_info = json.load(f)
+                p_train = s_info.get("primary_train_country", "us")
+                p_eval = s_info.get("primary_eval_country", "india")
+        except Exception:
+            pass
+
+    pri_prefix = f"{p_train}_train_{p_eval}_eval_"
+    rev_prefix = f"{p_eval}_train_{p_train}_eval_"
+    if not (data_path / f"{pri_prefix}held_out_country_dataset").exists() and (data_path / "us_train_india_eval_held_out_country_dataset").exists():
+        pri_prefix = "us_train_india_eval_"
+        rev_prefix = "india_train_us_eval_"
+
     prefix = ""
-    if direction == "us_to_india":
-        prefix = "us_train_india_eval_"
-    elif direction == "india_to_us":
-        prefix = "india_train_us_eval_"
+    if direction in ("us_to_india", "primary"):
+        prefix = pri_prefix
+    elif direction in ("india_to_us", "reverse"):
+        prefix = rev_prefix
 
     if mode == "held_out_country":
         dataset_path = data_path / f"{prefix}held_out_country_dataset"

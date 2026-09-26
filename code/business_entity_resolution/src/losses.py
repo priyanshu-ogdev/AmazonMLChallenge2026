@@ -180,7 +180,7 @@ class DistillationCachedMNRL(nn.Module):
         """
         device = features[0]["input_ids"].device
         total_distance = torch.tensor(0.0, device=device)
-        n_chunks = 0
+        total_samples = 0
 
         distill_features = features[:2] if self.distill_anchor_positive_only and len(features) > 2 else features
         for sf in distill_features:
@@ -205,13 +205,12 @@ class DistillationCachedMNRL(nn.Module):
                 current_output = self.model(chunk)
                 current_emb = current_output["sentence_embedding"]
 
-                # Cosine distance: 1 - cos_sim(current, frozen)
+                # Cosine distance: 1 - cos_sim(current, frozen), sample-weighted across chunks
                 cos_sim = F.cosine_similarity(current_emb, frozen_emb, dim=-1)
-                distance = (1.0 - cos_sim).mean()
-                total_distance = total_distance + distance
-                n_chunks += 1
+                total_distance = total_distance + (1.0 - cos_sim).sum()
+                total_samples += current_emb.size(0)
 
-        return total_distance / max(n_chunks, 1)
+        return total_distance / max(total_samples, 1)
 
     def get_config_dict(self) -> dict:
         """Return configuration for logging/serialization."""

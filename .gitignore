@@ -54,6 +54,7 @@ tensorboard/
 output/*.tsv
 output/*.csv
 output/*.zip
+output/*.md
 !output/README.md
 !output/.gitkeep
 submissions/

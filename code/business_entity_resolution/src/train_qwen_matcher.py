@@ -135,6 +135,7 @@ def compute_sliced_logits(
     attention_mask,
     no_id: int,
     yes_id: int,
+    padding_side: str = "right",
 ):
     """
     Compute binary logits at the terminal prompt token position exclusively.
@@ -149,8 +150,18 @@ def compute_sliced_logits(
     )
     hidden_states = outputs.hidden_states[-1]  # [B, S, D]
 
-    # Find the position of the last non-padded token for each item in the batch
-    last_token_idx = attention_mask.sum(dim=1) - 1  # [B]
+    # Find the position of the terminal non-padded token for each item in the batch.
+    # For right-padding, real tokens precede padding, so attention_mask.sum(dim=1) - 1
+    # resolves the final token index. For left-padding, the final token is at index S - 1.
+    if padding_side == "left":
+        last_token_idx = torch.full(
+            (input_ids.size(0),),
+            input_ids.size(1) - 1,
+            dtype=torch.long,
+            device=input_ids.device,
+        )
+    else:
+        last_token_idx = attention_mask.sum(dim=1) - 1  # [B]
     batch_idx = torch.arange(input_ids.size(0), device=input_ids.device)
 
     # Slice ONLY the terminal verdict position
@@ -209,6 +220,7 @@ def evaluate_qwen_matcher(
                 attention_mask=encoded["attention_mask"],
                 no_id=no_id,
                 yes_id=yes_id,
+                padding_side=getattr(tokenizer, "padding_side", "right"),
             )
             probs = F.softmax(logits, dim=-1)[:, 1].cpu().numpy()
             preds = (probs >= 0.5).astype(int)
@@ -368,12 +380,14 @@ def train_qwen_matcher(
             ).to(device)
 
             # Sliced binary logits at the terminal position
+            padding_side = getattr(tokenizer, "padding_side", "right")
             logits = compute_sliced_logits(
                 model=model,
                 input_ids=encoded["input_ids"],
                 attention_mask=encoded["attention_mask"],
                 no_id=no_id,
                 yes_id=yes_id,
+                padding_side=padding_side,
             )
 
             ce_loss = F.cross_entropy(logits, labels)
@@ -388,6 +402,7 @@ def train_qwen_matcher(
                         attention_mask=encoded["attention_mask"],
                         no_id=no_id,
                         yes_id=yes_id,
+                        padding_side=padding_side,
                     )
                 student_log_probs = F.log_softmax(logits, dim=-1)
                 teacher_probs = F.softmax(teacher_logits, dim=-1)

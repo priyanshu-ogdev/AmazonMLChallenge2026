@@ -214,6 +214,7 @@ def extract_feature_importances(
         sorted_weight = dict(sorted(clean_weight.items(), key=lambda item: item[1], reverse=True))
         return {"gain": sorted_gain, "weight": sorted_weight}
     except Exception as e:
+        logger.warning(f"Failed to extract feature importances: {e}")
         return {"error": str(e)}
 
 
@@ -308,6 +309,26 @@ def _scale_pos_weight(y: np.ndarray) -> float:
     return negatives / positives
 
 
+def compute_entity_f05(pred_count: int, actual_count: int, tp: int) -> float:
+    """
+    Compute F0.5 score for a single entity, accounting for true singletons and blocking misses.
+
+    - True singleton (pred=0, actual=0): 1.0 (correctly identified as singleton)
+    - Missed matches (pred=0, actual>0): 0.0 (blocking miss or threshold cut)
+    - False positives on singleton (pred>0, actual=0): 0.0 (precision=0)
+    - Non-zero candidates: standard F0.5 = (1.25 * P * R) / (0.25 * P + R)
+    """
+    if pred_count == 0 and actual_count == 0:
+        return 1.0
+    if pred_count == 0 or actual_count == 0:
+        return 0.0
+    precision = tp / pred_count if pred_count else 0.0
+    recall = tp / actual_count if actual_count else 0.0
+    if precision + recall > 0.0:
+        return (1.25 * precision * recall) / (0.25 * precision + recall)
+    return 0.0
+
+
 def macro_f05(
     source1_ids: Sequence[str],
     scores: Sequence[float],
@@ -342,27 +363,8 @@ def macro_f05(
             actual_count = sum(1 for _, label in pairs if label == 1)
         pred_count = len(predicted)
         tp = sum(1 for i in predicted if pairs[i][1] == 1)
+        entity_scores.append(compute_entity_f05(pred_count, actual_count, tp))
 
-        if pred_count == 0 and actual_count == 0:
-            # True singleton correctly matched with zero candidates
-            entity_scores.append(1.0)
-            continue
-        if pred_count == 0 and actual_count > 0:
-            # Entity has true matches but none were predicted (blocking miss or threshold cut)
-            entity_scores.append(0.0)
-            continue
-        if pred_count > 0 and actual_count == 0:
-            # Predicted matches for a true singleton (precision = 0)
-            entity_scores.append(0.0)
-            continue
-
-        precision = tp / pred_count if pred_count else 0.0
-        recall = tp / actual_count if actual_count else 0.0
-        entity_scores.append(
-            (1.25 * precision * recall / (0.25 * precision + recall))
-            if precision + recall > 0
-            else 0.0
-        )
     return float(np.mean(entity_scores)) if entity_scores else 0.0
 
 
@@ -434,19 +436,7 @@ def choose_threshold(
             pred_mask = s_arr >= th
             pred_count = int(pred_mask.sum())
             tp = int(l_arr[pred_mask].sum())
-
-            if pred_count == 0 and actual_count == 0:
-                total_f05 += 1.0
-                continue
-            if pred_count == 0 and actual_count > 0:
-                continue
-            if pred_count > 0 and actual_count == 0:
-                continue
-
-            precision = tp / pred_count if pred_count else 0.0
-            recall = tp / actual_count if actual_count else 0.0
-            if precision + recall > 0:
-                total_f05 += (1.25 * precision * recall) / (0.25 * precision + recall)
+            total_f05 += compute_entity_f05(pred_count, actual_count, tp)
         return total_f05 / total_entities
 
     values = [_eval_threshold(threshold) for threshold in candidates]
@@ -540,6 +530,10 @@ def evaluate_held_out_country_diagnostic(
     frame: pd.DataFrame,
     feature_columns: Sequence[str],
     params: Optional[Dict] = None,
+    country_mask_rate: float = 0.0,
+    use_monotone_constraints: bool = False,
+    n_estimators: int = 300,
+    early_stopping_rounds: int = 30,
 ) -> Dict[str, object]:
     """
     Two-way held-out-country generalization check (e.g. US -> India and India -> US).
@@ -568,6 +562,8 @@ def evaluate_held_out_country_diagnostic(
     base_params = dict(DEFAULT_PARAMS)
     if params:
         base_params.update(params)
+    if use_monotone_constraints:
+        base_params["monotone_constraints"] = build_monotonic_constraints(feature_columns)
 
     diagnostic_results = {}
     cross_ap = []
@@ -582,6 +578,12 @@ def evaluate_held_out_country_diagnostic(
 
         train_mat, _ = prepare_matrix(train_df, feature_columns)
         valid_mat, _ = prepare_matrix(valid_df, feature_columns)
+        if country_mask_rate > 0.0:
+            train_mat = apply_country_masking(
+                train_mat,
+                mask_rate=country_mask_rate,
+                random_state=np.random.RandomState(RANDOM_SEED),
+            )
         y_train = train_df["label"].to_numpy(dtype=np.int32)
         y_valid = valid_df["label"].to_numpy(dtype=np.int32)
 
@@ -618,8 +620,8 @@ def evaluate_held_out_country_diagnostic(
             y_es_val = y_train[inner_va]
             diag_params["scale_pos_weight"] = _scale_pos_weight(y_fit)
             model = xgb.XGBClassifier(
-                n_estimators=1000,
-                early_stopping_rounds=50,
+                n_estimators=n_estimators,
+                early_stopping_rounds=early_stopping_rounds,
                 **diag_params,
             )
             model.fit(
@@ -631,7 +633,7 @@ def evaluate_held_out_country_diagnostic(
         else:
             diag_params["scale_pos_weight"] = _scale_pos_weight(y_train)
             model = xgb.XGBClassifier(
-                n_estimators=300,
+                n_estimators=n_estimators,
                 **diag_params,
             )
             model.fit(train_mat, y_train, verbose=False)
@@ -948,8 +950,20 @@ def run_training(
             "one_drop": 0,
         })
 
-        gbtree_diag = evaluate_held_out_country_diagnostic(labeled, final_columns, params=gbtree_params)
-        dart_diag = evaluate_held_out_country_diagnostic(labeled, final_columns, params=dart_params)
+        gbtree_diag = evaluate_held_out_country_diagnostic(
+            labeled,
+            final_columns,
+            params=gbtree_params,
+            country_mask_rate=country_mask_rate,
+            use_monotone_constraints=use_monotone_constraints,
+        )
+        dart_diag = evaluate_held_out_country_diagnostic(
+            labeled,
+            final_columns,
+            params=dart_params,
+            country_mask_rate=country_mask_rate,
+            use_monotone_constraints=use_monotone_constraints,
+        )
 
         gbtree_ap = float(gbtree_diag.get("mean_held_out_country_ap", 0.0))
         dart_ap = float(dart_diag.get("mean_held_out_country_ap", 0.0))
@@ -964,7 +978,13 @@ def run_training(
         }
         diagnostics["held_out_country_cross_eval"] = dart_diag if booster == "dart" else gbtree_diag
     else:
-        held_out_diag = evaluate_held_out_country_diagnostic(labeled, final_columns, params=params)
+        held_out_diag = evaluate_held_out_country_diagnostic(
+            labeled,
+            final_columns,
+            params=params,
+            country_mask_rate=country_mask_rate,
+            use_monotone_constraints=use_monotone_constraints,
+        )
         diagnostics["held_out_country_cross_eval"] = held_out_diag
 
     # Feature importance
