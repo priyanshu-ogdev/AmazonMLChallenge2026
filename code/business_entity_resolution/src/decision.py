@@ -75,9 +75,11 @@ def assemble_matching_results(
             # Sort globally in descending order of calibrated probability (stable sort)
             order = np.argsort(-passed_scores, kind="stable")
             claimed_targets: set[str] = set()
+            passed_cand_clean = [str(x).strip() for x in passed_cand]
+            passed_s1_clean = [str(x).strip() for x in passed_s1]
             for idx in order:
-                cand = str(passed_cand[idx]).strip()
-                s1 = str(passed_s1[idx]).strip()
+                cand = passed_cand_clean[idx]
+                s1 = passed_s1_clean[idx]
                 if cand == s1:
                     continue
                 if cand not in claimed_targets:

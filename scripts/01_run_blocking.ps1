@@ -2,14 +2,7 @@
 .SYNOPSIS
     Phase 1: Stage 0 Normalization & Stage 1 Multi-Channel Candidate Generation (Blocking).
 .DESCRIPTION
-    Runs high-recall candidate generation across 7 blocking channels:
-    1. Exact normalized name keys
-    2. Character 3-gram TF-IDF inverted index
-    3. Structural address tokens and building/street matching
-    4. Phonetic Soundex/Metaphone keys
-    5. Token permutation & set inverted index
-    6. City & region partition matching
-    7. Optional dense embedding cosine retrieval
+    Runs high-recall candidate generation across 7 blocking channels.
     Emits candidate_pairs.tsv, candidate_provenance.tsv, and blocking_summary.json.
 .PARAMETER Split
     Target dataset split: "train" or "test" (default: "train").
@@ -27,6 +20,15 @@
     Optional path to .npz file containing precomputed dense embeddings.
 .PARAMETER OutputDir
     Output directory for candidate pairs and blocking summary.
+.PARAMETER NumWorkers
+    Number of parallel ProcessPoolExecutor workers for the query phase (default: 4).
+    Set to 1 to run single-threaded. Use 6 if index pkl is < 4 GB.
+.PARAMETER NoResume
+    If set, overwrite existing output and re-run all S1 entities (disables checkpoint resume).
+.PARAMETER NoCacheIndex
+    If set, force a full index rebuild even if a valid cache exists.
+.PARAMETER CheckpointInterval
+    Flush output and write checkpoint.json every N entities (default: 10000).
 .PARAMETER DryRun
     Display execution commands without executing them.
 #>
@@ -41,6 +43,10 @@ param(
     [float]$SimilarityFloor = 0.3,
     [string]$DenseEmbeddings = "",
     [string]$OutputDir = "",
+    [int]$NumWorkers = 1,
+    [switch]$NoResume = $false,
+    [switch]$NoCacheIndex = $false,
+    [int]$CheckpointInterval = 10000,
     [switch]$DryRun = $false,
     [string]$PythonPath = ""
 )
@@ -122,7 +128,7 @@ if ((Test-Path $s1Norm) -and (Test-Path $s2Norm) -and (Test-Path $s3Norm)) {
 }
 
 # Run Stage 1 Multi-Channel Blocker
-Write-Step "1.1" "Executing Multi-Channel Blocker..."
+Write-Step "1.1" "Executing Multi-Channel Blocker ($NumWorkers workers, resume=$((-not $NoResume)))..."
 $blockerArgs = @(
     "--source1", $s1File,
     "--candidates", $s2File, $s3File,
@@ -130,8 +136,20 @@ $blockerArgs = @(
     "--max-candidates", $MaxCandidates.ToString(),
     "--top-k-sparse", $TopKSparse.ToString(),
     "--top-k-dense", $TopKDense.ToString(),
-    "--similarity-floor", $SimilarityFloor.ToString()
+    "--similarity-floor", $SimilarityFloor.ToString(),
+    "--num-workers", $NumWorkers.ToString(),
+    "--checkpoint-interval", $CheckpointInterval.ToString()
 )
+
+# Phase 2: cache control
+if ($NoCacheIndex) {
+    $blockerArgs += "--no-cache-index"
+}
+
+# Phase 3: resume control
+if ($NoResume) {
+    $blockerArgs += "--no-resume"
+}
 
 if ($gtFile -and (Test-Path $gtFile)) {
     $blockerArgs += @("--ground-truth", $gtFile)

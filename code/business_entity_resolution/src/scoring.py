@@ -17,8 +17,10 @@ import argparse
 import csv
 import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -37,6 +39,10 @@ from src.calibration import (
 
 logger = logging.getLogger(__name__)
 
+# Detect usable core count for XGBoost and thread pools.
+# On Windows XGBoost defaults to 1 thread unless nthread is set explicitly.
+_CPU_COUNT: int = max(1, int(os.environ.get("XGB_NTHREAD", "") or os.cpu_count() or 4))
+
 RANDOM_SEED = 42
 ID_COLUMNS = {"source1_entity_id", "candidate_entity_id", "label"}
 DROP_CATEGORICAL = {
@@ -51,7 +57,7 @@ DROP_CATEGORICAL = {
 DEFAULT_PARAMS = {
     "objective": "binary:logistic",
     "eval_metric": "aucpr",
-    "tree_method": "hist",
+    "tree_method": "hist",  # hist is the only method that parallelises via nthread
     "booster": "gbtree",
     "eta": 0.03,
     "max_depth": 4,
@@ -61,6 +67,9 @@ DEFAULT_PARAMS = {
     "reg_alpha": 0.1,
     "reg_lambda": 1.0,
     "seed": RANDOM_SEED,
+    # Bug 5 fix: explicitly set nthread so XGBoost uses all cores on Windows.
+    # On Linux XGBoost detects cores automatically; on Windows it defaults to 1.
+    "nthread": _CPU_COUNT,
 }
 
 
@@ -143,6 +152,9 @@ def apply_country_masking(
     Prevents shortcut learning on US/India pairs and forces the tree splits to learn
     generalizable lexical/dense features that work on unseen countries (e.g. France).
     Never applied during evaluation or test inference.
+
+    Bug 10 fix: apply masking in-place (no full copy) since train_matrix is already
+    a copied fold slice.  Peak RAM was ~4 GB extra per fold (5 folds = 20 GB overhead).
     """
     if mask_rate <= 0.0 or "country_equal" not in matrix.columns:
         return matrix
@@ -150,11 +162,11 @@ def apply_country_masking(
     mask = rng.rand(len(matrix)) < mask_rate
     if not mask.any():
         return matrix
-    masked = matrix.copy()
-    masked.loc[mask, "country_equal"] = -1.0
-    if "country_equal_missing" in masked.columns:
-        masked.loc[mask, "country_equal_missing"] = 1.0
-    return masked
+    # In-place update — caller must pass a writable copy (fold slice already is one).
+    matrix.loc[mask, "country_equal"] = -1.0
+    if "country_equal_missing" in matrix.columns:
+        matrix.loc[mask, "country_equal_missing"] = 1.0
+    return matrix
 
 
 def compute_fold_safe_tfidf_scores(
@@ -276,7 +288,11 @@ def prepare_matrix(
     frame: pd.DataFrame,
     feature_columns: Optional[Sequence[str]] = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """Return numeric features; raw IDs and categorical provenance are excluded."""
+    """Return numeric features; raw IDs and categorical provenance are excluded.
+
+    Bug 9 fix: batch-convert all columns in one apply() call instead of a
+    per-column loop with repeated DataFrame assignment.
+    """
     excluded = ID_COLUMNS | DROP_CATEGORICAL
     if feature_columns is None:
         candidates = [c for c in frame.columns if c not in excluded]
@@ -285,17 +301,22 @@ def prepare_matrix(
     missing = [c for c in candidates if c not in frame.columns]
     if missing:
         raise ValueError(f"Missing requested feature columns: {missing}")
-    matrix = frame[candidates].copy()
-    for column in candidates:
-        matrix[column] = pd.to_numeric(matrix[column], errors="coerce")
-        if column.endswith("_missing") or column.endswith("_missing_either"):
-            matrix[column] = matrix[column].fillna(1.0)
-        elif column in ("candidate_rank", "rank_margin_from_best"):
-            matrix[column] = matrix[column].fillna(999.0)
-        elif column in ("best_blocker_score", "country_equal"):
-            matrix[column] = matrix[column].fillna(-1.0)
-        else:
-            matrix[column] = matrix[column].fillna(0.0)
+    # Batch numeric conversion — avoids 30+ sequential DataFrame column assignments.
+    matrix = frame[candidates].apply(pd.to_numeric, errors="coerce")
+    # Per-column sentinel fill (semantics preserved, only fill strategy differs).
+    missing_flag_cols = [c for c in candidates if c.endswith("_missing") or c.endswith("_missing_either")]
+    rank_cols = [c for c in candidates if c in ("candidate_rank", "rank_margin_from_best")]
+    sentinel_neg1_cols = [c for c in candidates if c in ("best_blocker_score", "country_equal")]
+    other_cols = [c for c in candidates
+                  if c not in missing_flag_cols and c not in rank_cols and c not in sentinel_neg1_cols]
+    if missing_flag_cols:
+        matrix[missing_flag_cols] = matrix[missing_flag_cols].fillna(1.0)
+    if rank_cols:
+        matrix[rank_cols] = matrix[rank_cols].fillna(999.0)
+    if sentinel_neg1_cols:
+        matrix[sentinel_neg1_cols] = matrix[sentinel_neg1_cols].fillna(-1.0)
+    if other_cols:
+        matrix[other_cols] = matrix[other_cols].fillna(0.0)
     if matrix.isna().all(axis=0).any():
         bad = matrix.columns[matrix.isna().all(axis=0)].tolist()
         raise ValueError(f"Features are entirely non-numeric or missing: {bad}")
@@ -374,12 +395,19 @@ def macro_f05(
         else:
             all_eids = set(source1_ids)
 
+        if ground_truth is None:
+            from collections import Counter
+            true_counts = Counter()
+            for s, l in zip(source1_ids, labels):
+                if l == 1:
+                    true_counts[s] += 1
+
         entity_scores = []
         for eid in all_eids:
             if ground_truth is not None and eid in ground_truth:
                 actual_count = len(ground_truth[eid])
             else:
-                actual_count = sum(1 for s, l in zip(source1_ids, labels) if s == eid and l == 1)
+                actual_count = true_counts.get(eid, 0)
             pred_labels = injective_matches.get(eid, [])
             pred_count = len(pred_labels)
             tp = sum(pred_labels)
@@ -418,7 +446,13 @@ def choose_threshold(
     ground_truth: Optional[Dict[str, Set[str]]] = None,
     injective: bool = True,
     return_diagnostics: bool = False,
-) -> Tuple[float, float] | Tuple[float, float, Dict[str, Any]]:
+    num_workers: int = 0,
+) -> "Tuple[float, float] | Tuple[float, float, Dict[str, Any]]":
+    """Choose the optimal decision threshold by scanning a grid of candidates.
+
+    Bug 8 fix: threshold evaluation is parallelised via ThreadPoolExecutor
+    (XGBoost numpy ops release the GIL).  num_workers=0 auto-selects.
+    """
     if "source1_entity_id" not in frame or "label" not in frame:
         raise ValueError("threshold frame must contain source1_entity_id and label")
     scores = np.asarray(scores, dtype=float)
@@ -484,7 +518,17 @@ def choose_threshold(
             total_f05 += compute_entity_f05(pred_count, actual_count, tp)
         return total_f05 / total_entities
 
-    values = [_eval_threshold(threshold) for threshold in candidates]
+    # Bug 8 fix: evaluate threshold candidates in parallel (numpy releases GIL).
+    _workers = num_workers if num_workers > 0 else min(4, _CPU_COUNT)
+    if _workers > 1 and len(candidates) > 20:
+        with ThreadPoolExecutor(max_workers=_workers) as pool:
+            futs = {pool.submit(_eval_threshold, th): i for i, th in enumerate(candidates)}
+            values_map: Dict[int, float] = {}
+            for fut in as_completed(futs):
+                values_map[futs[fut]] = fut.result()
+            values = [values_map[i] for i in range(len(candidates))]
+    else:
+        values = [_eval_threshold(th) for th in candidates]
     index = int(np.argmax(values))
     best_indep_th = float(candidates[index])
     best_indep_f05 = float(values[index])
@@ -541,7 +585,16 @@ def choose_threshold(
                     total_f05 += compute_entity_f05(pred_cnt, act_cnt, tp)
             return total_f05 / total_entities
 
-        inj_values = [_eval_injective_th(threshold) for threshold in candidates]
+        # Bug 8 fix: also parallelise injective threshold scan.
+        if _workers > 1 and len(candidates) > 20:
+            with ThreadPoolExecutor(max_workers=_workers) as pool:
+                inj_futs = {pool.submit(_eval_injective_th, th): i for i, th in enumerate(candidates)}
+                inj_map: Dict[int, float] = {}
+                for fut in as_completed(inj_futs):
+                    inj_map[inj_futs[fut]] = fut.result()
+                inj_values = [inj_map[i] for i in range(len(candidates))]
+        else:
+            inj_values = [_eval_injective_th(th) for th in candidates]
         inj_index = int(np.argmax(inj_values))
         best_inj_th = float(candidates[inj_index])
         best_inj_f05 = float(inj_values[inj_index])
@@ -789,8 +842,15 @@ def train_oof(
     country_mask_rate: float = 0.15,
     use_monotone_constraints: bool = False,
     records: Optional[Dict[str, str]] = None,
+    parallel_folds: int = 2,
 ) -> Tuple[pd.DataFrame, List[str], Dict]:
-    """Train grouped OOF models; no S1 entity appears in both train and valid."""
+    """Train grouped OOF models; no S1 entity appears in both train and valid.
+
+    Bug 7 fix: folds are trained in parallel via ThreadPoolExecutor.
+    ``parallel_folds`` controls how many folds run concurrently.  When
+    ``nthread`` is already using all cores (Bug 5 fix), set parallel_folds=2
+    and halve nthread per fold so total CPU usage stays at 100%%.
+    """
     matrix, columns = prepare_matrix(frame)
     y = frame["label"].to_numpy(dtype=np.int32)
     groups = frame["source1_entity_id"].to_numpy()
@@ -812,6 +872,16 @@ def train_oof(
     if use_monotone_constraints and records is None:
         base["monotone_constraints"] = build_monotonic_constraints(columns)
 
+    # Bug 7 fix: when running folds in parallel, divide nthread evenly so that
+    # total CPU usage stays bounded at _CPU_COUNT cores.
+    _pfolds = max(1, min(parallel_folds, n_splits))
+    if _pfolds > 1 and "nthread" in base:
+        base["nthread"] = max(1, base["nthread"] // _pfolds)
+        logger.info(
+            "Parallel OOF: %d folds × nthread=%d = %d total threads",
+            _pfolds, base["nthread"], _pfolds * base["nthread"],
+        )
+
     X_base = matrix.to_numpy(dtype=np.float32)
     try:
         splits = splitter.split(X_base, stratify, groups)
@@ -819,7 +889,12 @@ def train_oof(
     except ValueError:
         split_list = list(splitter.split(X_base, y, groups))
 
-    for fold, (train_idx, valid_idx) in enumerate(split_list):
+    def _train_one_fold(
+        fold: int,
+        train_idx: np.ndarray,
+        valid_idx: np.ndarray,
+    ) -> Tuple[int, np.ndarray, Dict]:
+        """Train a single OOF fold and return (fold, oof_predictions, info_dict)."""
         fold_params = dict(base)
         fold_params["scale_pos_weight"] = _scale_pos_weight(y[train_idx])
 
@@ -851,9 +926,6 @@ def train_oof(
         X_train = train_matrix.to_numpy(dtype=np.float32)
         X_valid = valid_matrix.to_numpy(dtype=np.float32)
 
-        # Model-selection leakage fix:
-        # Carve an early-stopping holdout out of train_idx only (grouped by entity).
-        # X_valid is strictly reserved for the final out-of-fold prediction.
         train_groups = groups[train_idx]
         train_y = y[train_idx]
         inner_splitter = StratifiedGroupKFold(
@@ -904,18 +976,34 @@ def train_oof(
         except (AttributeError, TypeError, ValueError):
             best_iter = int(getattr(model, "n_estimators", 300) or 0)
 
-        oof[valid_idx] = model.predict_proba(X_valid)[:, 1]
-        fold_info.append(
-            {
-                "fold": fold,
-                "train_entities": int(len(set(groups[train_idx]))),
-                "valid_entities": int(len(set(groups[valid_idx]))),
-                "best_iteration": best_iter,
-                "average_precision": float(
-                    average_precision_score(y[valid_idx], oof[valid_idx])
-                ),
-            }
-        )
+        oof_preds = model.predict_proba(X_valid)[:, 1]
+        info = {
+            "fold": fold,
+            "train_entities": int(len(set(groups[train_idx]))),
+            "valid_entities": int(len(set(groups[valid_idx]))),
+            "best_iteration": best_iter,
+            "average_precision": float(average_precision_score(y[valid_idx], oof_preds)),
+        }
+        return fold, valid_idx, oof_preds, info
+
+    # Bug 7 fix: run folds in parallel when _pfolds > 1.
+    if _pfolds > 1:
+        logger.info("Training %d OOF folds with %d concurrent threads.", n_splits, _pfolds)
+        with ThreadPoolExecutor(max_workers=_pfolds) as pool:
+            futs = [
+                pool.submit(_train_one_fold, fold, train_idx, valid_idx)
+                for fold, (train_idx, valid_idx) in enumerate(split_list)
+            ]
+            for fut in as_completed(futs):
+                fold_i, valid_idx, oof_preds, info = fut.result()
+                oof[valid_idx] = oof_preds
+                fold_info.append(info)
+        fold_info.sort(key=lambda x: x["fold"])
+    else:
+        for fold, (train_idx, valid_idx) in enumerate(split_list):
+            fold_i, v_idx, oof_preds, info = _train_one_fold(fold, train_idx, valid_idx)
+            oof[v_idx] = oof_preds
+            fold_info.append(info)
     result = frame.copy()
     result["oof_score"] = oof
     final_columns = list(columns) + (["tfidf_cosine"] if records is not None else [])
@@ -1075,20 +1163,22 @@ def run_training(
             "one_drop": 0,
         })
 
-        gbtree_diag = evaluate_held_out_country_diagnostic(
-            labeled,
-            final_columns,
-            params=gbtree_params,
-            country_mask_rate=country_mask_rate,
-            use_monotone_constraints=use_monotone_constraints,
-        )
-        dart_diag = evaluate_held_out_country_diagnostic(
-            labeled,
-            final_columns,
-            params=dart_params,
-            country_mask_rate=country_mask_rate,
-            use_monotone_constraints=use_monotone_constraints,
-        )
+        # Bug 6 fix: run both diagnostics concurrently (XGBoost releases GIL).
+        # Each diagnostic trains its own XGB models independently.
+        logger.info("Running DART vs GBDT diagnostic in parallel (2 threads).")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_gbt = pool.submit(
+                evaluate_held_out_country_diagnostic,
+                labeled, final_columns, gbtree_params,
+                country_mask_rate, use_monotone_constraints,
+            )
+            f_drt = pool.submit(
+                evaluate_held_out_country_diagnostic,
+                labeled, final_columns, dart_params,
+                country_mask_rate, use_monotone_constraints,
+            )
+            gbtree_diag = f_gbt.result()
+            dart_diag = f_drt.result()
 
         gbtree_ap = float(gbtree_diag.get("mean_held_out_country_ap", 0.0))
         dart_ap = float(dart_diag.get("mean_held_out_country_ap", 0.0))

@@ -51,10 +51,7 @@ logs/
 tensorboard/
 
 # Outputs, Cache & Submission Archives
-output/*.tsv
-output/*.csv
-output/*.zip
-output/*.md
+output/*
 !output/README.md
 !output/.gitkeep
 submissions/

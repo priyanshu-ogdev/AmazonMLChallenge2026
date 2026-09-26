@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
+import os
 import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
@@ -37,26 +40,33 @@ def _numeric_tokens(value: str) -> Set[str]:
     return set(_NUMBER_RE.findall(value or ""))
 
 
-def _safe_ratio(left: str, right: str) -> float:
-    """Normalized Levenshtein similarity without an external dependency."""
-    left, right = left or "", right or ""
-    if not left and not right:
-        return 1.0
-    if not left or not right:
-        return 0.0
-    previous = list(range(len(right) + 1))
-    for i, left_char in enumerate(left, 1):
-        current = [i]
-        for j, right_char in enumerate(right, 1):
-            current.append(
-                min(
-                    current[-1] + 1,
-                    previous[j] + 1,
-                    previous[j - 1] + (left_char != right_char),
+try:
+    from rapidfuzz.distance import Levenshtein as _rf_levenshtein
+
+    def _safe_ratio(left: str, right: str) -> float:
+        """Fast C-extension Levenshtein similarity via rapidfuzz."""
+        return float(_rf_levenshtein.normalized_similarity(left or "", right or ""))
+except ImportError:
+    def _safe_ratio(left: str, right: str) -> float:
+        """Normalized Levenshtein similarity fallback without an external dependency."""
+        left, right = left or "", right or ""
+        if not left and not right:
+            return 1.0
+        if not left or not right:
+            return 0.0
+        previous = list(range(len(right) + 1))
+        for i, left_char in enumerate(left, 1):
+            current = [i]
+            for j, right_char in enumerate(right, 1):
+                current.append(
+                    min(
+                        current[-1] + 1,
+                        previous[j] + 1,
+                        previous[j - 1] + (left_char != right_char),
+                    )
                 )
-            )
-        previous = current
-    return 1.0 - previous[-1] / max(len(left), len(right))
+            previous = current
+        return 1.0 - previous[-1] / max(len(left), len(right))
 
 
 def _jaccard(left: Set[str], right: Set[str]) -> float:
@@ -235,24 +245,74 @@ def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
             raise ValueError(f"{path} is missing name/address columns: {list(frame.columns)}")
 
         has_stage0 = "norm_name" in frame.columns and "norm_address" in frame.columns
-        for row in frame.to_dict("records"):
-            eid = row["entity_id"]
-            rec: Dict[str, str] = {
-                "entity_id": eid,
-                "business_name": row.get(name_col, ""),
-                "business_address": row.get(addr_col, ""),
-                "raw_name": row.get("raw_name", ""),
-                "raw_address": row.get("raw_address", ""),
-                "country": row.get("country", row.get(country_col, "")),
-                "canonical_country": row.get("country_canonical", ""),
-            }
-            if has_stage0:
-                rec["norm_name"] = row.get("norm_name", "")
-                rec["norm_address"] = row.get("norm_address", "")
-                rec["postal_code"] = row.get("postal_code", "")
-                rec["is_address_missing"] = row.get("is_address_missing", "0")
-            records[eid] = rec
+        eids = frame["entity_id"].values
+        names = frame[name_col].values
+        addrs = frame[addr_col].values
+        raw_names = frame["raw_name"].values if "raw_name" in frame.columns else names
+        raw_addrs = frame["raw_address"].values if "raw_address" in frame.columns else addrs
+        countries = frame[country_col].values if country_col else np.array([""] * len(frame))
+        can_countries = frame["country_canonical"].values if "country_canonical" in frame.columns else np.array([""] * len(frame))
+
+        if has_stage0:
+            norm_names = frame["norm_name"].values
+            norm_addrs = frame["norm_address"].values
+            postals = frame["postal_code"].values if "postal_code" in frame.columns else np.array([""] * len(frame))
+            is_missings = frame["is_address_missing"].values if "is_address_missing" in frame.columns else np.array(["0"] * len(frame))
+            for i in range(len(eids)):
+                records[eids[i]] = {
+                    "entity_id": eids[i],
+                    "business_name": names[i],
+                    "business_address": addrs[i],
+                    "raw_name": raw_names[i],
+                    "raw_address": raw_addrs[i],
+                    "country": countries[i],
+                    "canonical_country": can_countries[i],
+                    "norm_name": norm_names[i],
+                    "norm_address": norm_addrs[i],
+                    "postal_code": postals[i],
+                    "is_address_missing": is_missings[i],
+                }
+        else:
+            for i in range(len(eids)):
+                records[eids[i]] = {
+                    "entity_id": eids[i],
+                    "business_name": names[i],
+                    "business_address": addrs[i],
+                    "raw_name": raw_names[i],
+                    "raw_address": raw_addrs[i],
+                    "country": countries[i],
+                    "canonical_country": can_countries[i],
+                }
     return records
+
+
+def _feature_worker(
+    chunk_items: List[Tuple[str, List[str]]],
+    normalized: Dict[str, Dict[str, object]],
+    provenance: Dict[Tuple[str, str], Tuple[str, Optional[float], Optional[float], Optional[int]]],
+    s1_max_score: Dict[str, float],
+) -> List[Dict[str, object]]:
+    worker_rows: List[Dict[str, object]] = []
+    for s1_id, cand_ids in chunk_items:
+        cand_count = len(cand_ids)
+        max_s = s1_max_score.get(s1_id)
+        for candidate_id in cand_ids:
+            pair = (s1_id, candidate_id)
+            blocker, rank, score, count = provenance.get(pair, (None, None, None, None))
+            margin = (max_s - score) if (max_s is not None and score is not None) else None
+            worker_rows.append(
+                pair_feature_row(
+                    normalized[s1_id],
+                    normalized[candidate_id],
+                    provenance=blocker,
+                    left_rank=rank,
+                    best_score=score,
+                    blocker_count=count,
+                    candidate_count=cand_count,
+                    score_margin_to_best=margin,
+                )
+            )
+    return worker_rows
 
 
 def build_pair_features(
@@ -268,6 +328,32 @@ def build_pair_features(
     if missing:
         raise ValueError(f"{candidate_file} is missing required columns: {sorted(missing)}")
 
+    # Bug 4 fix: collect active entity IDs appearing in candidate pairs so we only normalize those.
+    active_ids: Set[str] = set()
+    seen: Set[Tuple[str, str]] = set()
+    pairs_by_s1: Dict[str, List[str]] = {}
+
+    s1_vals = candidates["source1_entity_id"].values
+    cand_vals = candidates["candidate_entity_ids"].values
+
+    for i in range(len(s1_vals)):
+        source1_id = s1_vals[i].strip()
+        if not source1_id:
+            continue
+        if source1_id not in records:
+            raise ValueError(f"Unknown source1 entity ID: {source1_id}")
+        active_ids.add(source1_id)
+        for candidate_id in (v.strip() for v in cand_vals[i].split(",") if v.strip()):
+            pair = (source1_id, candidate_id)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            if candidate_id not in records:
+                raise ValueError(f"Unknown candidate entity ID: {candidate_id}")
+            active_ids.add(candidate_id)
+            pairs_by_s1.setdefault(source1_id, []).append(candidate_id)
+
+    # Bug 3 fix: fast provenance lookup construction using column arrays.
     provenance: Dict[Tuple[str, str], Tuple[str, Optional[float], Optional[float], Optional[int]]] = {}
     if provenance_file:
         provenance_frame = pd.read_csv(
@@ -283,36 +369,32 @@ def build_pair_features(
             raise ValueError(
                 f"{provenance_file} is missing required columns: {sorted(missing)}"
             )
-        for row in provenance_frame.to_dict("records"):
-            rank_val = row.get("best_blocker_rank") or row.get("candidate_rank", "")
-            score_val = row.get("best_blocker_score", "")
-            count_val = row.get("blocker_count", "")
-            provenance[(row["source1_entity_id"], row["candidate_entity_id"])] = (
-                row["blocker_provenance"],
-                float(rank_val) if rank_val else None,
-                float(score_val) if score_val else None,
-                int(count_val) if count_val else None,
+        s1_arr = provenance_frame["source1_entity_id"].values
+        cid_arr = provenance_frame["candidate_entity_id"].values
+        prov_arr = provenance_frame["blocker_provenance"].values
+        rank_col = "best_blocker_rank" if "best_blocker_rank" in provenance_frame.columns else (
+            "candidate_rank" if "candidate_rank" in provenance_frame.columns else None
+        )
+        rank_arr = provenance_frame[rank_col].values if rank_col else None
+        score_arr = provenance_frame["best_blocker_score"].values if "best_blocker_score" in provenance_frame.columns else None
+        count_arr = provenance_frame["blocker_count"].values if "blocker_count" in provenance_frame.columns else None
+
+        for i in range(len(provenance_frame)):
+            s1 = s1_arr[i]
+            cid = cid_arr[i]
+            prov = prov_arr[i]
+            r = rank_arr[i] if rank_arr is not None else ""
+            s = score_arr[i] if score_arr is not None else ""
+            c = count_arr[i] if count_arr is not None else ""
+            provenance[(s1, cid)] = (
+                prov,
+                float(r) if r else None,
+                float(s) if s else None,
+                int(c) if c else None,
             )
 
-    normalized = {entity_id: _record_features(record) for entity_id, record in records.items()}
-    seen: Set[Tuple[str, str]] = set()
-    pairs_by_s1: Dict[str, List[str]] = {}
-    for candidate_row in candidates.to_dict("records"):
-        source1_id = candidate_row["source1_entity_id"]
-        if source1_id not in normalized:
-            raise ValueError(f"Unknown source1 entity ID: {source1_id}")
-        for candidate_id in (
-            value.strip()
-            for value in candidate_row["candidate_entity_ids"].split(",")
-            if value.strip()
-        ):
-            pair = (source1_id, candidate_id)
-            if pair in seen:
-                continue
-            seen.add(pair)
-            if candidate_id not in normalized:
-                raise ValueError(f"Unknown candidate entity ID: {candidate_id}")
-            pairs_by_s1.setdefault(source1_id, []).append(candidate_id)
+    # Bug 4 fix: compute features only for active entities.
+    normalized = {entity_id: _record_features(records[entity_id]) for entity_id in active_ids}
 
     # Pre-calculate max score per S1 entity for relative margin computation
     s1_max_score: Dict[str, float] = {}
@@ -325,26 +407,28 @@ def build_pair_features(
         if valid_scores:
             s1_max_score[s1_id] = max(valid_scores)
 
+    items = list(pairs_by_s1.items())
+    num_workers = max(1, os.cpu_count() or 4)
+    # Limit workers for pair features since each process duplicates the lookup dictionaries
+    num_workers = min(num_workers, 6)
+
+    chunk_size = math.ceil(len(items) / num_workers) if num_workers > 0 else 0
+    if chunk_size == 0:
+        chunks = []
+    else:
+        chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
     rows: List[Dict[str, object]] = []
-    for s1_id, cand_ids in pairs_by_s1.items():
-        cand_count = len(cand_ids)
-        max_s = s1_max_score.get(s1_id)
-        for candidate_id in cand_ids:
-            pair = (s1_id, candidate_id)
-            blocker, rank, score, count = provenance.get(pair, (None, None, None, None))
-            margin = (max_s - score) if (max_s is not None and score is not None) else None
-            rows.append(
-                pair_feature_row(
-                    normalized[s1_id],
-                    normalized[candidate_id],
-                    provenance=blocker,
-                    left_rank=rank,
-                    best_score=score,
-                    blocker_count=count,
-                    candidate_count=cand_count,
-                    score_margin_to_best=margin,
-                )
-            )
+    if num_workers <= 1 or not chunks:
+        rows = _feature_worker(items, normalized, provenance, s1_max_score)
+    else:
+        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+            futures = [
+                pool.submit(_feature_worker, chunk, normalized, provenance, s1_max_score)
+                for chunk in chunks
+            ]
+            for fut in as_completed(futures):
+                rows.extend(fut.result())
 
     feature_columns = [
         "source1_entity_id",

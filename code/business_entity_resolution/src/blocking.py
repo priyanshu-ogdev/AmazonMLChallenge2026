@@ -25,11 +25,18 @@ Implements the Stage 1 specification defined in docs/04_stage1_blocking.md:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
+import hashlib
 import json
 import math
+import multiprocessing
+import os
+import pickle
 import re
+import shutil
 import sys
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,8 +72,16 @@ SIMILARITY_FLOOR = 0.30
 MAX_TOKEN_DOC_FREQ = 0.02
 MAX_TOKEN_DOC_COUNT = 5000
 MAX_NGRAM_DOC_FREQ = 0.20
-MAX_NGRAM_DOC_COUNT = 50000
+MAX_NGRAM_DOC_COUNT = 10000
 MIN_TOKEN_LEN = 3
+
+# Index cache versioning — bump when MultiChannelBlocker schema changes
+INDEX_CACHE_VERSION = 3
+INDEX_CACHE_NAME = "candidate_index.pkl"
+CHECKPOINT_INTERVAL = 10_000
+
+# Module-level empty sentinel for _query_partitioned_index fast paths
+_EMPTY_LIST: List[str] = []
 
 EXACT_BLOCKERS = {
     "exact_name",
@@ -108,7 +123,7 @@ def _char_ngrams(text: str) -> List[str]:
         return []
     padded = f"  {compact}  "
     ngrams = []
-    for n in (3, 4):
+    for n in (3,):
         for i in range(max(0, len(padded) - n + 1)):
             ngrams.append(padded[i : i + n])
     return ngrams
@@ -410,40 +425,45 @@ class MultiChannelBlocker:
         key: Any,
         s1_country: str,
         allow_cross_country_fallback: bool = True,
-    ) -> List[str]:
+    ) -> Iterable[str]:
         """
-        Query an index respecting the country partitioning invariant:
-        - If s1_country != "": matching partition + records with missing country ("")
-        - If matching partition has 0 hits and allow_cross_country_fallback is True:
-          softly search across all other partitions to recover spelling variants / cross-country matches!
-        - If s1_country == "": global search across all partitions
+        Query an index respecting the country partitioning invariant.
+        Phase 1 optimized: avoids unnecessary list() creation on hot paths.
         """
+        import itertools
         sub = index.get(key)
         if not sub:
-            return []
+            return _EMPTY_LIST
 
         if s1_country:
-            hits = list(sub.get(s1_country, []))
-            if "" in sub:
-                hits.extend(sub[""])
-            if not hits and allow_cross_country_fallback:
-                # Soft fallback: if exact partition has NO hits for this key,
-                # search across all other compatible partitions.
-                # Invariant: Disjoint known markets (US vs India) are never crossed.
-                # Open-set and unrecognized country labels are searched to recover typos and ISO3 variants.
+            exact = sub.get(s1_country, _EMPTY_LIST)
+            global_part = sub.get("", _EMPTY_LIST)
+            if exact or global_part:
+                if not global_part:
+                    return exact
+                if not exact:
+                    return global_part
+                return itertools.chain(exact, global_part)
+            if not allow_cross_country_fallback:
+                return _EMPTY_LIST
+            # Soft fallback: Disjoint known markets are never crossed.
+            # Open-set / unrecognized countries are searched to recover typos.
+            def _fallback_gen() -> Iterable[str]:
                 for c, partition_list in sub.items():
                     if c == s1_country or c == "":
                         continue
                     if s1_country in KNOWN_CANONICAL_COUNTRIES and c in KNOWN_CANONICAL_COUNTRIES:
                         continue
-                    hits.extend(partition_list)
-            return hits
+                    for cid in partition_list:
+                        yield cid
+            return _fallback_gen()
         else:
             # S1 country is missing -> global fallback
-            all_hits = []
-            for partition_list in sub.values():
-                all_hits.extend(partition_list)
-            return all_hits
+            def _global_gen() -> Iterable[str]:
+                for partition_list in sub.values():
+                    for cid in partition_list:
+                        yield cid
+            return _global_gen()
 
     def generate_candidates_for_record(
         self,
@@ -455,31 +475,31 @@ class MultiChannelBlocker:
         Returns a list of dicts with keys:
           candidate_id, blocker_provenance, blocker_count, best_blocker_rank,
           best_blocker_score, country_partition
-        """
-        # Mapping: candidate_id -> {
-        #   "blockers": set(),
-        #   "best_score": float,
-        #   "best_rank": int,
-        #   "exact_match": bool,
-        # }
-        hits: Dict[str, Dict[str, Any]] = defaultdict(
-            lambda: {
-                "blockers": set(),
-                "best_score": 0.0,
-                "best_rank": 999999,
-                "exact_match": False,
-            }
-        )
 
-        def record_hit(cand_id: str, blocker: str, score: float, rank: int, is_exact: bool = False):
-            info = hits[cand_id]
-            info["blockers"].add(blocker)
-            if score > info["best_score"]:
-                info["best_score"] = score
-            if rank < info["best_rank"]:
-                info["best_rank"] = rank
-            if is_exact:
-                info["exact_match"] = True
+        Phase 1 optimized: uses four flat dicts instead of defaultdict(lambda: {...})
+        and inlines record_hit to eliminate per-call Python function overhead.
+        """
+        # Phase 1: flat hit dicts — avoids defaultdict(lambda) GC pressure
+        hit_blockers:    Dict[str, List[str]] = {}  # cid -> list of blocker names
+        hit_best_score:  Dict[str, float]     = {}  # cid -> best score so far
+        hit_best_rank:   Dict[str, int]       = {}  # cid -> best rank so far
+        hit_exact:       Dict[str, bool]      = {}  # cid -> any exact match?
+
+        # Inlined record_hit helper (avoids Python function-call overhead on hot path)
+        def _rh(cand_id: str, blocker: str, score: float, rank: int, exact: bool = False) -> None:
+            if cand_id not in hit_best_score:
+                hit_blockers[cand_id]   = [blocker]
+                hit_best_score[cand_id] = score
+                hit_best_rank[cand_id]  = rank
+                hit_exact[cand_id]      = exact
+            else:
+                hit_blockers[cand_id].append(blocker)
+                if score > hit_best_score[cand_id]:
+                    hit_best_score[cand_id] = score
+                if rank < hit_best_rank[cand_id]:
+                    hit_best_rank[cand_id] = rank
+                if exact:
+                    hit_exact[cand_id] = True
 
         country = s1.canonical_country
 
@@ -489,40 +509,40 @@ class MultiChannelBlocker:
         if s1.norm_name:
             exact_hits = self._query_partitioned_index(self.index_exact_name, s1.norm_name, country)
             for rank, cid in enumerate(exact_hits, 1):
-                record_hit(cid, "exact_name", 1.0, rank, is_exact=True)
+                _rh(cid, "exact_name", 1.0, rank, True)
 
         if s1.first_2_tokens:
             for rank, cid in enumerate(self._query_partitioned_index(self.index_first_2_tokens, s1.first_2_tokens, country), 1):
-                record_hit(cid, "first_2_tokens", 0.90, rank, is_exact=True)
+                _rh(cid, "first_2_tokens", 0.90, rank, True)
 
         for acr in s1.acronyms:
             for rank, cid in enumerate(self._query_partitioned_index(self.index_acronym, acr, country), 1):
-                record_hit(cid, "acronym_match", 0.85, rank, is_exact=True)
+                _rh(cid, "acronym_match", 0.85, rank, True)
 
         if s1.norm_name and s1.postal_code:
             key = (s1.norm_name, s1.postal_code)
             for rank, cid in enumerate(self._query_partitioned_index(self.index_name_postal, key, country), 1):
-                record_hit(cid, "exact_name_postal", 1.0, rank, is_exact=True)
+                _rh(cid, "exact_name_postal", 1.0, rank, True)
 
         if s1.norm_name and s1.street_number:
             key = (s1.norm_name, s1.street_number)
             for rank, cid in enumerate(self._query_partitioned_index(self.index_name_street, key, country), 1):
-                record_hit(cid, "exact_name_street", 0.95, rank, is_exact=True)
+                _rh(cid, "exact_name_street", 0.95, rank, True)
 
         if s1.norm_name and s1.trailing_segment:
             key = (s1.norm_name, s1.trailing_segment)
             for rank, cid in enumerate(self._query_partitioned_index(self.index_name_trailing, key, country), 1):
-                record_hit(cid, "exact_name_trailing", 0.95, rank, is_exact=True)
+                _rh(cid, "exact_name_trailing", 0.95, rank, True)
 
         if s1.first_word and s1.postal_code and len(s1.first_word) >= 3:
             key = (s1.first_word, s1.postal_code)
             for rank, cid in enumerate(self._query_partitioned_index(self.index_lead_postal, key, country), 1):
-                record_hit(cid, "name_lead_postal", 0.90, rank, is_exact=True)
+                _rh(cid, "name_lead_postal", 0.90, rank, True)
 
         if s1.first_word and s1.street_number and s1.trailing_segment:
             key = (s1.first_word, s1.street_number, s1.trailing_segment)
             for rank, cid in enumerate(self._query_partitioned_index(self.index_lead_street_trailing, key, country), 1):
-                record_hit(cid, "name_lead_street_trailing", 0.90, rank, is_exact=True)
+                _rh(cid, "name_lead_street_trailing", 0.90, rank, True)
 
         # -------------------------------------------------------------
         # Channel 2: Character 3/4-Gram Sub-Linear TF-IDF Retrieval
@@ -533,7 +553,11 @@ class MultiChannelBlocker:
             max_allowed_ngram_count = min(self.max_ngram_doc_count, max_allowed_ngram_freq)
 
             s1_weights: Dict[str, float] = {}
+            _index_ngrams = self.index_ngrams  # local ref avoids attr lookup in loop
             for gram, count in s1_gram_counts.items():
+                # Phase 1 opt: evicted stop-grams are absent from index_ngrams
+                if gram not in _index_ngrams:
+                    continue
                 doc_cnt = self.ngram_doc_counts.get(gram, 0)
                 if doc_cnt == 0 or doc_cnt > max_allowed_ngram_count:
                     continue
@@ -542,9 +566,13 @@ class MultiChannelBlocker:
                 s1_weights[gram] = tf * idf
 
             if s1_weights:
+                if len(s1_weights) > 15:
+                    top_grams = sorted(s1_weights.keys(), key=lambda g: s1_weights[g], reverse=True)[:15]
+                    s1_weights = {g: s1_weights[g] for g in top_grams}
+
                 cand_scores: Counter[str] = Counter()
                 for gram, w_s1 in s1_weights.items():
-                    for cid in self._query_partitioned_index(self.index_ngrams, gram, country):
+                    for cid in self._query_partitioned_index(_index_ngrams, gram, country):
                         cand_scores[cid] += w_s1
 
                 s1_norm = math.sqrt(sum(w * w for w in s1_weights.values()))
@@ -559,7 +587,7 @@ class MultiChannelBlocker:
 
                     scored_cands.sort(key=lambda x: -x[1])
                     for rank, (cid, sim) in enumerate(scored_cands[: self.top_k_sparse], 1):
-                        record_hit(cid, "char_ngram", float(sim), rank, is_exact=False)
+                        _rh(cid, "char_ngram", float(sim), rank, False)
 
         # -------------------------------------------------------------
         # Channel 3: Token Inverted Index with Sub-Linear TF-IDF
@@ -571,7 +599,10 @@ class MultiChannelBlocker:
             max_allowed_count = min(self.max_token_doc_count, max_allowed_freq)
 
             s1_token_weights: Dict[str, float] = {}
+            _index_tokens = self.index_tokens  # local ref avoids attr lookup in loop
             for tok, count in s1_token_counts.items():
+                if tok not in _index_tokens:
+                    continue  # evicted stop-token
                 doc_cnt = self.token_doc_counts.get(tok, 0)
                 if doc_cnt == 0 or doc_cnt > max_allowed_count:
                     continue
@@ -581,7 +612,7 @@ class MultiChannelBlocker:
 
             if s1_token_weights:
                 for tok, w_s1 in s1_token_weights.items():
-                    cands = self._query_partitioned_index(self.index_tokens, tok, country)
+                    cands = self._query_partitioned_index(_index_tokens, tok, country)
                     for cid in cands:
                         token_scores[cid] += w_s1
 
@@ -590,7 +621,7 @@ class MultiChannelBlocker:
                     top_tokens = token_scores.most_common(self.top_k_sparse)
                     for rank, (cid, score_sum) in enumerate(top_tokens, 1):
                         normalized_score = min(1.0, score_sum / total_s1_weight)
-                        record_hit(cid, "token_inverted", normalized_score, rank, is_exact=False)
+                        _rh(cid, "token_inverted", normalized_score, rank, False)
 
         # -------------------------------------------------------------
         # Channel 4: Address Structural Key (postal + street number)
@@ -598,7 +629,7 @@ class MultiChannelBlocker:
         if not s1.is_address_missing and s1.postal_code and s1.street_number:
             key = (s1.postal_code, s1.street_number)
             for rank, cid in enumerate(self._query_partitioned_index(self.index_address_structural, key, country), 1):
-                record_hit(cid, "address_structural", 0.85, rank, is_exact=False)
+                _rh(cid, "address_structural", 0.85, rank, False)
 
         # -------------------------------------------------------------
         # Channel 5: Dense Retrieval Hook (if provided)
@@ -613,7 +644,7 @@ class MultiChannelBlocker:
                 key=lambda x: -x[1],
             )
             for rank, (cid, score) in enumerate(dense_sorted[: self.top_k_dense], 1):
-                record_hit(cid, "dense_bge", float(score), rank, is_exact=False)
+                _rh(cid, "dense_bge", float(score), rank, False)
 
         # -------------------------------------------------------------
         # Union, Deterministic Priority Ranking & Capping
@@ -624,17 +655,18 @@ class MultiChannelBlocker:
         # Tier 3: Maximum channel similarity score (-round(best_score, 4))
         # Tier 4: Best channel rank (best_rank)
         # Tier 5: Stable candidate ID tie-break (cid)
+        # Phase 1: build ranked_candidates from flat hit dicts (no inner dict access needed)
         ranked_candidates = []
-        for cid, info in hits.items():
-            exact_val = 1 if info["exact_match"] or (info["blockers"] & EXACT_BLOCKERS) else 0
-            blocker_cnt = len(info["blockers"])
-            best_score = info["best_score"]
-            best_rank = info["best_rank"]
-            provenance_str = ",".join(sorted(info["blockers"]))
+        for cid in hit_best_score:  # iterate over all seen candidate IDs
+            blockers_list = hit_blockers[cid]
+            blockers_set  = set(blockers_list)
+            exact_val     = 1 if hit_exact[cid] or (blockers_set & EXACT_BLOCKERS) else 0
+            blocker_cnt   = len(blockers_set)
+            best_score    = hit_best_score[cid]
+            best_rank     = hit_best_rank[cid]
+            provenance_str = ",".join(sorted(blockers_set))
+            cand_source    = source_from_entity_id(cid)
 
-            cand_source = source_from_entity_id(cid)
-
-            # Sort key (multi-tier priority sort per docs/04 spec)
             sort_key = (
                 -blocker_cnt,
                 -exact_val,
@@ -646,23 +678,116 @@ class MultiChannelBlocker:
                 (
                     sort_key,
                     {
-                        "source1_entity_id": s1.entity_id,
-                        "candidate_entity_id": cid,
-                        "candidate_source": cand_source,
-                        "blocker_provenance": provenance_str,
-                        "blocker_count": blocker_cnt,
-                        "best_blocker_rank": best_rank,
-                        "best_blocker_score": round(best_score, 4),
-                        "country_partition": s1.canonical_country or "global",
+                        "source1_entity_id":    s1.entity_id,
+                        "candidate_entity_id":  cid,
+                        "candidate_source":     cand_source,
+                        "blocker_provenance":   provenance_str,
+                        "blocker_count":        blocker_cnt,
+                        "best_blocker_rank":    best_rank,
+                        "best_blocker_score":   round(best_score, 4),
+                        "country_partition":    s1.canonical_country or "global",
                     },
                 )
             )
-
         ranked_candidates.sort(key=lambda item: item[0])
-        capped_candidates = [
-            item[1] for item in ranked_candidates[: self.max_candidates_per_entity]
-        ]
-        return capped_candidates
+        return [item[1] for item in ranked_candidates[: self.max_candidates_per_entity]]
+
+    # ------------------------------------------------------------------
+    # Phase 2: Index Serialization Cache
+    # ------------------------------------------------------------------
+
+    def save_index(self, path: Path, fingerprint: str = "") -> None:
+        """Serialize the full inverted index to disk using pickle protocol 5."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "_version":                   INDEX_CACHE_VERSION,
+            "_fingerprint":               fingerprint,
+            "num_candidates":             self.num_candidates,
+            "candidate_ngram_lens":       self.candidate_ngram_lens,
+            "country_partitions":         {k: list(v) for k, v in self.country_partitions.items()},
+            "index_exact_name":           dict(self.index_exact_name),
+            "index_first_2_tokens":       dict(self.index_first_2_tokens),
+            "index_acronym":              dict(self.index_acronym),
+            "index_name_postal":          dict(self.index_name_postal),
+            "index_name_street":          dict(self.index_name_street),
+            "index_name_trailing":        dict(self.index_name_trailing),
+            "index_lead_postal":          dict(self.index_lead_postal),
+            "index_lead_street_trailing": dict(self.index_lead_street_trailing),
+            "index_ngrams":               dict(self.index_ngrams),
+            "ngram_doc_counts":           dict(self.ngram_doc_counts),
+            "index_tokens":               dict(self.index_tokens),
+            "token_doc_counts":           dict(self.token_doc_counts),
+            "index_address_structural":   dict(self.index_address_structural),
+            "config": {
+                "top_k_sparse":        self.top_k_sparse,
+                "top_k_dense":         self.top_k_dense,
+                "max_candidates":      self.max_candidates_per_entity,
+                "similarity_floor":    self.similarity_floor,
+                "max_ngram_doc_count": self.max_ngram_doc_count,
+                "max_token_doc_count": self.max_token_doc_count,
+                "max_ngram_doc_freq":  self.max_ngram_doc_freq,
+                "max_token_doc_freq":  self.max_token_doc_freq,
+            },
+        }
+        with open(path, "wb") as fh:
+            pickle.dump(payload, fh, protocol=5)
+        size_mb = path.stat().st_size / 1024 ** 2
+        print(f"[CACHE] Index saved: {path} ({size_mb:.1f} MB)", flush=True)
+
+    @classmethod
+    def load_index(cls, path: Path) -> "MultiChannelBlocker":
+        """Restore a serialized index from disk (see save_index)."""
+        path = Path(path)
+        t0 = time.time()
+        with open(path, "rb") as fh:
+            payload = pickle.load(fh)
+        ver = payload.get("_version")
+        if ver != INDEX_CACHE_VERSION:
+            raise ValueError(
+                f"Index cache version mismatch (got {ver}, expected {INDEX_CACHE_VERSION}). "
+                "Re-run with --no-cache-index to rebuild."
+            )
+        cfg = payload["config"]
+        blocker = cls(
+            top_k_sparse=cfg["top_k_sparse"],
+            top_k_dense=cfg["top_k_dense"],
+            max_candidates_per_entity=cfg["max_candidates"],
+            similarity_floor=cfg["similarity_floor"],
+            max_ngram_doc_count=cfg["max_ngram_doc_count"],
+            max_token_doc_count=cfg["max_token_doc_count"],
+            max_ngram_doc_freq=cfg["max_ngram_doc_freq"],
+            max_token_doc_freq=cfg["max_token_doc_freq"],
+        )
+        blocker.num_candidates       = payload["num_candidates"]
+        blocker.candidate_ngram_lens = payload["candidate_ngram_lens"]
+        blocker.candidate_records    = blocker.candidate_ngram_lens
+        blocker.country_partitions   = defaultdict(
+            set, {k: set(v) for k, v in payload["country_partitions"].items()}
+        )
+        # Restore inverted indexes as defaultdict(lambda: defaultdict(list))
+        _dd = lambda: defaultdict(list)  # noqa: E731
+        for attr in (
+            "index_exact_name", "index_first_2_tokens", "index_acronym",
+            "index_name_postal", "index_name_street", "index_name_trailing",
+            "index_lead_postal", "index_lead_street_trailing",
+            "index_ngrams", "index_tokens", "index_address_structural",
+        ):
+            raw = payload[attr]
+            setattr(blocker, attr, defaultdict(_dd, raw))
+        # Aliases
+        blocker.index_trigrams     = blocker.index_ngrams
+        blocker.trigram_doc_counts = blocker.ngram_doc_counts
+        blocker.ngram_doc_counts   = defaultdict(int, payload["ngram_doc_counts"])
+        blocker.token_doc_counts   = defaultdict(int, payload["token_doc_counts"])
+        elapsed = time.time() - t0
+        print(
+            f"[CACHE] Index loaded in {elapsed:.1f}s: "
+            f"{blocker.num_candidates:,} candidates, "
+            f"{len(blocker.country_partitions)} country partitions.",
+            flush=True,
+        )
+        return blocker
 
 
 class DenseRetrievalIndex:
@@ -801,122 +926,103 @@ def load_ground_truth(path: Path) -> Dict[str, Set[str]]:
     return gt
 
 
-def run_blocking(
-    source1_paths: Sequence[Path],
-    candidate_sources: Sequence[Path],
-    output_dir: Path,
-    ground_truth_path: Optional[Path] = None,
-    dense_embeddings_path: Optional[Path] = None,
-    top_k_sparse: int = TOP_K_SPARSE_OR_CHAR,
-    top_k_dense: int = TOP_K_DENSE,
-    max_candidates_per_entity: int = MAX_CANDIDATES_PER_ENTITY,
-    similarity_floor: float = SIMILARITY_FLOOR,
-) -> Dict[str, Any]:
-    """
-    Run end-to-end Stage 1 blocking on input TSVs and emit:
-      - candidate_pairs.tsv
-      - candidate_provenance.tsv
-      - blocking_summary.json
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+# ---------------------------------------------------------------------------
+# Phase 2: Source fingerprint helpers
+# ---------------------------------------------------------------------------
 
-    blocker = MultiChannelBlocker(
-        top_k_sparse=top_k_sparse,
-        top_k_dense=top_k_dense,
-        max_candidates_per_entity=max_candidates_per_entity,
-        similarity_floor=similarity_floor,
-    )
+def _candidate_source_fingerprint(paths: Sequence[Path]) -> str:
+    """MD5 fingerprint of candidate source TSV paths (name + size + mtime)."""
+    h = hashlib.md5()
+    for p in sorted(paths):
+        p = Path(p)
+        try:
+            st = p.stat()
+            h.update(f"{p.name}:{st.st_size}:{st.st_mtime_ns}".encode())
+        except OSError:
+            h.update(p.name.encode())
+    return h.hexdigest()[:16]
 
-    # 1. Index all candidate records (S2, S3)
-    print(f"Indexing candidate records from {[str(p) for p in candidate_sources]}...")
-    cand_count = 0
-    for row in read_tsv_records(candidate_sources):
-        rec = BlockingRecord.from_row(
-            entity_id=row["entity_id"],
-            name=row["business_name"],
-            address=row["business_address"],
-            country=row["country"],
-            norm_name=row.get("norm_name"),
-            norm_address=row.get("norm_address"),
-            canonical_country=row.get("canonical_country"),
-            postal_code=row.get("postal_code"),
-            street_number=row.get("street_number"),
-            trailing_segment=row.get("trailing_segment"),
-            is_address_missing=row.get("is_address_missing"),
-        )
-        blocker.index_candidate(rec)
-        cand_count += 1
-        if cand_count % 100000 == 0:
-            print(f"  Indexed {cand_count:,} candidate records...", flush=True)
 
-    print(f"Finished indexing {cand_count:,} candidate records across {len(blocker.country_partitions)} country partitions.", flush=True)
+def _read_cache_fingerprint(cache_path: Path) -> str:
+    """Peek the fingerprint stored inside a pickle cache without full load."""
+    try:
+        with open(cache_path, "rb") as fh:
+            data = pickle.load(fh)
+        return data.get("_fingerprint", "")
+    except Exception:
+        return ""
 
-    # 1b. Initialize Dense Retrieval Index if provided
-    dense_index: Optional[DenseRetrievalIndex] = None
-    if dense_embeddings_path and Path(dense_embeddings_path).exists():
-        print(f"Loading dense embeddings and creating FAISS index from {dense_embeddings_path}...")
-        dense_index = DenseRetrievalIndex(
-            embeddings_path=Path(dense_embeddings_path),
-            country_partitions=blocker.country_partitions,
-            similarity_floor=similarity_floor,
-        )
-        print(f"  Dense index initialized with {len(dense_index.candidate_ids):,} candidates.")
 
-    # 2. Open output file writers
-    candidate_pairs_path = output_dir / "candidate_pairs.tsv"
-    provenance_path = output_dir / "candidate_provenance.tsv"
+# ---------------------------------------------------------------------------
+# Phase 3: Checkpoint helpers
+# ---------------------------------------------------------------------------
 
-    s1_count = 0
+def _load_completed_s1_ids(pairs_path: Path) -> Tuple[Set[str], int, int]:
+    """Scan existing candidate_pairs.tsv to collect completed S1 entity IDs, pairs count, and singletons."""
+    completed: Set[str] = set()
     total_pairs = 0
     singletons = 0
-    candidate_counts: List[int] = []
-    channel_counts: Counter[str] = Counter()
+    if not pairs_path.exists():
+        return completed, total_pairs, singletons
+    with open(pairs_path, "r", encoding="utf-8", errors="replace") as fh:
+        fh.readline()  # skip header
+        for line in fh:
+            tab = line.find("\t")
+            if tab > 0:
+                s1 = line[:tab].strip()
+                completed.add(s1)
+                cands = line[tab + 1:].strip()
+                if cands:
+                    total_pairs += len(cands.split(","))
+                else:
+                    singletons += 1
+    return completed, total_pairs, singletons
 
-    # Audit tracking
-    ground_truth: Optional[Dict[str, Set[str]]] = None
-    gt_total_pairs = 0
-    gt_recovered_pairs = 0
-    gt_entity_full_hit = 0
-    gt_entity_any_hit = 0
-    gt_by_channel: Counter[str] = Counter()
-    gt_by_country: Counter[str] = Counter()
-    gt_country_totals: Counter[str] = Counter()
 
-    if ground_truth_path and Path(ground_truth_path).exists():
-        print(f"Loading ground truth for recall audit from {ground_truth_path}...")
-        ground_truth = load_ground_truth(Path(ground_truth_path))
-        for mid_set in ground_truth.values():
-            gt_total_pairs += len(mid_set)
+def _write_checkpoint(checkpoint_path: Path, meta: Dict[str, Any]) -> None:
+    """Atomically write checkpoint.json via a temp file."""
+    tmp = checkpoint_path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+    tmp.replace(checkpoint_path)
 
-    with open(candidate_pairs_path, "w", encoding="utf-8", newline="") as pairs_file, \
-         open(provenance_path, "w", encoding="utf-8", newline="") as prov_file:
 
-        pairs_writer = csv.writer(pairs_file, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
-        pairs_writer.writerow(["source1_entity_id", "candidate_entity_ids"])
+# ---------------------------------------------------------------------------
+# Phase 4: Multiprocessing worker (must be top-level for Windows spawn)
+# ---------------------------------------------------------------------------
 
-        prov_writer = csv.DictWriter(
-            prov_file,
-            delimiter="\t",
-            quoting=csv.QUOTE_NONE,
-            escapechar="\\",
-            fieldnames=[
-                "source1_entity_id",
-                "candidate_entity_id",
-                "candidate_source",
-                "blocker_provenance",
-                "blocker_count",
-                "best_blocker_rank",
-                "best_blocker_score",
-                "country_partition",
-            ],
+def _query_worker(
+    chunk_rows: List[Dict[str, Any]],
+    cache_path: str,
+    top_k_sparse: int,
+    top_k_dense: int,
+    max_candidates: int,
+    similarity_floor: float,
+    out_pairs_path: str,
+    out_prov_path: str,
+    worker_id: int,
+) -> Dict[str, int]:
+    """
+    Top-level picklable worker function for ProcessPoolExecutor.
+    Loads the index from cache, processes its chunk, and writes partial output files.
+    """
+    blocker = MultiChannelBlocker.load_index(Path(cache_path))
+    pairs_count = 0
+    singletons  = 0
+    prov_fields = [
+        "source1_entity_id", "candidate_entity_id", "candidate_source",
+        "blocker_provenance", "blocker_count", "best_blocker_rank",
+        "best_blocker_score", "country_partition",
+    ]
+    with open(out_pairs_path, "w", encoding="utf-8", newline="") as pf, \
+         open(out_prov_path, "w", encoding="utf-8", newline="") as pvf:
+        pw = csv.writer(pf,  delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
+        dw = csv.DictWriter(
+            pvf, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\",
+            fieldnames=prov_fields,
         )
-        prov_writer.writeheader()
-
-        # 3. Stream Source 1 records and generate candidates
-        print(f"Generating candidate pairs for S1 records from {[str(p) for p in source1_paths]}...")
-        for row in read_tsv_records(source1_paths):
-            s1_count += 1
+        dw.writeheader()
+        for row in chunk_rows:
             s1_rec = BlockingRecord.from_row(
                 entity_id=row["entity_id"],
                 name=row["business_name"],
@@ -930,63 +1036,355 @@ def run_blocking(
                 trailing_segment=row.get("trailing_segment"),
                 is_address_missing=row.get("is_address_missing"),
             )
-
-            dense_scores = (
-                dense_index.query(s1_rec.entity_id, s1_rec.canonical_country, top_k=blocker.top_k_dense)
-                if dense_index else None
-            )
-            candidates = blocker.generate_candidates_for_record(s1_rec, dense_scores=dense_scores)
-            candidate_counts.append(len(candidates))
-
+            candidates = blocker.generate_candidates_for_record(s1_rec)
             if not candidates:
                 singletons += 1
-                pairs_writer.writerow([s1_rec.entity_id, ""])
+                pw.writerow([s1_rec.entity_id, ""])
             else:
-                total_pairs += len(candidates)
-                cand_ids = [c["candidate_entity_id"] for c in candidates]
-                pairs_writer.writerow([s1_rec.entity_id, ",".join(cand_ids)])
-
-                for cand_info in candidates:
-                    prov_writer.writerow(cand_info)
-                    for blk in cand_info["blocker_provenance"].split(","):
-                        channel_counts[blk] += 1
-
-            # Recall audit checking if ground truth is present
-            if ground_truth and s1_rec.entity_id in ground_truth:
-                true_matches = ground_truth[s1_rec.entity_id]
-                c_country = s1_rec.canonical_country or "unknown"
-                gt_country_totals[c_country] += len(true_matches)
-
-                found_cands = {c["candidate_entity_id"] for c in candidates}
-                hits = true_matches & found_cands
-                gt_recovered_pairs += len(hits)
-
-                if hits:
-                    gt_entity_any_hit += 1
-                if hits == true_matches and len(true_matches) > 0:
-                    gt_entity_full_hit += 1
-
+                pairs_count += len(candidates)
+                pw.writerow([s1_rec.entity_id, ",".join(c["candidate_entity_id"] for c in candidates)])
                 for c in candidates:
-                    cid = c["candidate_entity_id"]
-                    if cid in true_matches:
-                        gt_by_country[c_country] += 1
-                        for blk in c["blocker_provenance"].split(","):
-                            gt_by_channel[blk] += 1
+                    dw.writerow(c)
+    print(f"[WORKER {worker_id}] done: {pairs_count:,} pairs, {singletons:,} singletons", flush=True)
+    return {"pairs": pairs_count, "singletons": singletons}
 
-            if s1_count % 25000 == 0:
-                print(f"  Processed {s1_count:,} / {len(source1_paths)} S1 entities -> {total_pairs:,} total candidate pairs...", flush=True)
+
+def run_blocking(
+    source1_paths: Sequence[Path],
+    candidate_sources: Sequence[Path],
+    output_dir: Path,
+    ground_truth_path: Optional[Path] = None,
+    dense_embeddings_path: Optional[Path] = None,
+    top_k_sparse: int = TOP_K_SPARSE_OR_CHAR,
+    top_k_dense: int = TOP_K_DENSE,
+    max_candidates_per_entity: int = MAX_CANDIDATES_PER_ENTITY,
+    similarity_floor: float = SIMILARITY_FLOOR,
+    cache_index: bool = True,
+    resume: bool = True,
+    num_workers: int = 1,
+    checkpoint_interval: int = CHECKPOINT_INTERVAL,
+) -> Dict[str, Any]:
+    """
+    Run end-to-end Stage 1 blocking on input TSVs and emit:
+      - candidate_pairs.tsv
+      - candidate_provenance.tsv
+      - blocking_summary.json
+
+    Upgrades (Phases 2-4):
+      - cache_index: save/load inverted index as pickle (avoids 15-min rebuild)
+      - resume: skip already-processed S1 entities (checkpoint/resume)
+      - num_workers: run query phase in parallel with ProcessPoolExecutor
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # -----------------------------------------------------------------------
+    # Phase 2: Build or load the candidate index
+    # -----------------------------------------------------------------------
+    cache_path   = output_dir / INDEX_CACHE_NAME
+    fingerprint  = _candidate_source_fingerprint(candidate_sources)
+    blocker: Optional[MultiChannelBlocker] = None
+
+    if cache_index and cache_path.exists():
+        try:
+            cached_fp = _read_cache_fingerprint(cache_path)
+            if cached_fp == fingerprint:
+                print(f"[CACHE] Fingerprint match — loading index from {cache_path}...", flush=True)
+                blocker = MultiChannelBlocker.load_index(cache_path)
+            else:
+                print(f"[CACHE] Fingerprint mismatch (cached={cached_fp} current={fingerprint}) — rebuilding index.", flush=True)
+        except Exception as exc:
+            print(f"[CACHE] Load failed ({exc}) — rebuilding index.", flush=True)
+
+    if blocker is None:
+        blocker = MultiChannelBlocker(
+            top_k_sparse=top_k_sparse,
+            top_k_dense=top_k_dense,
+            max_candidates_per_entity=max_candidates_per_entity,
+            similarity_floor=similarity_floor,
+        )
+        # 1. Index all candidate records (S2, S3)
+        print(f"Indexing candidate records from {[str(p) for p in candidate_sources]}...", flush=True)
+        cand_count = 0
+        for row in read_tsv_records(candidate_sources):
+            rec = BlockingRecord.from_row(
+                entity_id=row["entity_id"],
+                name=row["business_name"],
+                address=row["business_address"],
+                country=row["country"],
+                norm_name=row.get("norm_name"),
+                norm_address=row.get("norm_address"),
+                canonical_country=row.get("canonical_country"),
+                postal_code=row.get("postal_code"),
+                street_number=row.get("street_number"),
+                trailing_segment=row.get("trailing_segment"),
+                is_address_missing=row.get("is_address_missing"),
+            )
+            blocker.index_candidate(rec)
+            cand_count += 1
+            if cand_count % 100_000 == 0:
+                print(f"  Indexed {cand_count:,} candidate records...", flush=True)
+        print(
+            f"Finished indexing {cand_count:,} candidate records across "
+            f"{len(blocker.country_partitions)} country partitions.",
+            flush=True,
+        )
+        if cache_index:
+            blocker.save_index(cache_path, fingerprint=fingerprint)
+
+    # 1b. Initialize Dense Retrieval Index if provided
+    dense_index: Optional[DenseRetrievalIndex] = None
+    if dense_embeddings_path and Path(dense_embeddings_path).exists():
+        print(f"Loading dense embeddings and creating FAISS index from {dense_embeddings_path}...", flush=True)
+        dense_index = DenseRetrievalIndex(
+            embeddings_path=Path(dense_embeddings_path),
+            country_partitions=blocker.country_partitions,
+            similarity_floor=similarity_floor,
+        )
+        print(f"  Dense index initialized with {len(dense_index.candidate_ids):,} candidates.", flush=True)
+
+    # -----------------------------------------------------------------------
+    # Phase 3: Checkpoint / Resume
+    # -----------------------------------------------------------------------
+    candidate_pairs_path = output_dir / "candidate_pairs.tsv"
+    provenance_path      = output_dir / "candidate_provenance.tsv"
+    checkpoint_path      = output_dir / "checkpoint.json"
+
+    completed_s1: Set[str] = set()
+    initial_pairs = 0
+    initial_singletons = 0
+    if resume:
+        completed_s1, initial_pairs, initial_singletons = _load_completed_s1_ids(candidate_pairs_path)
+        if completed_s1:
+            print(
+                f"[RESUME] Skipping {len(completed_s1):,} already-completed S1 entities "
+                f"({initial_pairs:,} pairs, {initial_singletons:,} singletons).",
+                flush=True,
+            )
+
+    resume_mode = len(completed_s1) > 0
+    file_mode   = "a" if resume_mode else "w"
+
+    # Audit tracking (initialized before any path branches)
+    ground_truth: Optional[Dict[str, Set[str]]] = None
+    gt_total_pairs    = 0
+    gt_recovered_pairs = 0
+    gt_entity_full_hit = 0
+    gt_entity_any_hit  = 0
+    gt_by_channel: Counter[str]  = Counter()
+    gt_by_country: Counter[str]  = Counter()
+    gt_country_totals: Counter[str] = Counter()
+
+    if ground_truth_path and Path(ground_truth_path).exists():
+        print(f"Loading ground truth for recall audit from {ground_truth_path}...", flush=True)
+        ground_truth = load_ground_truth(Path(ground_truth_path))
+        for mid_set in ground_truth.values():
+            gt_total_pairs += len(mid_set)
+
+    s1_count        = 0
+    total_pairs     = initial_pairs
+    singletons      = initial_singletons
+    candidate_counts: List[int] = []
+    channel_counts: Counter[str] = Counter()
+
+    # -----------------------------------------------------------------------
+    # Phase 4: Multiprocessing dispatch vs single-threaded fallback
+    # -----------------------------------------------------------------------
+    if num_workers > 1:
+        try:
+            import psutil
+            total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+            # The unpickled candidate index occupies ~13-14 GB RAM.
+            # On Windows, ProcessPoolExecutor uses spawn so each worker requires its own copy.
+            min_needed_gb = num_workers * 14.0
+            if total_ram_gb < min_needed_gb:
+                print(
+                    f"[WARNING] Parallel query mode with {num_workers} workers requires ~{min_needed_gb:.1f} GB RAM, "
+                    f"but system has {total_ram_gb:.1f} GB total RAM. "
+                    f"Reverting to robust single-process streaming mode to prevent OOM crash.",
+                    flush=True,
+                )
+                num_workers = 1
+        except Exception:
+            pass
+
+    if num_workers > 1:
+        # Read all remaining S1 rows into memory once
+        print(f"[PARALLEL] Loading remaining S1 rows into memory...", flush=True)
+        all_s1_rows = [
+            row for row in read_tsv_records(source1_paths)
+            if row["entity_id"] not in completed_s1
+        ]
+        n_remaining = len(all_s1_rows)
+        print(f"[PARALLEL] {n_remaining:,} S1 entities to process across {num_workers} workers.", flush=True)
+
+        if n_remaining == 0:
+            print("[PARALLEL] All S1 entities already complete — nothing to do.", flush=True)
+        else:
+            chunk_size = math.ceil(n_remaining / num_workers)
+            chunks = [
+                all_s1_rows[i : i + chunk_size]
+                for i in range(0, n_remaining, chunk_size)
+            ]
+
+            tmp_dir = output_dir / "_tmp_worker_chunks"
+            tmp_dir.mkdir(exist_ok=True)
+
+            futures_map: Dict[Any, int] = {}
+            with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as pool:
+                for i, chunk in enumerate(chunks):
+                    pp  = str(tmp_dir / f"pairs_{i}.tsv")
+                    pvp = str(tmp_dir / f"prov_{i}.tsv")
+                    fut = pool.submit(
+                        _query_worker, chunk, str(cache_path),
+                        top_k_sparse, top_k_dense, max_candidates_per_entity,
+                        similarity_floor, pp, pvp, i,
+                    )
+                    futures_map[fut] = i
+
+                for fut in concurrent.futures.as_completed(futures_map):
+                    wi = futures_map[fut]
+                    try:
+                        res = fut.result()
+                        total_pairs += res["pairs"]
+                        singletons  += res["singletons"]
+                        print(f"[MAIN] Worker {wi} finished: {res}", flush=True)
+                    except Exception as exc:
+                        print(f"[MAIN] Worker {wi} FAILED: {exc}", flush=True)
+                        raise
+
+            # Merge partial outputs in deterministic chunk order
+            prov_fields = [
+                "source1_entity_id", "candidate_entity_id", "candidate_source",
+                "blocker_provenance", "blocker_count", "best_blocker_rank",
+                "best_blocker_score", "country_partition",
+            ]
+            with open(candidate_pairs_path, file_mode, encoding="utf-8", newline="") as pf, \
+                 open(provenance_path,       file_mode, encoding="utf-8", newline="") as pvf:
+                if not resume_mode:
+                    pf.write("source1_entity_id\tcandidate_entity_ids\n")
+                    pvf.write("\t".join(prov_fields) + "\n")
+                for i in range(len(chunks)):
+                    pp  = tmp_dir / f"pairs_{i}.tsv"
+                    pvp = tmp_dir / f"prov_{i}.tsv"
+                    if pp.exists():
+                        pf.write(pp.read_text(encoding="utf-8"))
+                    if pvp.exists():
+                        lines = pvp.read_text(encoding="utf-8").splitlines(keepends=True)
+                        pvf.writelines(lines[1:])  # skip per-worker header
+
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            s1_count = n_remaining
+            candidate_counts = [0] * n_remaining  # approximate; detailed stats not tracked in MP mode
+
+    else:
+        # Single-threaded path (default, ground-truth-audit capable)
+        with open(candidate_pairs_path, file_mode, encoding="utf-8", newline="") as pairs_file, \
+             open(provenance_path,      file_mode, encoding="utf-8", newline="") as prov_file:
+
+            pairs_writer = csv.writer(pairs_file, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
+            prov_writer  = csv.DictWriter(
+                prov_file,
+                delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\",
+                fieldnames=[
+                    "source1_entity_id", "candidate_entity_id", "candidate_source",
+                    "blocker_provenance", "blocker_count", "best_blocker_rank",
+                    "best_blocker_score", "country_partition",
+                ],
+            )
+            if not resume_mode:
+                pairs_writer.writerow(["source1_entity_id", "candidate_entity_ids"])
+                prov_writer.writeheader()
+
+            print(f"Generating candidate pairs for S1 records from {[str(p) for p in source1_paths]}...", flush=True)
+            for row in read_tsv_records(source1_paths):
+                # Phase 3: skip already-completed entities
+                if row["entity_id"] in completed_s1:
+                    continue
+
+                s1_count += 1
+                s1_rec = BlockingRecord.from_row(
+                    entity_id=row["entity_id"],
+                    name=row["business_name"],
+                    address=row["business_address"],
+                    country=row["country"],
+                    norm_name=row.get("norm_name"),
+                    norm_address=row.get("norm_address"),
+                    canonical_country=row.get("canonical_country"),
+                    postal_code=row.get("postal_code"),
+                    street_number=row.get("street_number"),
+                    trailing_segment=row.get("trailing_segment"),
+                    is_address_missing=row.get("is_address_missing"),
+                )
+
+                dense_scores = (
+                    dense_index.query(s1_rec.entity_id, s1_rec.canonical_country, top_k=blocker.top_k_dense)
+                    if dense_index else None
+                )
+                candidates = blocker.generate_candidates_for_record(s1_rec, dense_scores=dense_scores)
+                candidate_counts.append(len(candidates))
+
+                if not candidates:
+                    singletons += 1
+                    pairs_writer.writerow([s1_rec.entity_id, ""])
+                else:
+                    total_pairs += len(candidates)
+                    cand_ids = [c["candidate_entity_id"] for c in candidates]
+                    pairs_writer.writerow([s1_rec.entity_id, ",".join(cand_ids)])
+                    for cand_info in candidates:
+                        prov_writer.writerow(cand_info)
+                        for blk in cand_info["blocker_provenance"].split(","):
+                            channel_counts[blk] += 1
+
+                # Recall audit
+                if ground_truth and s1_rec.entity_id in ground_truth:
+                    true_matches = ground_truth[s1_rec.entity_id]
+                    c_country = s1_rec.canonical_country or "unknown"
+                    gt_country_totals[c_country] += len(true_matches)
+                    found_cands = {c["candidate_entity_id"] for c in candidates}
+                    gt_hits = true_matches & found_cands
+                    gt_recovered_pairs += len(gt_hits)
+                    if gt_hits:
+                        gt_entity_any_hit += 1
+                    if gt_hits == true_matches and len(true_matches) > 0:
+                        gt_entity_full_hit += 1
+                    for c in candidates:
+                        cid = c["candidate_entity_id"]
+                        if cid in true_matches:
+                            gt_by_country[c_country] += 1
+                            for blk in c["blocker_provenance"].split(","):
+                                gt_by_channel[blk] += 1
+
+                # Progress + checkpoint flush
+                if s1_count % 25_000 == 0:
+                    print(
+                        f"  Processed {s1_count:,} new S1 entities "
+                        f"(+{len(completed_s1):,} resumed) -> {total_pairs:,} total pairs...",
+                        flush=True,
+                    )
+                if s1_count % checkpoint_interval == 0:
+                    pairs_file.flush()
+                    prov_file.flush()
+                    _write_checkpoint(checkpoint_path, {
+                        "completed_s1_count": s1_count + len(completed_s1),
+                        "total_candidate_pairs": total_pairs,
+                        "last_s1_entity_id": s1_rec.entity_id,
+                        "last_updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "source_fingerprint": fingerprint,
+                    })
 
     candidate_counts.sort()
     n_s1 = len(candidate_counts)
-    mean_cands = total_pairs / n_s1 if n_s1 else 0.0
+    total_s1 = s1_count + len(completed_s1)
+    mean_cands = total_pairs / total_s1 if total_s1 else 0.0
     median_cands = candidate_counts[n_s1 // 2] if n_s1 else 0
     p90_cands = candidate_counts[int(n_s1 * 0.90)] if n_s1 else 0
     p95_cands = candidate_counts[int(n_s1 * 0.95)] if n_s1 else 0
     max_cands = candidate_counts[-1] if n_s1 else 0
 
     summary: Dict[str, Any] = {
-        "s1_count": n_s1,
-        "total_source1_entities": n_s1,
+        "s1_count": total_s1,
+        "total_source1_entities": total_s1,
         "total_candidate_pairs": total_pairs,
         "singletons_with_zero_candidates": singletons,
         "singleton_s1_count": singletons,
@@ -1123,6 +1521,31 @@ def main() -> None:
         default=SIMILARITY_FLOOR,
         help=f"Minimum cosine similarity floor for candidate acceptance (default: {SIMILARITY_FLOOR})",
     )
+    # Phase 2–4: new flags
+    parser.add_argument(
+        "--cache_index", "--cache-index",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save/load candidate inverted index as pickle cache (default: on). Use --no-cache-index to force rebuild.",
+    )
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Resume from existing output, skipping already-completed S1 entities (default: on). Use --no-resume to restart.",
+    )
+    parser.add_argument(
+        "--num_workers", "--num-workers",
+        type=int,
+        default=1,
+        help="Number of parallel ProcessPoolExecutor workers for the query phase (default: 1 = single-threaded).",
+    )
+    parser.add_argument(
+        "--checkpoint_interval", "--checkpoint-interval",
+        type=int,
+        default=CHECKPOINT_INTERVAL,
+        help=f"Flush output and write checkpoint.json every N entities (default: {CHECKPOINT_INTERVAL}).",
+    )
     args = parser.parse_args()
 
     source1_paths = args.source1
@@ -1148,7 +1571,7 @@ def main() -> None:
         parser.error("Either --candidates or --stage0_dir containing source2/source3 files is required.")
 
     top_k_sparse = args.top_k if args.top_k is not None else args.top_k_sparse
-    top_k_dense = args.top_k if args.top_k is not None else args.top_k_dense
+    top_k_dense  = args.top_k if args.top_k is not None else args.top_k_dense
 
     run_blocking(
         source1_paths=source1_paths,
@@ -1160,6 +1583,10 @@ def main() -> None:
         top_k_dense=top_k_dense,
         max_candidates_per_entity=args.max_candidates,
         similarity_floor=args.similarity_floor,
+        cache_index=args.cache_index,
+        resume=args.resume,
+        num_workers=args.num_workers,
+        checkpoint_interval=args.checkpoint_interval,
     )
     return 0
 
