@@ -15,13 +15,17 @@ Stage 4 is **strictly deterministic**:
 
 **Canonical Implementation:**
 - Code: `src/decision.py`.
-- CLI Invocation:
+- PowerShell Orchestrator:
+  ```powershell
+  .\scripts\04_inference_and_decision.ps1 -Split test
+  ```
+- Direct CLI Invocation:
   ```powershell
   python -m src.decision `
-      --scored ../../output/phase4_submission/scored_candidates.tsv `
-      --source1 ../../dataset/test/test_source1.tsv `
-      --metadata ../../output/phase3_gbm/stage3_metadata.json `
-      --output ../../output/phase4_submission/matching_results.tsv
+      --scored output/phase4_submission/scored_candidates.tsv `
+      --source1 dataset/test/test_source1.tsv `
+      --metadata output/phase3_gbm/stage3_metadata.json `
+      --output output/matching_results.tsv
   ```
 
 ---

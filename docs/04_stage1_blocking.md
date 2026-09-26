@@ -13,8 +13,20 @@ $$\text{Recall}_{\text{End-to-End}} \le \text{Recall}_{\text{Blocking}}$$
 Any true match dropped during Stage 1 is permanently lost and will score $0.0$ in precision and recall for that entity. Therefore, Stage 1 is deliberately engineered to be **recall-maximizing** ($\ge 98.0\%$), retaining candidate pairs with auditable provenance for downstream scoring.
 
 **Canonical Implementation:**
-- Code: `src/blocking.py` (`MultiChannelBlocker`, `build_candidate_pairs`).
-- CLI Invocation: `python -m src.blocking --stage0_dir ../../dataset/stage0_normalized --output_dir ../../output --top_k 50 --max_candidates 100`
+- Code: `src/blocking.py` (`MultiChannelBlocker`, `run_blocking`).
+- PowerShell Orchestrator: `scripts/01_run_blocking.ps1 -Split train`
+- Python CLI Invocation:
+  ```bash
+  python -m src.blocking \
+      --source1 dataset/train/train_source1.tsv \
+      --candidates dataset/train/train_source2.tsv dataset/train/train_source3.tsv \
+      --output-dir output/phase1_blocking_train \
+      --ground-truth dataset/train/train_ground_truth.tsv \
+      --max-candidates 50 \
+      --top-k-sparse 50 \
+      --top-k-dense 50 \
+      --similarity-floor 0.30
+  ```
 
 ---
 
@@ -148,7 +160,7 @@ country_partition         (US, India, or France)
 
 ## 6. The Mandatory Blocking Recall Audit Gate
 
-Before any Stage 2 feature engineering or Stage 3 classifier training begins, the candidate generation output is audited against `train_ground_truth.tsv` (executed directly via `src.blocking --ground-truth` or through `scripts/01_run_blocking.ps1`):
+Before any Stage 2 feature engineering or Stage 3 classifier training begins, the candidate generation output is audited against `train_ground_truth.tsv` (integrated directly into `src.blocking` via `--ground-truth` or orchestrated via `scripts/01_run_blocking.ps1 -Split train`):
 
 ### Audit Metric Targets:
 - **Pair-Level Recall:** $\ge 98.0\%$ of all $7,638,365$ ground-truth pairs present in candidates.

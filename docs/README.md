@@ -27,7 +27,7 @@ flowchart TD
     subgraph S2["Stage 2: Representation & Feature Engineering"]
         G1 --> F1["Stage 2a-i: Fine-Tuned BGE-M3 rsLoRA Dense Cosine"]
         G1 --> F2["Stage 2a-ii: Auxiliary Qwen3-Embedding-0.6B Cosine"]
-        G1 --> F3["Stage 2c: 32 Deterministic Lexical & Structural Features"]
+        G1 --> F3["Stage 2c: 35 Deterministic Lexical & Structural Features"]
         G1 -.-> F4["(Stretch) Stage 2b: Sliced Qwen3-0.6B Causal Matcher"]
         F1 & F2 & F3 & F4 --> M2["Grouped Feature Matrix (Grouped by S1 entity_id)"]
     end
@@ -59,7 +59,7 @@ The documentation suite is structured into fifteen self-contained, rigorously nu
 | [**`02_system_architecture.md`**](02_system_architecture.md) | **Master System Architecture & Execution Contract** | Authoritative system blueprint: 5-stage pipeline, execution ordering, stop rules, failure recovery protocols, v1 baseline roadmap vs stretch goals, dependency barriers. |
 | [**`03_stage0_normalization.md`**](03_stage0_normalization.md) | **Stage 0: Ingestion & Normalization Contract** | Country-agnostic Unicode NFKC normalization, legal suffix canonicalization (US, India, France), address abbreviation expansions, missing address sentinel handling, streaming chunked I/O. |
 | [**`04_stage1_blocking.md`**](04_stage1_blocking.md) | **Stage 1: Candidate Generation (Blocking)** | Multi-channel unioned candidate generation: exact name keys, char n-gram TF-IDF, BGE-M3 dense retrieval, hard country partitioning, similarity floor (0.30), cap (100), recall audit gate. |
-| [**`05_stage2_features_and_embeddings.md`**](05_stage2_features_and_embeddings.md) | **Stage 2: Representation & Feature Engineering** | Comprehensive feature design: Stage 2a-i (BGE-M3 rsLoRA), Stage 2a-ii (Qwen3-Embedding auxiliary), Stage 2b (stretch causal matcher), and Stage 2c (32 deterministic lexical, phonetic, and address features). |
+| [**`05_stage2_features_and_embeddings.md`**](05_stage2_features_and_embeddings.md) | **Stage 2: Representation & Feature Engineering** | Comprehensive feature design: Stage 2a-i (BGE-M3 rsLoRA), Stage 2a-ii (Qwen3-Embedding auxiliary), Stage 2b (stretch causal matcher), and Stage 2c (35 deterministic lexical, phonetic, and address features). |
 | [**`06_stage2a_bge_m3_training_spec.md`**](06_stage2a_bge_m3_training_spec.md) | **Stage 2a-i: BGE-M3 Bi-Encoder Training Spec** | LoRA rank-64 with rank-stabilized scaling ($\alpha / \sqrt{r} = 8$), `CachedMultipleNegativesRankingLoss`, VRAM budget on RTX 3060 12GB (~1.5GB overhead, ~10GB headroom), 4-layer anti-forgetting stack, bidirectional cross-country gate. |
 | [**`07_stage2b_qwen3_generative_matcher_spec.md`**](07_stage2b_qwen3_generative_matcher_spec.md) | **Stage 2b: Qwen3-0.6B Generative Matcher Spec** | Cross-record causal LM matcher (stretch): grounded in arXiv:2607.24688, prompt serialization, sequence length $S=224$ from EDA, ~29MB sliced verdict logits memory proof, 4-layer anti-forgetting. |
 | [**`08_stage3_scoring_and_calibration.md`**](08_stage3_scoring_and_calibration.md) | **Stage 3: Supervised Scoring & Calibration** | 5-fold Grouped-OOF XGBoost meta-learner, runtime dynamic `scale_pos_weight`, monotonic constraints, 15% country-match feature masking, Platt vs Isotonic calibration rules. |
@@ -92,30 +92,33 @@ The exploratory data analysis reports and visual matrices from the 24.2-million 
 The entire pipeline is automated via modular PowerShell scripts in `scripts/`:
 
 ```powershell
-# Phase 0: Environment & Smoke Verification
-./scripts/00_verify_environment.ps1
+# Phase 0: Environment & Hardware Verification
+.\scripts\00_verify_environment.ps1
 
-# Phase 1: Stage 0 Normalization & Stage 1 Multi-Channel Blocking & Recall Audit
-./scripts/01_run_blocking.ps1
+# Phase 1: Stage 0 Normalization & Stage 1 Multi-Channel Blocking
+.\scripts\01_run_blocking.ps1 -Split train
 
-# Phase 2a: Bi-Encoder LoRA Dataset Prep (50k US + 50k India balanced sampling)
-./scripts/02a_prepare_bi_encoder_data.ps1
+# Phase 2a: Bi-Encoder Data Preparation & Hard-Negative Mining
+.\scripts\02a_prepare_bi_encoder_data.ps1 -BidirectionalGate $true
 
-# Phase 2b: BGE-M3 rsLoRA Fine-Tuning & 2-Way Anti-Forgetting Gate
-./scripts/02b_train_and_eval_bi_encoder.ps1
+# Phase 2b: BGE-M3 rsLoRA Fine-Tuning with 4-Layer Anti-Forgetting
+.\scripts\02b_train_and_eval_bi_encoder.ps1
 
-# Phase 2c: Deterministic & Dense Pair Feature Extraction
-./scripts/02c_extract_pair_features.ps1
+# Phase 2b2 (Optional Stretch): Qwen3-0.6B Causal Generative Matcher
+.\scripts\02b2_train_and_eval_qwen_matcher.ps1
 
-# Phase 3: Stage 3 Grouped-OOF XGBoost Training & Probability Calibration
-./scripts/03_train_scoring_gbm.ps1
+# Phase 2c: 35 Deterministic + Dense Pair Feature Extraction
+.\scripts\02c_extract_pair_features.ps1 -Split train
 
-# Phase 4: Stage 4 Candidate Scoring, F0.5 Thresholding & Decision
-./scripts/04_inference_and_decision.ps1
+# Phase 3: Stage 3 Supervised XGBoost Training & Probability Calibration
+.\scripts\03_train_scoring_gbm.ps1 -Booster gbtree -CompareDART $true
 
-# Phase 5: Submission Validation & Audit
-./scripts/05_validate_submission.ps1
+# Phase 4: Stage 4 Inference, Calibration & 1-to-N Injective Assignment
+.\scripts\04_inference_and_decision.ps1 -Split test
 
-# Master Orchestrator: Run All Phases End-to-End
-./scripts/run_all_phases.ps1 -DryRun
+# Phase 5: Submission Package Verification
+.\scripts\05_validate_submission.ps1
+
+# Or run the entire end-to-end pipeline in one command:
+.\scripts\run_all_phases.ps1 -DryRun
 ```

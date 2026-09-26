@@ -80,7 +80,7 @@ $$\text{If } Y_i \neq \emptyset \text{ and } \hat{Y}_i = \emptyset \implies F_{0
 | **FR-4** | Multi-feature supervised classifier scoring rather than raw similarity thresholding. | Single scalar thresholds cannot distinguish "same name, different city" look-alikes from true matches. Requires orthogonal feature capacity. | [`docs/08_stage3_scoring_and_calibration.md`](08_stage3_scoring_and_calibration.md) |
 | **FR-5** | Explicit probability calibration (Platt / Isotonic) prior to decision logic. | Raw tree boosting probabilities suffer from distortion under severe negative-to-positive class imbalance ($\approx 30:1$). | [`docs/08_stage3_scoring_and_calibration.md`](08_stage3_scoring_and_calibration.md) |
 | **FR-6** | Greedy 1-to-N injective assignment enforcing mutual exclusivity. | Empirical ground-truth topology proves that an $S_2$ or $S_3$ record matches at most one $S_1$ entity (`s2_multi=0`, `s3_multi=0`). | [`docs/09_stage4_decision_and_singletons.md`](09_stage4_decision_and_singletons.md) |
-| **FR-7** | Generation of leaderboard submission `matching_results.tsv`. | Exactly one line per $S_1$ entity. Format: `entity_id\tmatched_ids` (comma-separated, or empty for singletons). | `output/matching_results.tsv` |
+| **FR-7** | Generation of leaderboard submission `matching_results.tsv`. | Exactly one line per $S_1$ entity. Format: `source1_entity_id\tmatched_entity_ids` (comma-separated, or empty for singletons). | `output/matching_results.tsv` |
 | **FR-8** | Pre-submission schema validation via `utils/validate_submission.py`. | Verifies TSV headers, entity count integrity, ID existence, absence of duplicate links, and self-match freedom. | `utils/validate_submission.py` |
 
 ---

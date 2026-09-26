@@ -40,7 +40,7 @@ flowchart TD
     subgraph S2["Stage 2: Representation & Feature Extraction"]
         CP_TSV --> F_2ai["Stage 2a-i: Fine-Tuned BGE-M3 LoRA Cosine Similarity"]
         CP_TSV --> F_2aii["Stage 2a-ii: Auxiliary Off-the-Shelf Qwen3-0.6B Cosine Similarity"]
-        CP_TSV --> F_2c["Stage 2c: 32 Deterministic Lexical, Phonetic, Address Features"]
+        CP_TSV --> F_2c["Stage 2c: 35 Deterministic Lexical, Phonetic, Address Features"]
         CP_TSV -.-> F_2b["(Stretch) Stage 2b: Qwen3-0.6B Causal Generative Matcher"]
         F_2ai & F_2aii & F_2c & F_2b --> MATRIX["Grouped Feature Matrix (Grouped by S1)"]
     end
@@ -99,7 +99,7 @@ flowchart TD
   - **Stage 2a-i (Primary Bi-Encoder):** BGE-M3 fine-tuned with rank-64 rsLoRA on competition pairs using `CachedMultipleNegativesRankingLoss` with 4-layer anti-forgetting. Emits dense cosine similarity.
   - **Stage 2a-ii (Auxiliary Bi-Encoder):** Off-the-shelf Qwen3-Embedding-0.6B (Apache-2.0). Evaluated with identical symmetric prompts on both records. Emits auxiliary cosine similarity.
   - **Stage 2b (Stretch Generative Matcher):** Qwen3-0.6B causal LM fine-tuned with LoRA on serialized record pairs (`[COL]`/`[VAL]`). Computes sliced verdict-token probability $P(\text{Yes} \mid \text{pair})$.
-  - **Stage 2c (Deterministic Features):** 32 hand-crafted features spanning string distances (Levenshtein, Jaro-Winkler, Jaccard), address match flags (postal code equality, street number equality, missing address indicator), phonetic equality, blocking rank, ambiguity counts, and a derived symmetric country-match flag.
+  - **Stage 2c (Deterministic Features):** 35 hand-crafted features spanning string distances (Levenshtein, Jaro-Winkler, Jaccard), address match flags (postal code equality, street number equality, missing address indicator), phonetic equality, blocking rank, ambiguity counts, and a derived symmetric country-match flag.
 - **Output:** Feature matrix grouped by $S_1$ entity ID.
 - **Specifications:** [`docs/05_stage2_features_and_embeddings.md`](05_stage2_features_and_embeddings.md), [`docs/06_stage2a_bge_m3_training_spec.md`](06_stage2a_bge_m3_training_spec.md), [`docs/07_stage2b_qwen3_generative_matcher_spec.md`](07_stage2b_qwen3_generative_matcher_spec.md).
 
@@ -107,7 +107,7 @@ flowchart TD
 - **Input:** Grouped feature matrix from Stage 2.
 - **Processing:**
   - **Grouping:** 5-fold cross-validation strictly grouped by $S_1$ entity ID to prevent data leakage across pairs.
-  - **Model:** XGBoost (`tree_method="hist"`, `max_depth=4`, `learning_rate=0.03`, `subsample=0.85`, `colsample_bytree=0.85`, `reg_alpha=0.1`, `reg_lambda=1.0`).
+  - **Model:** XGBoost (`tree_method="hist"`, `max_depth=4`, `learning_rate=0.03`, `subsample=0.85`, `colsample_bytree=0.85`, `reg_alpha=0.1`, `reg_lambda=1.0`, booster selectable via `gbtree` or `dart`).
   - **Class Imbalance:** `scale_pos_weight = N_neg / N_pos` computed at runtime from the actual candidate set.
   - **Monotonic Constraints:** $+1$ monotonic constraint enforced on all similarity features (string similarity, bi-encoder cosine). Monotonic constraints are strictly prohibited on country-match flags.
   - **Calibration:** Out-of-fold probability calibration using Platt scaling ($<1,000$ OOF positives) or Isotonic regression ($>10,000$ OOF positives).
@@ -117,7 +117,7 @@ flowchart TD
 ### 3.5 Stage 4: Decision Engine & Injective Assignment
 - **Input:** Calibrated candidate probabilities from Stage 3.
 - **Processing:**
-  - **Threshold Sweep:** Sweep cutoffs $\tau \in [0.05, 0.95]$ with step $0.01$ over out-of-fold predictions, evaluating full macro $F_{0.5}$ (including singleton penalty/reward). Optimal cutoff typically resolves to $\tau^* \approx 0.70 - 0.85$.
+  - **Threshold Sweep:** Sweep cutoffs $\tau \in [0.05, 0.95]$ with step $0.01$ over out-of-fold predictions, evaluating full macro $F_{0.5}$ (including singleton penalty/reward via fast pre-grouped credit aggregation). Optimal cutoff typically resolves to $\tau^* \approx 0.70 - 0.85$.
   - **Injective Bipartite Matching:** Candidates exceeding $\tau^*$ are processed in descending order of score. An $S_2$ or $S_3$ entity is assigned to at most one $S_1$ entity; subsequent competing claims are rejected.
   - **Singleton Handling:** Entities with zero candidates surviving thresholding and injective assignment are emitted as empty strings (abstention).
 - **Output:** Final submission artifact `output/matching_results.tsv`.
@@ -144,31 +144,33 @@ To ensure complete, risk-free execution within the competition timeline on an **
         │
         ▼
 [Phase 2: Representation & Feature Engineering]
-  02a_prepare_bi_encoder_data.ps1 (50k US + 50k India balanced sampling & IR eval splits)
+  02a_prepare_bi_encoder_data.ps1 (50k US + 50k India balanced sampling & hard-negative mining)
   02b_train_and_eval_bi_encoder.ps1 (BGE-M3 rsLoRA rank-64 fine-tuning with anti-forgetting & weight merge)
-  02c_extract_pair_features.ps1 (32 deterministic features + bi-encoder dense cosine)
+  02c_extract_pair_features.ps1 (35 deterministic features + bi-encoder / Qwen cosine)
         │
         ▼
 [Phase 3: Stage 3 Grouped-OOF Classifier & Calibration]
-  03_train_scoring_gbm.ps1 (5-fold Grouped-OOF XGBoost training + probability calibration)
+  03_train_scoring_gbm.ps1 (5-fold Grouped-OOF XGBoost training + Platt/Isotonic calibration)
         │
         ▼
 [Phase 4: Candidate Scoring & Stage 4 Decision]
-  04_inference_and_decision.ps1 (Inference + Macro F0.5 threshold sweep + singleton assignment)
+  04_inference_and_decision.ps1 (Scoring candidates + Macro F0.5 threshold sweep + 1-to-N injective assignment)
         │
         ▼
 [Phase 5: Competition Submission Validation]
-  05_validate_submission.ps1 (Strict submission format & containment validation)
+  05_validate_submission.ps1 (utils/validate_submission.py formal audit)
         │
         ▼
   [BASELINE V1 DELIVERABLE SECURED & SHIPPABLE]
         │
         ▼
-[Phase 5: Conditional Stretch Enhancements (Only if time permits)]
-  ├── Step A: Stage 2a-ii Qwen3-Embedding-0.6B auxiliary feature (free inference)
-  ├── Step B: Stage 2b Qwen3-0.6B Causal Generative Matcher (arXiv:2607.24688)
-  └── Step C: DART boosting mode & TreeSHAP feature attribution
+[Stretch Enhancements (Conditional)]
+  ├── 02b2_train_and_eval_qwen_matcher.ps1 (Qwen3-0.6B Causal Generative Matcher, arXiv:2607.24688)
+  ├── Step B: Auxiliary Qwen3-Embedding-0.6B cosine feature
+  └── Step C: DART boosting mode (-Booster dart) & TreeSHAP feature attribution
 ```
+
+All phases can also be executed end-to-end via the master orchestrator `scripts/run_all_phases.ps1` (supporting `-DryRun`, `-Booster gbtree|dart`, and `-CompareDART`).
 
 ---
 
@@ -191,12 +193,12 @@ Per the official competition guidelines, deliverables follow two distinct schedu
 
 1. **Leaderboard Uploads (Round-1 Continuous Submissions):**
    - File: `output/matching_results.tsv` only.
-   - Format: Tab-separated (`entity_id\tmatched_ids`).
+   - Format: Tab-separated (`source1_entity_id\tmatched_entity_ids`).
    - S1 row count must exactly match `test_source1.tsv` ($1,732,544$ rows).
 2. **Final Audited Package (For Qualifying Teams):**
    - Clean zipped archive containing:
-     - `output/matching_results.tsv` (Leaderboard submission).
-     - `output/candidate_pairs.tsv` (Auditable candidate blocking output; strict superset of matches).
+     - `output/matching_results.tsv` (Leaderboard submission with header `source1_entity_id\tmatched_entity_ids`).
+     - `output/candidate_pairs.tsv` (Auditable candidate blocking output with header `source1_entity_id\tcandidate_entity_ids`; strict superset of matches).
      - `code/business_entity_resolution/` (Complete, runnable Python codebase).
      - `scripts/` (Automated PowerShell orchestration runners).
      - `Documentation_template.md` (Detailed methodology write-up with zero page limit).

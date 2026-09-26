@@ -11,7 +11,11 @@ Stage 0 performs **strictly intra-record normalization**. It does not construct 
 
 **Canonical Implementation:**
 - Code: `src/normalize.py` and `src/data_builder.py` (`normalize_tsv_file`, `normalize_entity_record`).
-- CLI Invocation: `python -m src.data_builder --mode stage0_normalize --data_dir ../../dataset --output_dir ../../dataset/stage0_normalized --splits train test`
+- PowerShell Orchestrator: `scripts/01_run_blocking.ps1 -Split train -RunStage0`
+- Python CLI Invocation:
+  ```bash
+  python -m src.data_builder --mode stage0_normalize --data_dir dataset --output_dir output/stage0_normalized --splits train test
+  ```
 
 ---
 

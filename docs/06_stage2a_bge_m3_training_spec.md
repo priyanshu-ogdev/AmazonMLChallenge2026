@@ -142,15 +142,20 @@ The memory footprint is computed directly from first principles to guarantee zer
 Because France is completely absent from the training set, cross-country generalization cannot be directly measured on French data. Cross-country transfer between **United States** and **India** serves as the verified empirical proxy:
 
 ```powershell
-# 1. Prepare bidirectional benchmarks
-python -m src.data_builder --bidirectional_gate --data_dir ../../dataset --output_dir ../../dataset/gate_benchmarks
+# Automated PowerShell Orchestration:
+.\scripts\02a_prepare_bi_encoder_data.ps1 -BidirectionalGate $true
+.\scripts\02b_train_and_eval_bi_encoder.ps1
 
-# 2. Train directional models
-python -m src.train_bi_encoder --direction us_to_india
-python -m src.train_bi_encoder --direction india_to_us
+# Direct Python Invocation:
+# 1. Prepare bidirectional benchmarks
+python -m src.data_builder --mode train_data --bidirectional_gate --data_dir dataset --output_dir output/phase2_prepared_data
+
+# 2. Train directional models (requires 'train' subparser)
+python -m src.train_bi_encoder train --data_dir output/phase2_prepared_data --output_dir output/phase2_models/gate_us_to_india --direction us_to_india
+python -m src.train_bi_encoder train --data_dir output/phase2_prepared_data --output_dir output/phase2_models/gate_india_to_us --direction india_to_us
 
 # 3. Evaluate bidirectional gate against frozen baseline
-python -m src.eval_bi_encoder --direction bidirectional
+python -m src.eval_bi_encoder --data_dir output/phase2_prepared_data --checkpoint output/phase2_models/gate_us_to_india --direction bidirectional
 ```
 
 ### Gate Acceptance Criteria:

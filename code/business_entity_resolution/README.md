@@ -171,14 +171,21 @@ All parameters are in `src/config.py` with detailed rationale comments. Key valu
 
 ```
 src/
-├── config.py              # All configuration (LoRA, training, data, eval)
-├── normalize.py           # Country-agnostic text normalization (Stage 0)
-├── data_builder.py        # Training data construction (CPU)
-├── losses.py              # CachedMNRL + self-distillation loss
-├── train_bi_encoder.py    # Main training script (GPU)
-├── eval_bi_encoder.py     # Held-out country evaluation
-├── qwen_features.py       # Stage 2a-ii Qwen3 auxiliary dense pair features
-└── pair_features.py       # Stage 2c deterministic pair features
+├── config.py                 # All configuration (LoRA, training, data, eval)
+├── normalize.py              # Country-agnostic text normalization & field parsing (Stage 0)
+├── blocking.py               # Multi-channel candidate generation & recall audit (Stage 1)
+├── data_builder.py           # Training data construction & hard-negative mining (Phase 2a)
+├── losses.py                 # CachedMNRL + self-distillation loss
+├── train_bi_encoder.py       # BGE-M3 rsLoRA training & merge CLI (Stage 2a-i)
+├── eval_bi_encoder.py        # Held-out country gate evaluation
+├── bge_features.py           # Stage 2a-i dense BGE-M3 cosine similarity features
+├── qwen_features.py          # Stage 2a-ii auxiliary Qwen3 dense features
+├── train_qwen_matcher.py     # Stage 2b Qwen3-0.6B causal generative matcher (stretch)
+├── qwen_matcher_features.py  # Stage 2b generative matcher sliced verdict probabilities
+├── pair_features.py          # Stage 2c deterministic 35 pair features
+├── scoring.py                # Stage 3 Grouped-OOF XGBoost meta-learner & threshold sweep
+├── calibration.py            # Stage 3 Platt & Isotonic probability calibration
+└── decision.py               # Stage 4 greedy 1-to-N injective assignment (matching_results.tsv)
 ```
 
 ## Stage 2a-ii: Qwen auxiliary feature generation

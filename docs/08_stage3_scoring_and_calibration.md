@@ -5,7 +5,7 @@
 
 ## 1. Executive Summary & Design Scope
 
-**Stage 3** serves as the supervised meta-learner of the entity resolution pipeline. It takes the multi-dimensional feature representations produced in Stage 2 (dense bi-encoder similarities, optional generative matcher probabilities, and 32 deterministic lexical/structural features) and learns a calibrated probability of match:
+**Stage 3** serves as the supervised meta-learner of the entity resolution pipeline. It takes the multi-dimensional feature representations produced in Stage 2 (dense bi-encoder similarities, optional generative matcher probabilities, and 35 deterministic lexical/structural features) and learns a calibrated probability of match:
 
 $$P(\text{Match} \mid \mathbf{x}) \in [0.0, 1.0]$$
 
@@ -14,19 +14,24 @@ The architecture of Stage 2 feeding Stage 3 is theoretically grounded in **Stack
 
 **Canonical Implementation:**
 - Code: `src/scoring.py` and `src/calibration.py`.
-- CLI Invocation:
+- PowerShell Orchestrator:
+  ```powershell
+  .\scripts\03_train_scoring_gbm.ps1 -Booster gbtree -CompareDART $true
+  ```
+- Direct CLI Invocation:
   ```powershell
   python -m src.scoring `
       --mode train `
-      --features ../../output/phase2_features_train/pair_features.tsv `
-      --bge-features ../../output/phase2_features_train/bge_pair_features.tsv `
-      --qwen-features ../../output/phase2_features_train/qwen_pair_features.tsv `
-      --qwen-matcher-features ../../output/phase2_features_train/qwen_matcher_features.tsv `
-      --ground-truth ../../dataset/train/train_ground_truth.tsv `
-      --output-dir ../../output/phase3_gbm `
+      --features output/phase2_features_train/pair_features.tsv `
+      --bge-features output/phase2_features_train/bge_pair_features.tsv `
+      --qwen-features output/phase2_features_train/qwen_pair_features.tsv `
+      --qwen-matcher-features output/phase2_features_train/qwen_matcher_features.tsv `
+      --ground-truth dataset/train/train_ground_truth.tsv `
+      --output-dir output/phase3_gbm `
       --country-mask-rate 0.15 `
       --use-monotone-constraints `
       --booster gbtree `
+      --compare-dart `
       --eta 0.03
   ```
 
@@ -131,15 +136,22 @@ Because Platt scaling only fits two parameters ($A$ and $B$), it is immune to ov
 ### 5.2 Isotonic Regression
 Fits a non-parametric, monotonic step function minimizing mean squared error:
 $$\min \sum_{i=1}^N \left(y_i - f(z_i)\right)^2 \quad \text{subject to } f(z_i) \le f(z_j) \text{ whenever } z_i \le z_j$$
-Isotonic regression offers higher capacity but will severely overfit if calibration volume is small.
+Isotonic regression offers higher capacity but will severely overfit if calibration volume is small. Serialized calibrator metadata exports both `"method"` and `"name"` parameters to guarantee downstream compatibility.
+
+### 5.3 Macro $F_{0.5}$ Threshold Optimization with Fast Singleton Accounting
+In `src/scoring.py`'s `choose_threshold()`, candidates are swept across thresholds $\tau \in [0.05, 0.95]$ with step $0.01$. The search is accelerated to sub-second runtime via pre-grouped entity pair indices and exact analytical singleton credit tracking:
+- S1 entities with true matches $Y_i \neq \emptyset$: $F_{0.5} = \frac{1.25 \cdot \text{TP}}{1.25 \cdot \text{TP} + 0.25 \cdot \text{FP} + \text{FN}}$
+- True singleton S1 entities ($Y_i = \emptyset$): Score $1.0$ if no candidate exceeds $\tau$, and $0.0$ if any false positive candidate is accepted.
+Pre-computing the base singleton credit reduces the evaluation from $418\text{M}$ inner loops down to vectorized dictionary lookups with exact numerical fidelity.
 
 ---
 
-## 6. Escalation Paths: DART & Custom Losses
+## 6. Escalation Paths: DART & Comparative Diagnostics
 
 - **DART (Dropouts meet Multiple Additive Regression Trees):** Rashmi & Gilad-Bachrach (*AISTATS 2015*). DART mutes a random subset of previous trees during each boosting round, preventing early trees from dominating the ensemble.
-  - *Trigger Condition:* DART is activated (`--booster dart`) only if a persistent cross-country generalization gap ($\Delta \text{AUCPR} > 0.05$) remains after regularized GBDT training.
-  - *Runtime Implementation:* In modern XGBoost (3.x+), the C++ engine (`learner.cc:343`) aliases `booster=dart` to the tree booster with dropout parameters (`rate_drop=0.10`, `skip_drop=0.50`, `sample_type="uniform"`, `normalize_type="tree"`). Setting these parameters executes the exact mathematical DART algorithm (producing bit-for-bit identical outputs to `booster="dart"`) while avoiding learner deprecation warnings.
+  - *Runtime Implementation:* `src/scoring.py` natively supports `--booster gbtree` and `--booster dart` (`rate_drop=0.10`, `skip_drop=0.50`, `sample_type="uniform"`, `normalize_type="tree"`).
+  - *Booster Invariance Assertion:* At training and load time, `actual_booster == booster` is asserted, and the booster choice is persisted in `stage3_metadata.json`. At inference time, `load_model()` explicitly instantiates the matching booster class before loading weights.
+  - *Comparative Diagnostic:* Passing `--compare-dart` triggers an automated comparative benchmark running both GBDT and DART through cross-country diagnostics (US $\leftrightarrow$ India) to empirically test whether tree dropout mitigates out-of-domain degradation.
 - **Focal Loss / Beta-Weighted Loss:** Tested only if standard `binary:logistic` fails to separate hard negatives. When testing focal loss, `scale_pos_weight` must be completely removed.
 
 ---

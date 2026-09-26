@@ -100,13 +100,13 @@ The logits tensor collapses from **~3.27–6.54 GB down to ~29 MB** (a **$224\ti
 |---|---|---|
 | **Base Model Weights** | Qwen3-0.6B (~596M params in bf16, frozen) | ~1.19 GB |
 | **Reference Model Weights** | Qwen3-0.6B frozen for self-distillation (bf16) | ~1.19 GB |
-| **LoRA Trainable Parameters** | Rank 64, all linear layers (~10.2M params in fp32) | ~0.04 GB |
-| **Optimizer States** | AdamW (fp32 momentum + variance on LoRA params only) | ~0.08 GB |
+| **LoRA Trainable Parameters** | Rank 64, all linear layers (~40.4M params in fp32) | ~0.16 GB |
+| **Optimizer States** | AdamW (fp32 master + 2 moments on LoRA params: 12 B/param) | ~0.48 GB |
 | **Forward Activations** | Batch 48, Seq 224, with gradient checkpointing enabled | ~1.85 GB |
-| **Sliced Verdict Logits** | Shape `[48, 1, 152064]` in fp32 (both student and teacher) | ~0.06 GB (~58 MB) |
+| **Sliced Verdict Logits** | Shape `[48, 1, 151936]` in fp32 (both student and teacher) | ~0.06 GB (~58 MB) |
 | **PyTorch & CUDA Workspace** | Driver context, memory fragmentation buffer | ~0.85 GB |
-| **Total Peak VRAM Allocation** | Physical Batch 48, Gradient Checkpointing On | **~5.26 GB** |
-| **Available Headroom on RTX 3060** | 12.00 GB total capacity | **~6.74 GB Headroom (56% free)** |
+| **Total Peak VRAM Allocation** | Physical Batch 48, Gradient Checkpointing On | **~5.78 GB** |
+| **Available Headroom on RTX 3060** | 12.00 GB total capacity | **~6.22 GB Headroom (52% free)** |
 
 ---
 

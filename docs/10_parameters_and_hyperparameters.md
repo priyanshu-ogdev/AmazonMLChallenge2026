@@ -83,6 +83,7 @@ To maintain scientific integrity (as established in our hyperparameter verificat
 | `objective` | `"binary:logistic"` | Constant | Binary cross-entropy modeling match probability. |
 | `eval_metric` | `"aucpr"` | Constant | Area under Precision-Recall curve; invariant to extreme class imbalance. |
 | `tree_method` | `"hist"` | Constant | High-speed exact histogram binning. |
+| `booster` | `"gbtree"` or `"dart"` | Model Architecture | Selectable tree booster (`gbtree` default, `dart` with `rate_drop=0.10`, `skip_drop=0.50`). Verified via runtime invariance assertion. |
 | `learning_rate` ($\eta$) | `0.03` | Step 1 (Primary) | Conservative shrinkage (Friedman 2001) for superior out-of-domain transfer. |
 | `max_depth` | `4` | Step 2 (Secondary) | Shallow trees prevent leaf memorization on rare positive candidate pairs. |
 | `min_child_weight` | `5` | Step 3 (Tertiary) | Prevents carving isolated leaves around small clusters of positive pairs. |
