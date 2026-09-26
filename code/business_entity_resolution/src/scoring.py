@@ -80,6 +80,7 @@ def build_monotonic_constraints(columns: Sequence[str]) -> Tuple[int, ...]:
     positive_features = {
         "bge_cosine",
         "qwen_cosine",
+        "qwen_matcher_prob",
         "tfidf_cosine",
         "name_exact",
         "address_exact",
@@ -379,6 +380,7 @@ def score_candidates(
     artifact_dir: Path,
     qwen_file: Optional[Path] = None,
     bge_file: Optional[Path] = None,
+    qwen_matcher_file: Optional[Path] = None,
     records: Optional[Dict[str, str]] = None,
 ) -> pd.DataFrame:
     """Score a candidate table with saved model, calibration, and threshold."""
@@ -387,6 +389,13 @@ def score_candidates(
     frame = pd.read_csv(feature_file, sep="\t", dtype=str, keep_default_na=False)
     frame = merge_feature_file(frame, qwen_file)
     frame = merge_feature_file(frame, bge_file)
+    # qwen_matcher_file is Stage 2b (stretch, docs/07_stage2b_...): pass None
+    # whenever the held-out-country gate hasn't been run or has failed. The
+    # GBM's feature_columns metadata from training already reflects whether
+    # this column existed at fit time, so no special-casing is needed here --
+    # prepare_matrix() below will raise clearly if the saved model expects a
+    # column this call didn't provide, rather than silently scoring without it.
+    frame = merge_feature_file(frame, qwen_matcher_file)
 
     tfidf_path = artifact_dir / "tfidf_vectorizer.joblib"
     if tfidf_path.exists():
@@ -727,6 +736,7 @@ def run_training(
     output_dir: Path,
     qwen_file: Optional[Path] = None,
     bge_file: Optional[Path] = None,
+    qwen_matcher_file: Optional[Path] = None,
     source1_files: Optional[Sequence[Path]] = None,
     candidate_source_files: Optional[Sequence[Path]] = None,
     booster: str = "gbtree",
@@ -752,6 +762,12 @@ def run_training(
     frame = pd.read_csv(feature_file, sep="\t", dtype=str, keep_default_na=False)
     frame = merge_feature_file(frame, qwen_file)
     frame = merge_feature_file(frame, bge_file)
+    # Stage 2b (stretch): only merged when the held-out-country gate passed
+    # and the caller explicitly provides the file. Training with this column
+    # absent is the normal v1 path; training with it present is what makes
+    # its presence show up in metadata["feature_columns"] for score_candidates
+    # to require consistently at inference time.
+    frame = merge_feature_file(frame, qwen_matcher_file)
 
     # Optional records loading for fold-safe TF-IDF cosine feature
     records = None
@@ -845,6 +861,13 @@ def main() -> None:
     parser.add_argument("--output-file", type=Path, default=None, help="Path for scored output TSV (score)")
     parser.add_argument("--qwen-features", type=Path, default=None)
     parser.add_argument("--bge-features", type=Path, default=None)
+    parser.add_argument(
+        "--qwen-matcher-features", type=Path, default=None,
+        help="Stage 2b (stretch) generative-matcher features TSV. Omit entirely "
+             "if the held-out-country gate hasn't passed -- do not pass a partial "
+             "or untrusted file, since --use-monotone-constraints will happily "
+             "train +1-constrained on whatever column this points to.",
+    )
     parser.add_argument("--source1", type=Path, nargs="+", default=None)
     parser.add_argument("--candidate-sources", type=Path, nargs="+", default=None)
     parser.add_argument("--booster", type=str, choices=["gbtree", "dart"], default="gbtree")
@@ -867,6 +890,7 @@ def main() -> None:
             output_dir=args.output_dir,
             qwen_file=args.qwen_features,
             bge_file=args.bge_features,
+            qwen_matcher_file=args.qwen_matcher_features,
             source1_files=args.source1,
             candidate_source_files=args.candidate_sources,
             booster=args.booster,
@@ -883,6 +907,7 @@ def main() -> None:
             artifact_dir=artifact_dir,
             qwen_file=args.qwen_features,
             bge_file=args.bge_features,
+            qwen_matcher_file=args.qwen_matcher_features,
             records=records,
         )
         args.output_file.parent.mkdir(parents=True, exist_ok=True)

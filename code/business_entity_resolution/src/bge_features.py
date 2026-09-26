@@ -144,6 +144,14 @@ def build_bge_features(
         )
 
     entity_ids = sorted({entity_id for pair in candidate_pairs for entity_id in pair})
+    # Track which entities had empty normalized text: an embedding of "" is a
+    # real vector, not NaN, so it would otherwise look like a genuine (low)
+    # similarity score to the GBM rather than an untrustworthy one. This
+    # mirrors the name_both_missing/address_both_missing pattern already used
+    # in pair_features.py for the hand-crafted (2c) features.
+    empty_text_ids = {
+        entity_id for entity_id in entity_ids if not records[entity_id].strip()
+    }
     encoder = BGEEntityEncoder(
         model_name=model_name,
         max_seq_length=max_seq_length,
@@ -161,12 +169,15 @@ def build_bge_features(
                 "source1_entity_id": source1_id,
                 "candidate_entity_id": candidate_id,
                 "bge_cosine": similarity,
+                "bge_cosine_missing": int(
+                    source1_id in empty_text_ids or candidate_id in empty_text_ids
+                ),
             }
         )
 
     result = pd.DataFrame(
         rows,
-        columns=["source1_entity_id", "candidate_entity_id", "bge_cosine"],
+        columns=["source1_entity_id", "candidate_entity_id", "bge_cosine", "bge_cosine_missing"],
     )
     output_file.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_file, sep="\t", index=False)

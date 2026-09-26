@@ -52,6 +52,7 @@ class TestStage3Scoring(unittest.TestCase):
         cols = [
             "bge_cosine",
             "qwen_cosine",
+            "qwen_matcher_prob",
             "name_exact",
             "address_edit_similarity",
             "same_name_different_address",
@@ -75,6 +76,7 @@ class TestStage3Scoring(unittest.TestCase):
         expected = (
             1,   # bge_cosine -> +1
             1,   # qwen_cosine -> +1
+            1,   # qwen_matcher_prob -> +1 (Stage 2b generative-matcher probability)
             1,   # name_exact -> +1
             1,   # address_edit_similarity -> +1
             -1,  # same_name_different_address -> -1
@@ -696,6 +698,110 @@ class TestStage3Scoring(unittest.TestCase):
         self.assertIn("train_others_eval_india", res)
         self.assertIn("mean_held_out_country_ap", res)
         self.assertGreater(res["mean_held_out_country_ap"], 0.0)
+
+    def test_qwen_matcher_features_integration(self):
+        """Verify Stage 2b generative-matcher features integrate into training and scoring."""
+        pair_file = self.output_dir / "matcher_pairs.tsv"
+        gt_file = self.output_dir / "matcher_gt.tsv"
+        matcher_file = self.output_dir / "matcher_feats.tsv"
+        stage3_dir = self.output_dir / "matcher_stage3"
+
+        pair_data = []
+        gt_data = []
+        matcher_data = []
+        for i in range(1, 7):
+            s1_id = f"S1-{i}"
+            pos_id = f"S2-pos-{i}"
+            neg_id = f"S2-neg-{i}"
+            gt_data.append({"source1_entity_id": s1_id, "matched_entity_ids": pos_id})
+
+            for cand_id, is_pos in [(pos_id, 1), (neg_id, 0)]:
+                pair_data.append({
+                    "source1_entity_id": s1_id,
+                    "candidate_entity_id": cand_id,
+                    "source1_country": "US",
+                    "candidate_country": "US",
+                    "source1_canonical_country": "us",
+                    "candidate_canonical_country": "us",
+                    "source_is_s3": 0,
+                    "country_equal": 1,
+                    "country_equal_missing": 0,
+                    "left_country_missing": 0,
+                    "right_country_missing": 0,
+                    "name_both_missing": 0,
+                    "address_both_missing": 0,
+                    "name_exact": is_pos,
+                    "address_exact": is_pos,
+                    "name_jaccard": 0.9 if is_pos else 0.1,
+                    "name_overlap": 0.9 if is_pos else 0.1,
+                    "name_edit_similarity": 0.9 if is_pos else 0.1,
+                    "name_char_trigram_jaccard": 0.9 if is_pos else 0.1,
+                    "address_jaccard": 0.9 if is_pos else 0.1,
+                    "address_overlap": 0.9 if is_pos else 0.1,
+                    "address_edit_similarity": 0.9 if is_pos else 0.1,
+                    "address_char_trigram_jaccard": 0.9 if is_pos else 0.1,
+                    "name_number_overlap": 1.0 if is_pos else 0.0,
+                    "address_number_overlap": 1.0 if is_pos else 0.0,
+                    "postal_equal": is_pos,
+                    "postal_missing_either": 0,
+                    "name_length_abs_diff": 0 if is_pos else 10,
+                    "address_length_abs_diff": 0 if is_pos else 10,
+                    "same_name_different_address": 0,
+                    "same_address_different_name": 0,
+                    "candidate_rank": 1.0 if is_pos else 2.0,
+                    "candidate_rank_missing": 0,
+                    "rank_margin_from_best": 0.0 if is_pos else 0.5,
+                    "best_blocker_score": 0.95 if is_pos else 0.4,
+                    "best_blocker_score_missing": 0,
+                    "best_blocker_score_diff": 0.0 if is_pos else 0.55,
+                    "blocker_count": 2 if is_pos else 1,
+                    "candidate_count_for_s1": 2,
+                    "has_blocker_provenance": 1,
+                    "blocker_provenance": "exact" if is_pos else "token",
+                })
+                matcher_data.append({
+                    "source1_entity_id": s1_id,
+                    "candidate_entity_id": cand_id,
+                    "qwen_matcher_prob": 0.92 if is_pos else 0.08,
+                    "qwen_matcher_prob_missing": 0,
+                })
+
+        pd.DataFrame(pair_data).to_csv(pair_file, sep="\t", index=False)
+        pd.DataFrame(gt_data).to_csv(gt_file, sep="\t", index=False)
+        pd.DataFrame(matcher_data).to_csv(matcher_file, sep="\t", index=False)
+
+        metadata = run_training(
+            feature_file=pair_file,
+            ground_truth_file=gt_file,
+            output_dir=stage3_dir,
+            qwen_matcher_file=matcher_file,
+            booster="gbtree",
+            eta=0.03,
+            country_mask_rate=0.0,
+            use_monotone_constraints=True,
+        )
+
+        self.assertIn("qwen_matcher_prob", metadata["feature_columns"])
+        self.assertTrue((stage3_dir / "gbm.json").exists())
+
+        # Test inference with matcher file passed
+        scored = score_candidates(
+            feature_file=pair_file,
+            artifact_dir=stage3_dir,
+            qwen_matcher_file=matcher_file,
+        )
+        self.assertEqual(len(scored), len(pair_data))
+        self.assertIn("calibrated_score", scored.columns)
+
+        # Test inference without matcher file raises because required column is missing
+        with self.assertRaises(ValueError) as ctx:
+            score_candidates(
+                feature_file=pair_file,
+                artifact_dir=stage3_dir,
+                qwen_matcher_file=None,
+            )
+        self.assertIn("Missing requested feature columns", str(ctx.exception))
+        self.assertIn("qwen_matcher_prob", str(ctx.exception))
 
 
 if __name__ == "__main__":

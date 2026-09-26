@@ -30,6 +30,11 @@ from src.pair_features import (
 )
 from src.bge_features import load_records as bge_load_records, load_candidates
 from src.qwen_features import format_entity_text, DEFAULT_INSTRUCTION
+from src.qwen_matcher_features import (
+    load_records as qm_load_records,
+    load_candidates as qm_load_candidates,
+    PROMPT_TEMPLATE as QM_PROMPT_TEMPLATE,
+)
 
 try:
     from src.eval_bi_encoder import (
@@ -223,6 +228,79 @@ class TestLayer2DenseAndEmbeddingContracts(unittest.TestCase):
         df.to_csv(norm_path, sep="\t", index=False)
         recs = bge_load_records([norm_path])
         self.assertEqual(recs["S1-99"], "clean name 123 address")
+
+    def test_empty_text_ids_detection_and_missing_flags(self):
+        """Verify empty text identification logic mirrors the bge/qwen features contract."""
+        records = {
+            "S1-1": "valid text content",
+            "S1-2": "",
+            "S2-1": "another valid text",
+            "S2-2": "   \n\t",  # whitespace only
+        }
+        candidate_pairs = [
+            ("S1-1", "S2-1"),  # both non-empty -> missing flag 0
+            ("S1-1", "S2-2"),  # candidate empty -> missing flag 1
+            ("S1-2", "S2-1"),  # source1 empty -> missing flag 1
+            ("S1-2", "S2-2"),  # both empty -> missing flag 1
+        ]
+        entity_ids = sorted({entity_id for pair in candidate_pairs for entity_id in pair})
+        empty_text_ids = {
+            entity_id for entity_id in entity_ids if not records[entity_id].strip()
+        }
+        self.assertEqual(empty_text_ids, {"S1-2", "S2-2"})
+
+        missing_flags = [
+            int(s1 in empty_text_ids or c2 in empty_text_ids)
+            for s1, c2 in candidate_pairs
+        ]
+        self.assertEqual(missing_flags, [0, 1, 1, 1])
+
+    def test_qwen_matcher_contracts(self):
+        """Verify qwen_matcher_features record loading, candidate loading, and prompt formatting."""
+        s1_file = self.dir_path / "qm_s1.tsv"
+        s2_file = self.dir_path / "qm_s2.tsv"
+        cand_file = self.dir_path / "qm_cands.tsv"
+
+        s1_df = pd.DataFrame([{
+            "entity_id": "S1-A",
+            "business_name": "Target Store",
+            "business_address": "1000 Nicollet Mall",
+            "country": "US",
+        }])
+        s2_df = pd.DataFrame([{
+            "entity_id": "S2-B",
+            "business_name": "Target Corp",
+            "business_address": "1000 Nicollet",
+            "country": "USA",
+        }])
+        cand_df = pd.DataFrame([{
+            "source1_entity_id": "S1-A",
+            "candidate_entity_ids": "S2-B",
+        }])
+
+        s1_df.to_csv(s1_file, sep="\t", index=False)
+        s2_df.to_csv(s2_file, sep="\t", index=False)
+        cand_df.to_csv(cand_file, sep="\t", index=False)
+
+        records = qm_load_records([s1_file, s2_file])
+        self.assertEqual(records["S1-A"]["name"], "Target Store")
+        self.assertEqual(records["S2-B"]["address"], "1000 Nicollet")
+
+        pairs = qm_load_candidates(cand_file)
+        self.assertEqual(pairs, [("S1-A", "S2-B")])
+
+        prompt = QM_PROMPT_TEMPLATE.format(
+            name1=records["S1-A"]["name"],
+            address1=records["S1-A"]["address"],
+            country1=records["S1-A"]["country"],
+            name2=records["S2-B"]["name"],
+            address2=records["S2-B"]["address"],
+            country2=records["S2-B"]["country"],
+        )
+        self.assertIn("Task: Do the following two records refer to the same business entity?", prompt)
+        self.assertIn("Target Store", prompt)
+        self.assertIn("Target Corp", prompt)
+        self.assertTrue(prompt.endswith("Match:"))
 
 
 @unittest.skipUnless(HAS_TORCH, "Requires torch (installed separately)")

@@ -94,28 +94,42 @@ try:
 except ImportError as e:
     print(f"\n[NOTE] src.pair_features requires ({e})")
 
-# 8. Check qwen_features
+# 8. Check bge_features
+try:
+    from src.bge_features import BGEEntityEncoder, build_bge_features
+    print(f"\n[OK] src.bge_features")
+except ImportError as e:
+    print(f"\n[NOTE] src.bge_features requires ({e})")
+
+# 9. Check qwen_features
 try:
     from src.qwen_features import QwenEntityEncoder, format_entity_text
     print(f"\n[OK] src.qwen_features")
 except ImportError as e:
     print(f"\n[NOTE] src.qwen_features requires ({e})")
 
-# 9. Check calibration
+# 10. Check qwen_matcher_features (Stage 2b stretch)
+try:
+    from src.qwen_matcher_features import QwenMatcherScorer, build_qwen_matcher_features
+    print(f"\n[OK] src.qwen_matcher_features")
+except ImportError as e:
+    print(f"\n[NOTE] src.qwen_matcher_features requires ({e})")
+
+# 11. Check calibration
 try:
     from src.calibration import fit_calibrator, apply_calibrator
     print(f"\n[OK] src.calibration")
 except ImportError as e:
     print(f"\n[NOTE] src.calibration requires scikit-learn ({e})")
 
-# 10. Check scoring (GBM ranker)
+# 12. Check scoring (GBM ranker)
 try:
     from src.scoring import train_oof, run_training, choose_threshold, score_candidates
     print(f"\n[OK] src.scoring")
 except ImportError as e:
     print(f"\n[NOTE] src.scoring requires xgboost/pandas ({e})")
 
-# 11. Check decision
+# 13. Check decision
 try:
     from src.decision import assemble_matching_results, load_source1_ids
     print(f"\n[OK] src.decision")
