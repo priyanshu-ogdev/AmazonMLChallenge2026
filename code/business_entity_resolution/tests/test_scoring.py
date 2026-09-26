@@ -987,6 +987,61 @@ class TestStage3Scoring(unittest.TestCase):
         self.assertEqual(matrix.loc[0, "bge_cosine_missing"], 1.0)
         self.assertEqual(matrix.loc[0, "name_jaccard"], 0.0)
 
+    def test_compare_dart_diagnostic_execution(self):
+        """Verify run_training with compare_dart=True executes both GBDT and DART diagnostics."""
+        stage3_dir = self.output_dir / "stage3_compare_dart"
+        pair_file = self.output_dir / "pairs_comp.tsv"
+        gt_file = self.output_dir / "gt_comp.tsv"
+
+        pair_data = []
+        gt_data = []
+        for i in range(20):
+            s1_id = f"S1-{i}"
+            c1_id = f"S2-{i}"
+            c2_id = f"S2-neg-{i}"
+            country = "us" if i < 10 else "india"
+            gt_data.append({"source1_entity_id": s1_id, "matched_entity_ids": c1_id})
+
+            pair_data.append({
+                "source1_entity_id": s1_id,
+                "candidate_entity_id": c1_id,
+                "source1_canonical_country": country,
+                "candidate_canonical_country": country,
+                "country_equal": 1,
+                "name_exact": 1,
+                "name_jaccard": 0.9,
+                "address_edit_similarity": 0.85,
+            })
+            pair_data.append({
+                "source1_entity_id": s1_id,
+                "candidate_entity_id": c2_id,
+                "source1_canonical_country": country,
+                "candidate_canonical_country": country,
+                "country_equal": 1,
+                "name_exact": 0,
+                "name_jaccard": 0.1,
+                "address_edit_similarity": 0.2,
+            })
+
+        pd.DataFrame(pair_data).to_csv(pair_file, sep="\t", index=False)
+        pd.DataFrame(gt_data).to_csv(gt_file, sep="\t", index=False)
+
+        metadata = run_training(
+            feature_file=pair_file,
+            ground_truth_file=gt_file,
+            output_dir=stage3_dir,
+            booster="gbtree",
+            eta=0.03,
+            country_mask_rate=0.0,
+            compare_dart=True,
+        )
+
+        self.assertIn("dart_vs_gbtree_comparison", metadata["diagnostics"])
+        cmp = metadata["diagnostics"]["dart_vs_gbtree_comparison"]
+        self.assertIn("gbtree_mean_held_out_country_ap", cmp)
+        self.assertIn("dart_mean_held_out_country_ap", cmp)
+        self.assertIn("winning_booster", cmp)
+
 
 if __name__ == "__main__":
     unittest.main()

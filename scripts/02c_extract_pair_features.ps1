@@ -36,7 +36,7 @@ param(
     [ValidateSet("train", "test")]
     [string]$Split = "train",
     [string]$BgeModel = "BAAI/bge-m3",
-    [switch]$IncludeQwen = $false,
+    [bool]$IncludeQwen = $true,
     [string]$QwenModel = "Qwen/Qwen3-Embedding-0.6B",
     [switch]$IncludeQwenMatcher = $false,
     [string]$QwenMatcherAdapter = "",

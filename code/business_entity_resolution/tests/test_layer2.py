@@ -34,6 +34,7 @@ from src.qwen_matcher_features import (
     load_records as qm_load_records,
     load_candidates as qm_load_candidates,
     PROMPT_TEMPLATE as QM_PROMPT_TEMPLATE,
+    format_matcher_prompt,
 )
 
 try:
@@ -289,18 +290,71 @@ class TestLayer2DenseAndEmbeddingContracts(unittest.TestCase):
         pairs = qm_load_candidates(cand_file)
         self.assertEqual(pairs, [("S1-A", "S2-B")])
 
-        prompt = QM_PROMPT_TEMPLATE.format(
-            name1=records["S1-A"]["name"],
-            address1=records["S1-A"]["address"],
-            country1=records["S1-A"]["country"],
-            name2=records["S2-B"]["name"],
-            address2=records["S2-B"]["address"],
-            country2=records["S2-B"]["country"],
-        )
+        prompt = format_matcher_prompt(records["S1-A"], records["S2-B"])
         self.assertIn("Task: Do the following two records refer to the same business entity?", prompt)
         self.assertIn("Target Store", prompt)
         self.assertIn("Target Corp", prompt)
         self.assertTrue(prompt.endswith("Match:"))
+
+    def test_qwen_matcher_load_records_layer0_compatibility(self):
+        """Verify qm_load_records transparently supports Layer 0 normalized schema without empty prompts."""
+        l0_file = self.dir_path / "qm_layer0.tsv"
+        l0_df = pd.DataFrame([{
+            "entity_id": "S1-L0",
+            "raw_name": "Acme Industrial Co",
+            "raw_address": "742 Evergreen Terrace",
+            "norm_name": "acme industrial co",
+            "norm_address": "742 evergreen terrace",
+            "country_canonical": "us",
+        }])
+        l0_df.to_csv(l0_file, sep="\t", index=False)
+
+        records = qm_load_records([l0_file])
+        self.assertIn("S1-L0", records)
+        self.assertEqual(records["S1-L0"]["name"], "acme industrial co")
+        self.assertEqual(records["S1-L0"]["address"], "742 evergreen terrace")
+        self.assertEqual(records["S1-L0"]["country"], "us")
+        self.assertEqual(records["S1-L0"]["canonical_country"], "us")
+
+        # Verify missing required columns raise ValueError
+        bad_file = self.dir_path / "bad.tsv"
+        pd.DataFrame([{"entity_id": "S1-X", "other_col": "val"}]).to_csv(bad_file, sep="\t", index=False)
+        with self.assertRaises(ValueError):
+            qm_load_records([bad_file])
+
+    def test_format_matcher_prompt_field_budgeting(self):
+        """Verify format_matcher_prompt bounds run-on names/addresses and preserves Match: suffix."""
+        long_rec1 = {
+            "name": "Super Long Business Name " * 20,       # 500+ chars
+            "address": "123 Very Long Address Boulevard " * 20, # 640+ chars
+            "country": "US",
+        }
+        long_rec2 = {
+            "name": "Another Very Long Name " * 20,
+            "address": "456 Run-On Street Highway Avenue " * 20,
+            "country": "US",
+        }
+
+        prompt = format_matcher_prompt(long_rec1, long_rec2, max_name_chars=100, max_addr_chars=200)
+        self.assertTrue(prompt.endswith("\nMatch:"))
+        # Ensure name and address in prompt do not exceed the character budget (~840 chars, well within 224 tokens)
+        self.assertLessEqual(len(prompt), 900)
+        self.assertEqual(len(prompt), 836)
+
+    def test_variable_length_terminal_indexing_with_right_padding(self):
+        """Verify attention_mask.sum(dim=1) - 1 reliably indexes the prompt terminal position."""
+        import torch
+        # Batch of 2 sequences, right-padded:
+        # Seq 0 has 5 tokens + 3 PAD (length 8)
+        # Seq 1 has 8 tokens + 0 PAD (length 8)
+        attention_mask = torch.tensor([
+            [1, 1, 1, 1, 1, 0, 0, 0],
+            [1, 1, 1, 1, 1, 1, 1, 1],
+        ], dtype=torch.long)
+
+        last_token_idx = attention_mask.sum(dim=1) - 1
+        expected = torch.tensor([4, 7], dtype=torch.long)
+        self.assertTrue(torch.equal(last_token_idx, expected))
 
 
 @unittest.skipUnless(HAS_TORCH, "Requires torch (installed separately)")

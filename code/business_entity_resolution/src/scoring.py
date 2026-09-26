@@ -759,6 +759,7 @@ def run_training(
     eta: float = 0.03,
     country_mask_rate: float = 0.15,
     use_monotone_constraints: bool = False,
+    compare_dart: bool = False,
 ) -> Dict:
     params = dict(DEFAULT_PARAMS)
     params["booster"] = booster
@@ -835,8 +836,40 @@ def run_training(
     )
 
     # Held-out country cross-evaluation diagnostic
-    held_out_diag = evaluate_held_out_country_diagnostic(labeled, final_columns, params=params)
-    diagnostics["held_out_country_cross_eval"] = held_out_diag
+    if compare_dart:
+        gbtree_params = dict(DEFAULT_PARAMS)
+        gbtree_params["booster"] = "gbtree"
+        gbtree_params["eta"] = eta
+
+        dart_params = dict(DEFAULT_PARAMS)
+        dart_params["booster"] = "dart"
+        dart_params["eta"] = eta
+        dart_params.update({
+            "sample_type": "uniform",
+            "normalize_type": "tree",
+            "rate_drop": 0.1,
+            "skip_drop": 0.5,
+            "one_drop": 0,
+        })
+
+        gbtree_diag = evaluate_held_out_country_diagnostic(labeled, final_columns, params=gbtree_params)
+        dart_diag = evaluate_held_out_country_diagnostic(labeled, final_columns, params=dart_params)
+
+        gbtree_ap = float(gbtree_diag.get("mean_held_out_country_ap", 0.0))
+        dart_ap = float(dart_diag.get("mean_held_out_country_ap", 0.0))
+        winner = "dart" if dart_ap > gbtree_ap else "gbtree"
+        diagnostics["dart_vs_gbtree_comparison"] = {
+            "gbtree_mean_held_out_country_ap": gbtree_ap,
+            "dart_mean_held_out_country_ap": dart_ap,
+            "winning_booster": winner,
+            "delta_ap": float(dart_ap - gbtree_ap),
+            "gbtree_diagnostic": gbtree_diag,
+            "dart_diagnostic": dart_diag,
+        }
+        diagnostics["held_out_country_cross_eval"] = dart_diag if booster == "dart" else gbtree_diag
+    else:
+        held_out_diag = evaluate_held_out_country_diagnostic(labeled, final_columns, params=params)
+        diagnostics["held_out_country_cross_eval"] = held_out_diag
 
     # Feature importance
     feature_imp = extract_feature_importances(model, final_columns)
@@ -862,6 +895,7 @@ def run_training(
         "params": params,
         "country_mask_rate": country_mask_rate,
         "use_monotone_constraints": use_monotone_constraints,
+        "compare_dart": compare_dart,
         "final_n_estimators": int(model.get_params()["n_estimators"]),
         "feature_importance": feature_imp,
         "diagnostics": diagnostics,
@@ -894,6 +928,10 @@ def main() -> None:
     parser.add_argument("--eta", type=float, default=0.03)
     parser.add_argument("--country-mask-rate", type=float, default=0.15)
     parser.add_argument("--use-monotone-constraints", action="store_true")
+    parser.add_argument(
+        "--compare-dart", action="store_true",
+        help="Run comparative cross-country diagnostic for DART vs standard GBDT, recording AUCPR delta in metadata.",
+    )
     args = parser.parse_args()
 
     records = None
@@ -917,6 +955,7 @@ def main() -> None:
             eta=args.eta,
             country_mask_rate=args.country_mask_rate,
             use_monotone_constraints=args.use_monotone_constraints,
+            compare_dart=args.compare_dart,
         ), indent=2))
     elif args.mode == "score":
         artifact_dir = args.artifact_dir or args.output_dir

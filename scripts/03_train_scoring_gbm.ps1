@@ -48,6 +48,7 @@ param(
     [float]$Eta = 0.03,
     [float]$CountryMaskRate = 0.15,
     [bool]$UseMonotoneConstraints = $true,
+    [bool]$CompareDART = $false,
     [switch]$IncludeTFIDF = $false,
     [switch]$DryRun = $false,
     [string]$PythonPath = ""
@@ -150,6 +151,9 @@ if ($QwenMatcherFeatures -and ($DryRun -or (Test-Path $QwenMatcherFeatures))) {
 if ($UseMonotoneConstraints) {
     $trainArgs += "--use-monotone-constraints"
 }
+if ($CompareDART) {
+    $trainArgs += "--compare-dart"
+}
 if ($IncludeTFIDF) {
     $s1Train = Join-Path $DATASET_DIR "train\train_source1.tsv"
     $s2Train = Join-Path $DATASET_DIR "train\train_source2.tsv"
@@ -185,6 +189,14 @@ if (-not $DryRun) {
         $topFeats = $gainObj.PSObject.Properties | Sort-Object { [double]$_.Value } -Descending | Select-Object -First 5
         foreach ($f in $topFeats) {
             Write-Host "    - $($f.Name): $([Math]::Round([double]$f.Value, 4))" -ForegroundColor Gray
+        }
+        if ($meta.diagnostics.dart_vs_gbtree_comparison) {
+            $cmp = $meta.diagnostics.dart_vs_gbtree_comparison
+            Write-Host ""
+            Write-Host "  DART vs GBDT Cross-Country Diagnostic:" -ForegroundColor Yellow
+            Write-Host "    - GBDT Mean AP:       $([Math]::Round([double]$cmp.gbtree_mean_held_out_country_ap, 4))" -ForegroundColor Gray
+            Write-Host "    - DART Mean AP:       $([Math]::Round([double]$cmp.dart_mean_held_out_country_ap, 4))" -ForegroundColor Gray
+            Write-Host "    - Winning Booster:    $($cmp.winning_booster) (delta: $([Math]::Round([double]$cmp.delta_ap, 4)))" -ForegroundColor Green
         }
         Write-Success "Phase 3 model artifacts saved -> $OutputDir"
     } else {

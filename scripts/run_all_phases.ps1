@@ -40,8 +40,8 @@ param(
     [ValidateSet("Full", "FastSample", "GateOnly", "InferenceOnly")]
     [string]$RunMode = "Full",
     [switch]$SkipGPU = $false,
-    [switch]$IncludeQwen = $false,
-    [switch]$IncludeQwenMatcher = $false,
+    [bool]$IncludeQwen = $true,
+    [bool]$IncludeQwenMatcher = $false,
     [string]$QwenMatcherAdapter = "",
     [switch]$RunStage0 = $false,
     [int]$NegativesPerPositive = 2,
@@ -243,10 +243,10 @@ Run-PipelinePhase 3 "Grouped-OOF GBM Training & Calibration" {
         DryRun       = $DryRun
         PythonPath   = $python
     }
-    if ($IncludeQwen -and (Test-Path $qwenFeats)) {
+    if ($IncludeQwen -and ($DryRun -or (Test-Path $qwenFeats))) {
         $p3Params["QwenFeatures"] = $qwenFeats
     }
-    if ($IncludeQwenMatcher -and (Test-Path $qwenMatcherFeats)) {
+    if ($IncludeQwenMatcher -and ($DryRun -or (Test-Path $qwenMatcherFeats))) {
         $p3Params["QwenMatcherFeatures"] = $qwenMatcherFeats
     }
 
@@ -275,10 +275,10 @@ Run-PipelinePhase 4 "Test Scoring & Stage 4 Decision Assembly" {
         DryRun            = $DryRun
         PythonPath        = $python
     }
-    if ($IncludeQwen -and (Test-Path $testQwen)) {
+    if ($IncludeQwen -and ($DryRun -or (Test-Path $testQwen))) {
         $p4Params["TestQwenFeatures"] = $testQwen
     }
-    if ($IncludeQwenMatcher -and (Test-Path $testQwenMatcher)) {
+    if ($IncludeQwenMatcher -and ($DryRun -or (Test-Path $testQwenMatcher))) {
         $p4Params["TestQwenMatcherFeatures"] = $testQwenMatcher
     }
 

@@ -40,6 +40,7 @@ from src.qwen_matcher_features import (
     NO_TOKEN,
     PROMPT_TEMPLATE,
     YES_TOKEN,
+    format_matcher_prompt,
     load_candidates,
     load_records,
 )
@@ -89,7 +90,7 @@ def build_labeled_training_pairs(
         if s1 not in records:
             continue
         s1_rec = records[s1]
-        country = s1_rec.get("country", "").lower().strip()
+        country = (s1_rec.get("canonical_country") or s1_rec.get("country", "")).lower().strip()
 
         is_eval = False
         if eval_country and country == eval_country.lower().strip():
@@ -104,14 +105,7 @@ def build_labeled_training_pairs(
             if pos_id not in records:
                 continue
             pos_rec = records[pos_id]
-            prompt = PROMPT_TEMPLATE.format(
-                name1=s1_rec.get("name", ""),
-                address1=s1_rec.get("address", ""),
-                country1=s1_rec.get("country", ""),
-                name2=pos_rec.get("name", ""),
-                address2=pos_rec.get("address", ""),
-                country2=pos_rec.get("country", ""),
-            )
+            prompt = format_matcher_prompt(s1_rec, pos_rec)
             target_list.append({"prompt": prompt, "label": 1, "country": country})
 
             # 2. Hard negative pairs from blocking output
@@ -125,14 +119,7 @@ def build_labeled_training_pairs(
                 )
                 for neg_id in chosen_negs:
                     neg_rec = records[neg_id]
-                    neg_prompt = PROMPT_TEMPLATE.format(
-                        name1=s1_rec.get("name", ""),
-                        address1=s1_rec.get("address", ""),
-                        country1=s1_rec.get("country", ""),
-                        name2=neg_rec.get("name", ""),
-                        address2=neg_rec.get("address", ""),
-                        country2=neg_rec.get("country", ""),
-                    )
+                    neg_prompt = format_matcher_prompt(s1_rec, neg_rec)
                     target_list.append({"prompt": neg_prompt, "label": 0, "country": country})
 
     rng.shuffle(train_samples)

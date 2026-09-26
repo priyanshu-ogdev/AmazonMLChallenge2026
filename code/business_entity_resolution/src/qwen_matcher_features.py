@@ -48,6 +48,42 @@ PROMPT_TEMPLATE = (
 )
 
 
+def format_matcher_prompt(
+    left: Dict[str, str],
+    right: Dict[str, str],
+    max_name_chars: int = 100,
+    max_addr_chars: int = 200,
+) -> str:
+    """
+    Format sequence-pair prompt for Qwen3-0.6B causal LM matching.
+
+    Truncates name and address fields to fixed character budgets BEFORE formatting
+    to guarantee that the fixed suffix '\nMatch:' is NEVER truncated by tokenizer
+    sequence-length limits.
+    """
+    n1 = str(left.get("name") or left.get("business_name") or left.get("norm_name") or "").strip()
+    a1 = str(left.get("address") or left.get("business_address") or left.get("norm_address") or "").strip()
+    c1 = str(left.get("country") or left.get("canonical_country") or "").strip()
+
+    n2 = str(right.get("name") or right.get("business_name") or right.get("norm_name") or "").strip()
+    a2 = str(right.get("address") or right.get("business_address") or right.get("norm_address") or "").strip()
+    c2 = str(right.get("country") or right.get("canonical_country") or "").strip()
+
+    if len(n1) > max_name_chars:
+        n1 = n1[:max_name_chars].rstrip()
+    if len(a1) > max_addr_chars:
+        a1 = a1[:max_addr_chars].rstrip()
+    if len(n2) > max_name_chars:
+        n2 = n2[:max_name_chars].rstrip()
+    if len(a2) > max_addr_chars:
+        a2 = a2[:max_addr_chars].rstrip()
+
+    return PROMPT_TEMPLATE.format(
+        name1=n1, address1=a1, country1=c1,
+        name2=n2, address2=a2, country2=c2,
+    )
+
+
 class QwenMatcherScorer:
     """
     Loads the LoRA-fine-tuned Qwen3-0.6B checkpoint and computes a sliced
@@ -75,6 +111,9 @@ class QwenMatcherScorer:
 
         self.torch = torch
         self.tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "right"
         base = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.bfloat16)
         self.model = PeftModel.from_pretrained(base, adapter_path)
         self.model.eval()
@@ -112,28 +151,58 @@ class QwenMatcherScorer:
                 if self.device:
                     encoded = {k: v.to(self.device) for k, v in encoded.items()}
                 # Verdict-token slicing (spec Section 4.2): only the final
-                # position's hidden state is ever projected through the LM
-                # head, so the logits tensor stays [batch, 1, vocab] rather
-                # than [batch, seq_len, vocab].
-                outputs = self.model(**encoded)
-                final_logits = outputs.logits[:, -1, :]  # [batch, vocab]
-                yes_no_logits = final_logits[:, [self.no_id, self.yes_id]]
+                # non-padded position's hidden state is projected through the LM
+                # head, making inference robust regardless of padding side and
+                # reducing logits memory from ~3.27 GB to ~29 MB.
+                outputs = self.model(
+                    input_ids=encoded["input_ids"],
+                    attention_mask=encoded["attention_mask"],
+                    output_hidden_states=True,
+                )
+                hidden_states = outputs.hidden_states[-1]
+                last_token_idx = encoded["attention_mask"].sum(dim=1) - 1
+                batch_idx = torch.arange(encoded["input_ids"].size(0), device=encoded["input_ids"].device)
+                terminal_hidden = hidden_states[batch_idx, last_token_idx, :].unsqueeze(1)
+
+                lm_head = getattr(self.model, "lm_head", None)
+                if lm_head is None and hasattr(self.model, "base_model"):
+                    lm_head = getattr(self.model.base_model.model, "lm_head", None)
+
+                if lm_head is not None:
+                    terminal_logits = lm_head(terminal_hidden).squeeze(1)
+                else:
+                    terminal_logits = outputs.logits[batch_idx, last_token_idx, :]
+
+                yes_no_logits = terminal_logits[:, [self.no_id, self.yes_id]]
                 batch_probs = torch.softmax(yes_no_logits, dim=-1)[:, 1]  # P(Yes)
                 probs.extend(batch_probs.float().cpu().tolist())
         return np.array(probs, dtype=np.float32)
 
 
 def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
-    """Same contract as pair_features.py's load_records -- name/address/country per entity_id."""
+    """
+    Loads entity records supporting Layer 0 normalized and raw TSV schemas.
+    Checks column aliases for name, address, and country to prevent silent empty prompts.
+    """
     records: Dict[str, Dict[str, str]] = {}
     for path in paths:
         frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+        if "entity_id" not in frame.columns:
+            raise ValueError(f"{path} is missing required column: entity_id")
+        name_col = next((c for c in ("business_name", "norm_name", "raw_name") if c in frame.columns), None)
+        addr_col = next((c for c in ("business_address", "norm_address", "raw_address") if c in frame.columns), None)
+        country_col = next((c for c in ("country", "country_canonical") if c in frame.columns), None)
+        if not name_col or not addr_col:
+            raise ValueError(f"{path} is missing name/address columns: {list(frame.columns)}")
+
         for row in frame.to_dict("records"):
             eid = row["entity_id"]
             records[eid] = {
-                "name": row.get("business_name", row.get("norm_name", "")),
-                "address": row.get("business_address", row.get("norm_address", "")),
-                "country": row.get("country", ""),
+                "entity_id": eid,
+                "name": row.get(name_col, ""),
+                "address": row.get(addr_col, ""),
+                "country": row.get("country", row.get(country_col, "")),
+                "canonical_country": row.get("country_canonical", row.get(country_col, "")),
             }
     return records
 
@@ -181,16 +250,11 @@ def build_qwen_matcher_features(
     prompts: List[str] = []
     missing_flags: List[int] = []
     for source1_id, candidate_id in candidate_pairs:
-        left = records.get(source1_id, {"name": "", "address": "", "country": ""})
-        right = records.get(candidate_id, {"name": "", "address": "", "country": ""})
-        empty = not (left["name"] or left["address"]) or not (right["name"] or right["address"])
+        left = records.get(source1_id, {"name": "", "address": "", "country": "", "canonical_country": ""})
+        right = records.get(candidate_id, {"name": "", "address": "", "country": "", "canonical_country": ""})
+        empty = not (left.get("name") or left.get("address")) or not (right.get("name") or right.get("address"))
         missing_flags.append(int(empty))
-        prompts.append(
-            PROMPT_TEMPLATE.format(
-                name1=left["name"], address1=left["address"], country1=left["country"],
-                name2=right["name"], address2=right["address"], country2=right["country"],
-            )
-        )
+        prompts.append(format_matcher_prompt(left, right))
 
     probs = scorer.score_pairs(prompts)
 
