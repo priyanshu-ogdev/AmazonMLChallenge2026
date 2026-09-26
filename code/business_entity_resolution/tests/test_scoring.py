@@ -509,7 +509,7 @@ class TestStage3Scoring(unittest.TestCase):
             country_mask_rate=0.0,
             use_monotone_constraints=False,
         )
-        self.assertEqual(metadata["params"]["booster"], "gbtree")  # XGBoost 3.x: dart uses gbtree+dropout
+        self.assertEqual(metadata["params"]["booster"], "dart")
         self.assertEqual(metadata["params"]["sample_type"], "uniform")
         self.assertTrue((dart_out / "gbm.json").exists())
 
@@ -872,7 +872,7 @@ class TestStage3Scoring(unittest.TestCase):
         self.assertTrue((stage3_dir / "gbm.json").exists())
         self.assertTrue((stage3_dir / "stage3_metadata.json").exists())
         self.assertTrue((stage3_dir / "oof_predictions.tsv").exists())
-        self.assertEqual(metadata["params"]["booster"], "gbtree")
+        self.assertEqual(metadata["params"]["booster"], "dart")
         self.assertEqual(metadata["params"]["sample_type"], "uniform")
         self.assertEqual(metadata["params"]["normalize_type"], "tree")
         self.assertEqual(metadata["params"]["rate_drop"], 0.10)

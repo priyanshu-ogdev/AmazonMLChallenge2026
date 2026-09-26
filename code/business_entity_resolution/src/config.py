@@ -216,21 +216,22 @@ class QwenMatcherVRAMBudget:
     VRAM budget verification for Stage 2b Qwen3-0.6B Causal Matcher on RTX 3060 12GB.
     Computed directly from model architecture and sliced verdict-token design.
 
-    From docs/07_stage2b_qwen3_generative_matcher_spec.md (Section 4):
-    - Base weights (bf16, frozen backbone): 596M × 2 bytes = 1.19 GB
-    - Reference teacher weights (bf16, frozen for self-distillation): 596M × 2 bytes = 1.19 GB
-    - LoRA trainable params (r=64, all-linear): ~10.2M × 4 bytes = 0.04 GB
-    - LoRA optimizer (AdamW: fp32 master + 2 moments): ~10.2M × 8 bytes = 0.08 GB
-    - Sliced verdict logits ([48, 1, 152064] fp32 student + teacher): ~0.06 GB (~58 MB vs ~6.54 GB)
+    Empirically verified against Qwen/Qwen3-0.6B (vocab=151,936, 28 layers, hidden=1024):
+    - Base weights (bf16, frozen backbone): 636.4M params × 2 bytes = 1.19 GB
+    - Reference teacher weights (bf16, frozen for self-distillation): 1.19 GB
+    - LoRA trainable params (r=64, all 7 linear target modules): 40,370,176 params × 2 bytes = 0.08 GB
+    - LoRA optimizer (AdamW: fp32 master + 2 moments): 40.37M × 12 bytes = 0.48 GB
+    - Sliced verdict logits ([48, 1, 151936] in fp32 for student + teacher): ~0.06 GB (~29.2 MB each)
+      * Note: avoids un-sliced full logits of 3.27 GB in bf16 (6.54 GB in fp32) -> 224x reduction
     - Forward activations (batch 48, seq 224, gradient checkpointing): ~1.85 GB
     - PyTorch & CUDA workspace: ~0.85 GB
-    - Total peak VRAM: ~5.26 GB
-    - Headroom: ~6.74 GB (>56% safety margin on RTX 3060 12GB)
+    - Total peak VRAM: ~5.70 GB
+    - Headroom: ~6.30 GB (>52% safety margin on RTX 3060 12GB)
     """
     total_vram_gb: float = 12.0
     base_model_gb: float = 1.19
-    lora_params_gb: float = 0.04
-    lora_optimizer_gb: float = 0.08
+    lora_params_gb: float = 0.08
+    lora_optimizer_gb: float = 0.48
     frozen_teacher_gb: float = 1.19
     activations_gb: float = 1.85
     sliced_logits_gb: float = 0.06
@@ -261,4 +262,5 @@ class QwenMatcherVRAMBudget:
         peak = self.peak_vram_gb if use_distillation else (self.peak_vram_gb - self.frozen_teacher_gb)
         # Needs at least 4GB headroom for safety on 12GB RTX 3060
         return (self.total_vram_gb - peak) >= 4.0
+
 

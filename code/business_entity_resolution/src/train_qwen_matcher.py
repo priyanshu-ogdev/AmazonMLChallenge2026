@@ -109,9 +109,10 @@ def build_labeled_training_pairs(
 
         # 2. Hard negative pairs from blocking output (sampled once per S1 entity)
         cand_pool = candidates_map.get(s1, [])
-        neg_candidates = [c for c in cand_pool if c not in pos_ids and c in records]
-        if neg_candidates:
-            n_sample = min(negatives_per_positive, len(neg_candidates))
+        neg_candidates = list(dict.fromkeys(c for c in cand_pool if c not in pos_ids and c in records))
+        if neg_candidates and valid_pos_ids:
+            target_neg_count = negatives_per_positive * len(valid_pos_ids)
+            n_sample = min(target_neg_count, len(neg_candidates))
             chosen_negs = rng.sample(neg_candidates, n_sample) if len(neg_candidates) > n_sample else neg_candidates
             for neg_id in chosen_negs:
                 neg_rec = records[neg_id]

@@ -211,9 +211,9 @@ def load_candidates(candidate_file: Path) -> List[Tuple[str, str]]:
     frame = pd.read_csv(candidate_file, sep="\t", dtype=str, keep_default_na=False)
     pairs: List[Tuple[str, str]] = []
     for row in frame.itertuples():
-        source1_id = row.source1_entity_id
+        source1_id = str(row.source1_entity_id).strip()
         raw = getattr(row, "candidate_entity_ids", "")
-        for candidate_id in (c for c in raw.split(",") if c):
+        for candidate_id in (c.strip() for c in raw.split(",") if c.strip()):
             pairs.append((source1_id, candidate_id))
     return pairs
 

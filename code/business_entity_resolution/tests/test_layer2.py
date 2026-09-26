@@ -770,10 +770,11 @@ class TestLayer2DataBuilder(unittest.TestCase):
                 {"entity_id": "S2-pos1", "business_name": "Acme Corp", "business_address": "123 Main St", "country": "US"},
                 {"entity_id": "S2-pos2", "business_name": "Acme Co", "business_address": "123 Main Street", "country": "US"},
                 {"entity_id": "S2-neg1", "business_name": "Zenith Inc", "business_address": "999 Oak", "country": "US"},
+                {"entity_id": "S2-neg2", "business_name": "Apex LLC", "business_address": "888 Pine", "country": "US"},
             ]).to_csv(s2_file, sep="\t", index=False)
 
             pd.DataFrame([
-                {"source1_entity_id": "S1-1", "candidate_entity_ids": "S2-neg1"},
+                {"source1_entity_id": "S1-1", "candidate_entity_ids": "S2-neg1, S2-neg2, S2-neg1"},
             ]).to_csv(cand_file, sep="\t", index=False)
 
             train_pairs, _ = build_labeled_training_pairs(
@@ -784,22 +785,25 @@ class TestLayer2DataBuilder(unittest.TestCase):
                 negatives_per_positive=1,
             )
 
-            # Expect 2 positive pairs + 1 unique negative pair = 3 pairs total (no duplicate negative rows)
-            self.assertEqual(len(train_pairs), 3)
+            # Expect 2 positive pairs + 2 unique negative pairs (1 per positive, deduplicated without replacement)
+            self.assertEqual(len(train_pairs), 4)
             pos_pairs = [p for p in train_pairs if p["label"] == 1]
             neg_pairs = [p for p in train_pairs if p["label"] == 0]
             self.assertEqual(len(pos_pairs), 2)
-            self.assertEqual(len(neg_pairs), 1)
+            self.assertEqual(len(neg_pairs), 2)
+            # Verify prompts are unique (zero duplicate negative pairs)
+            neg_prompts = [p["prompt"] for p in neg_pairs]
+            self.assertEqual(len(set(neg_prompts)), 2)
 
     def test_qwen_matcher_vram_budget_spec_compliance(self):
-        """Verify QwenMatcherVRAMBudget conforms to docs/07_stage2b Section 4 specifications."""
+        """Verify QwenMatcherVRAMBudget conforms to verified Qwen3-0.6B architecture parameters."""
         from src.config import QwenMatcherVRAMBudget
 
         budget = QwenMatcherVRAMBudget()
-        self.assertAlmostEqual(budget.fixed_overhead_gb, 1.31, places=2)
-        self.assertAlmostEqual(budget.fixed_overhead_with_distillation_gb, 2.50, places=2)
-        self.assertAlmostEqual(budget.peak_vram_gb, 5.26, places=2)
-        self.assertAlmostEqual(budget.available_headroom_gb, 6.74, places=2)
+        self.assertAlmostEqual(budget.fixed_overhead_gb, 1.75, places=2)
+        self.assertAlmostEqual(budget.fixed_overhead_with_distillation_gb, 2.94, places=2)
+        self.assertAlmostEqual(budget.peak_vram_gb, 5.70, places=2)
+        self.assertAlmostEqual(budget.available_headroom_gb, 6.30, places=2)
         self.assertTrue(budget.verify(use_distillation=True))
         self.assertTrue(budget.verify(use_distillation=False))
 
