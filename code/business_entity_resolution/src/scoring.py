@@ -253,9 +253,13 @@ def merge_feature_file(features: pd.DataFrame, path: Optional[Path]) -> pd.DataF
     overlap = (set(features.columns) & set(extra.columns)) - required
     if overlap:
         raise ValueError(f"{path} would overwrite existing features: {sorted(overlap)}")
-    return features.merge(
+    merged = features.merge(
         extra, on=["source1_entity_id", "candidate_entity_id"], how="left", validate="one_to_one"
     )
+    for col in extra.columns:
+        if col.endswith("_missing") or col.endswith("_missing_either"):
+            merged[col] = merged[col].fillna("1")
+    return merged
 
 
 def prepare_matrix(
@@ -274,10 +278,18 @@ def prepare_matrix(
     matrix = frame[candidates].copy()
     for column in candidates:
         matrix[column] = pd.to_numeric(matrix[column], errors="coerce")
+        if column.endswith("_missing") or column.endswith("_missing_either"):
+            matrix[column] = matrix[column].fillna(1.0)
+        elif column in ("candidate_rank", "rank_margin_from_best"):
+            matrix[column] = matrix[column].fillna(999.0)
+        elif column in ("best_blocker_score", "country_equal"):
+            matrix[column] = matrix[column].fillna(-1.0)
+        else:
+            matrix[column] = matrix[column].fillna(0.0)
     if matrix.isna().all(axis=0).any():
         bad = matrix.columns[matrix.isna().all(axis=0)].tolist()
         raise ValueError(f"Features are entirely non-numeric or missing: {bad}")
-    return matrix.fillna(0.0), candidates
+    return matrix, candidates
 
 
 def _scale_pos_weight(y: np.ndarray) -> float:

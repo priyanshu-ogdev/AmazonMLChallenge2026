@@ -59,6 +59,9 @@ if (-not $ArtifactDir) {
     if (Test-Path (Join-Path $autoArt "stage3_metadata.json")) {
         $ArtifactDir = $autoArt
         Write-Info "Auto-detected Stage 3 Artifacts: $ArtifactDir"
+    } elseif ($DryRun) {
+        $ArtifactDir = $autoArt
+        Write-Info "DryRun: Using planned Stage 3 Artifacts: $ArtifactDir"
     } else {
         throw "ArtifactDir not specified and not found at $autoArt. Run Phase 3 first."
     }
@@ -69,13 +72,19 @@ if (-not $TestFeatures) {
     if (Test-Path $autoFeat) {
         $TestFeatures = $autoFeat
         Write-Info "Auto-detected Test Features: $TestFeatures"
+    } elseif ($DryRun) {
+        $TestFeatures = $autoFeat
+        Write-Info "DryRun: Using planned Test Features: $TestFeatures"
     } else {
         throw "TestFeatures not specified and not found at $autoFeat. Run Phase 2c on test split first."
     }
 }
 
+$testFeatParent = Split-Path -Parent $TestFeatures
+if (-not $testFeatParent) { $testFeatParent = "." }
+
 if (-not $TestBgeFeatures) {
-    $autoBge = Join-Path (Split-Path -Parent $TestFeatures) "bge_pair_features.tsv"
+    $autoBge = Join-Path $testFeatParent "bge_pair_features.tsv"
     if (Test-Path $autoBge) {
         $TestBgeFeatures = $autoBge
         Write-Info "Auto-detected Test BGE Features: $TestBgeFeatures"
@@ -83,7 +92,7 @@ if (-not $TestBgeFeatures) {
 }
 
 if (-not $TestQwenFeatures) {
-    $autoQwen = Join-Path (Split-Path -Parent $TestFeatures) "qwen_pair_features.tsv"
+    $autoQwen = Join-Path $testFeatParent "qwen_pair_features.tsv"
     if (Test-Path $autoQwen) {
         $TestQwenFeatures = $autoQwen
         Write-Info "Auto-detected Test Qwen Features: $TestQwenFeatures"
@@ -91,7 +100,7 @@ if (-not $TestQwenFeatures) {
 }
 
 if (-not $TestQwenMatcherFeatures) {
-    $autoMatcher = Join-Path (Split-Path -Parent $TestFeatures) "qwen_matcher_features.tsv"
+    $autoMatcher = Join-Path $testFeatParent "qwen_matcher_features.tsv"
     if (Test-Path $autoMatcher) {
         $TestQwenMatcherFeatures = $autoMatcher
         Write-Info "Auto-detected Test Qwen Matcher Features: $TestQwenMatcherFeatures"
@@ -103,6 +112,9 @@ if (-not $TestCandidateFile) {
     if (Test-Path $autoCand) {
         $TestCandidateFile = $autoCand
         Write-Info "Auto-detected Test Candidates: $TestCandidateFile"
+    } elseif ($DryRun) {
+        $TestCandidateFile = $autoCand
+        Write-Info "DryRun: Using planned Test Candidates: $TestCandidateFile"
     }
 }
 
@@ -130,13 +142,13 @@ $scoreArgs = @(
     "--artifact-dir", $ArtifactDir,
     "--output-file", $scoredCandidatesOut
 )
-if ($TestBgeFeatures -and (Test-Path $TestBgeFeatures)) {
+if ($TestBgeFeatures -and ($DryRun -or (Test-Path $TestBgeFeatures))) {
     $scoreArgs += @("--bge-features", $TestBgeFeatures)
 }
-if ($TestQwenFeatures -and (Test-Path $TestQwenFeatures)) {
+if ($TestQwenFeatures -and ($DryRun -or (Test-Path $TestQwenFeatures))) {
     $scoreArgs += @("--qwen-features", $TestQwenFeatures)
 }
-if ($TestQwenMatcherFeatures -and (Test-Path $TestQwenMatcherFeatures)) {
+if ($TestQwenMatcherFeatures -and ($DryRun -or (Test-Path $TestQwenMatcherFeatures))) {
     $scoreArgs += @("--qwen-matcher-features", $TestQwenMatcherFeatures)
 }
 

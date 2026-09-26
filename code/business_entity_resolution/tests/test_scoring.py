@@ -878,6 +878,115 @@ class TestStage3Scoring(unittest.TestCase):
         self.assertEqual(metadata["params"]["rate_drop"], 0.10)
         self.assertEqual(metadata["params"]["skip_drop"], 0.50)
 
+    def test_stage2c_to_gbm_matrix_synchronization(self):
+        """Verify Stage 2c deterministic features feed cleanly into Stage 3 prepare_matrix."""
+        from src.pair_features import build_pair_features
+
+        records = {
+            "S1-1": {
+                "entity_id": "S1-1",
+                "business_name": "Acme Widgets Inc",
+                "business_address": "123 Main St, Springfield",
+                "country": "US",
+                "canonical_country": "us",
+            },
+            "S2-1": {
+                "entity_id": "S2-1",
+                "business_name": "Acme Widgets Incorporated",
+                "business_address": "123 Main Street, Springfield",
+                "country": "USA",
+                "canonical_country": "us",
+            },
+        }
+        cand_file = self.output_dir / "sync_candidates.tsv"
+        pd.DataFrame([{"source1_entity_id": "S1-1", "candidate_entity_ids": "S2-1"}]).to_csv(
+            cand_file, sep="\t", index=False
+        )
+
+        prov_file = self.output_dir / "sync_prov.tsv"
+        pd.DataFrame([{
+            "source1_entity_id": "S1-1",
+            "candidate_entity_id": "S2-1",
+            "blocker_provenance": "exact_name",
+            "best_blocker_rank": "1",
+            "best_blocker_score": "0.95",
+            "blocker_count": "2",
+        }]).to_csv(prov_file, sep="\t", index=False)
+
+        out_feat = self.output_dir / "stage2c_pair_features.tsv"
+        feat_df = build_pair_features(records, cand_file, out_feat, prov_file)
+        self.assertEqual(len(feat_df), 1)
+
+        # Feed directly into prepare_matrix
+        matrix, cols = prepare_matrix(feat_df)
+        self.assertEqual(len(cols), 35)
+
+        # Assert ID and categorical columns are excluded
+        excluded_expected = {
+            "source1_entity_id", "candidate_entity_id",
+            "source1_country", "candidate_country",
+            "source1_canonical_country", "candidate_canonical_country",
+            "blocker_provenance",
+        }
+        for col_name in excluded_expected:
+            self.assertNotIn(col_name, cols)
+
+        # Monotonic constraints
+        constraints = build_monotonic_constraints(cols)
+        self.assertEqual(len(constraints), len(cols))
+        col_to_c = dict(zip(cols, constraints))
+        self.assertEqual(col_to_c["name_exact"], 1)
+        self.assertEqual(col_to_c["candidate_rank"], -1)
+        self.assertEqual(col_to_c["country_equal"], 0)
+        self.assertEqual(col_to_c["country_equal_missing"], 0)
+        self.assertEqual(col_to_c["best_blocker_score"], 1)
+        self.assertEqual(col_to_c["best_blocker_score_diff"], -1)
+        self.assertEqual(col_to_c["best_blocker_score_missing"], 0)
+        self.assertEqual(col_to_c["best_blocker_score_diff_missing"], 0)
+
+    def test_merge_feature_file_missing_row_preserves_indicator(self):
+        """Verify left-merging auxiliary features flags missing rows as 1.0 in missing indicator."""
+        main_df = pd.DataFrame([
+            {"source1_entity_id": "S1-1", "candidate_entity_id": "S2-1", "val": "1.0"},
+            {"source1_entity_id": "S1-2", "candidate_entity_id": "S2-2", "val": "2.0"},
+        ])
+        aux_df = pd.DataFrame([
+            {"source1_entity_id": "S1-1", "candidate_entity_id": "S2-1", "bge_cosine": "0.90", "bge_cosine_missing": "0"},
+        ])
+        aux_path = self.output_dir / "aux_bge.tsv"
+        aux_df.to_csv(aux_path, sep="\t", index=False)
+
+        merged = merge_feature_file(main_df, aux_path)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged.loc[0, "bge_cosine_missing"], "0")
+        self.assertEqual(merged.loc[1, "bge_cosine_missing"], "1")
+
+        matrix, cols = prepare_matrix(merged)
+        self.assertEqual(matrix.loc[0, "bge_cosine_missing"], 0.0)
+        self.assertEqual(matrix.loc[0, "bge_cosine"], 0.90)
+        self.assertEqual(matrix.loc[1, "bge_cosine_missing"], 1.0)
+        self.assertEqual(matrix.loc[1, "bge_cosine"], 0.0)
+
+    def test_prepare_matrix_fill_semantics(self):
+        """Verify prepare_matrix applies Stage 2c default fill values for missing data."""
+        raw_df = pd.DataFrame({
+            "source1_entity_id": ["S1-1"],
+            "candidate_entity_id": ["S2-1"],
+            "candidate_rank": [np.nan],
+            "rank_margin_from_best": [np.nan],
+            "best_blocker_score": [np.nan],
+            "country_equal": [np.nan],
+            "bge_cosine_missing": [np.nan],
+            "name_jaccard": [np.nan],
+        })
+        matrix, cols = prepare_matrix(raw_df)
+        self.assertEqual(matrix.loc[0, "candidate_rank"], 999.0)
+        self.assertEqual(matrix.loc[0, "rank_margin_from_best"], 999.0)
+        self.assertEqual(matrix.loc[0, "best_blocker_score"], -1.0)
+        self.assertEqual(matrix.loc[0, "country_equal"], -1.0)
+        self.assertEqual(matrix.loc[0, "bge_cosine_missing"], 1.0)
+        self.assertEqual(matrix.loc[0, "name_jaccard"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

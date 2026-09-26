@@ -73,13 +73,19 @@ if (-not $FeaturesFile) {
     if (Test-Path $autoFeat) {
         $FeaturesFile = $autoFeat
         Write-Info "Auto-detected Pair Features: $FeaturesFile"
+    } elseif ($DryRun) {
+        $FeaturesFile = $autoFeat
+        Write-Info "DryRun: Using planned Pair Features: $FeaturesFile"
     } else {
         throw "FeaturesFile not specified and not found at $autoFeat. Run Phase 2c first."
     }
 }
 
+$featParent = Split-Path -Parent $FeaturesFile
+if (-not $featParent) { $featParent = "." }
+
 if (-not $BgeFeatures) {
-    $autoBge = Join-Path (Split-Path -Parent $FeaturesFile) "bge_pair_features.tsv"
+    $autoBge = Join-Path $featParent "bge_pair_features.tsv"
     if (Test-Path $autoBge) {
         $BgeFeatures = $autoBge
         Write-Info "Auto-detected BGE Features: $BgeFeatures"
@@ -87,7 +93,7 @@ if (-not $BgeFeatures) {
 }
 
 if (-not $QwenFeatures) {
-    $autoQwen = Join-Path (Split-Path -Parent $FeaturesFile) "qwen_pair_features.tsv"
+    $autoQwen = Join-Path $featParent "qwen_pair_features.tsv"
     if (Test-Path $autoQwen) {
         $QwenFeatures = $autoQwen
         Write-Info "Auto-detected Qwen Features: $QwenFeatures"
@@ -95,7 +101,7 @@ if (-not $QwenFeatures) {
 }
 
 if (-not $QwenMatcherFeatures) {
-    $autoMatcher = Join-Path (Split-Path -Parent $FeaturesFile) "qwen_matcher_features.tsv"
+    $autoMatcher = Join-Path $featParent "qwen_matcher_features.tsv"
     if (Test-Path $autoMatcher) {
         $QwenMatcherFeatures = $autoMatcher
         Write-Info "Auto-detected Qwen Matcher Features: $QwenMatcherFeatures"
@@ -132,13 +138,13 @@ $trainArgs = @(
     "--country-mask-rate", $CountryMaskRate.ToString()
 )
 
-if ($BgeFeatures -and (Test-Path $BgeFeatures)) {
+if ($BgeFeatures -and ($DryRun -or (Test-Path $BgeFeatures))) {
     $trainArgs += @("--bge-features", $BgeFeatures)
 }
-if ($QwenFeatures -and (Test-Path $QwenFeatures)) {
+if ($QwenFeatures -and ($DryRun -or (Test-Path $QwenFeatures))) {
     $trainArgs += @("--qwen-features", $QwenFeatures)
 }
-if ($QwenMatcherFeatures -and (Test-Path $QwenMatcherFeatures)) {
+if ($QwenMatcherFeatures -and ($DryRun -or (Test-Path $QwenMatcherFeatures))) {
     $trainArgs += @("--qwen-matcher-features", $QwenMatcherFeatures)
 }
 if ($UseMonotoneConstraints) {
@@ -174,10 +180,11 @@ if (-not $DryRun) {
         Write-Host "  Calibrator Method:    $($meta.calibrator_parameters.method)" -ForegroundColor White
         Write-Host "  Final Estimators:     $($meta.final_n_estimators)" -ForegroundColor White
         Write-Host ""
-        Write-Host "  Top 5 Predictive Features:" -ForegroundColor Yellow
-        $topFeats = $meta.feature_importance.PSObject.Properties | Sort-Object { $_.Value } -Descending | Select-Object -First 5
+        Write-Host "  Top 5 Predictive Features (Gain):" -ForegroundColor Yellow
+        $gainObj = if ($meta.feature_importance.gain) { $meta.feature_importance.gain } else { $meta.feature_importance }
+        $topFeats = $gainObj.PSObject.Properties | Sort-Object { [double]$_.Value } -Descending | Select-Object -First 5
         foreach ($f in $topFeats) {
-            Write-Host "    - $($f.Name): $([Math]::Round($f.Value, 4))" -ForegroundColor Gray
+            Write-Host "    - $($f.Name): $([Math]::Round([double]$f.Value, 4))" -ForegroundColor Gray
         }
         Write-Success "Phase 3 model artifacts saved -> $OutputDir"
     } else {

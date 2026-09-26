@@ -66,13 +66,19 @@ if (-not $CandidateFile) {
     if (Test-Path $autoCand) {
         $CandidateFile = $autoCand
         Write-Info "Auto-detected Candidate Pairs: $CandidateFile"
+    } elseif ($DryRun) {
+        $CandidateFile = $autoCand
+        Write-Info "DryRun: Using planned Candidate Pairs: $CandidateFile"
     } else {
         throw "CandidateFile not specified and not found at $autoCand. Run Phase 1 first."
     }
 }
 
+$candParent = Split-Path -Parent $CandidateFile
+if (-not $candParent) { $candParent = "." }
+
 if (-not $ProvenanceFile) {
-    $autoProv = Join-Path (Split-Path -Parent $CandidateFile) "candidate_provenance.tsv"
+    $autoProv = Join-Path $candParent "candidate_provenance.tsv"
     if (Test-Path $autoProv) {
         $ProvenanceFile = $autoProv
         Write-Info "Auto-detected Candidate Provenance: $ProvenanceFile"
