@@ -22,6 +22,10 @@
     Run in CPU-only mode, using off-the-shelf BAAI/bge-m3 embeddings without fine-tuning.
 .PARAMETER IncludeQwen
     Enable auxiliary Qwen3-Embedding-0.6B feature extraction.
+.PARAMETER IncludeQwenMatcher
+    Enable Stage 2b Qwen3-0.6B generative-matcher feature extraction (stretch goal).
+.PARAMETER QwenMatcherAdapter
+    Path to fine-tuned LoRA adapter checkpoint that passed the held-out-country gate.
 .PARAMETER RunStage0
     Pre-run Stage 0 streaming normalization.
 .PARAMETER DryRun
@@ -37,6 +41,8 @@ param(
     [string]$RunMode = "Full",
     [switch]$SkipGPU = $false,
     [switch]$IncludeQwen = $false,
+    [switch]$IncludeQwenMatcher = $false,
+    [string]$QwenMatcherAdapter = "",
     [switch]$RunStage0 = $false,
     [switch]$DryRun = $false,
     [string]$OutputDir = "",
@@ -61,15 +67,16 @@ Ensure-Directory $OutputDir
 
 # Display Run Plan
 Write-Host "  Pipeline Configuration:" -ForegroundColor Cyan
-Write-Host "  - From Phase:    $FromPhase" -ForegroundColor White
-Write-Host "  - To Phase:      $ToPhase" -ForegroundColor White
-Write-Host "  - Run Mode:      $RunMode" -ForegroundColor White
-Write-Host "  - Skip GPU:      $SkipGPU (Use BGE-M3 base if true)" -ForegroundColor White
-Write-Host "  - Include Qwen:  $IncludeQwen" -ForegroundColor White
-Write-Host "  - Run Stage 0:   $RunStage0" -ForegroundColor White
-Write-Host "  - Dry Run:       $DryRun" -ForegroundColor White
-Write-Host "  - Python:        $python" -ForegroundColor White
-Write-Host "  - Output Root:   $OutputDir" -ForegroundColor White
+Write-Host "  - From Phase:            $FromPhase" -ForegroundColor White
+Write-Host "  - To Phase:              $ToPhase" -ForegroundColor White
+Write-Host "  - Run Mode:              $RunMode" -ForegroundColor White
+Write-Host "  - Skip GPU:              $SkipGPU (Use BGE-M3 base if true)" -ForegroundColor White
+Write-Host "  - Include Qwen:          $IncludeQwen" -ForegroundColor White
+Write-Host "  - Include Qwen Matcher:  $IncludeQwenMatcher" -ForegroundColor White
+Write-Host "  - Run Stage 0:           $RunStage0" -ForegroundColor White
+Write-Host "  - Dry Run:               $DryRun" -ForegroundColor White
+Write-Host "  - Python:                $python" -ForegroundColor White
+Write-Host "  - Output Root:           $OutputDir" -ForegroundColor White
 Write-Host ""
 
 $phaseTimings = @{}
@@ -192,6 +199,8 @@ Run-PipelinePhase 2 "Representation & Feature Engineering" {
         -Split "train" `
         -BgeModel $bgeModel `
         -IncludeQwen:$IncludeQwen `
+        -IncludeQwenMatcher:$IncludeQwenMatcher `
+        -QwenMatcherAdapter $QwenMatcherAdapter `
         -OutputDir (Join-Path $OutputDir "phase2_features_train") `
         -DryRun:$DryRun `
         -PythonPath $python
@@ -201,6 +210,8 @@ Run-PipelinePhase 2 "Representation & Feature Engineering" {
         -Split "test" `
         -BgeModel $bgeModel `
         -IncludeQwen:$IncludeQwen `
+        -IncludeQwenMatcher:$IncludeQwenMatcher `
+        -QwenMatcherAdapter $QwenMatcherAdapter `
         -OutputDir (Join-Path $OutputDir "phase2_features_test") `
         -DryRun:$DryRun `
         -PythonPath $python
@@ -216,15 +227,17 @@ if ($RunMode -eq "GateOnly") {
 # Phase 3: Stage 3 Grouped-OOF GBM & Calibration
 # ------------------------------------------------------------------------------
 Run-PipelinePhase 3 "Grouped-OOF GBM Training & Calibration" {
-    $trainFeats = Join-Path $OutputDir "phase2_features_train\pair_features.tsv"
-    $bgeFeats   = Join-Path $OutputDir "phase2_features_train\bge_pair_features.tsv"
-    $qwenFeats  = Join-Path $OutputDir "phase2_features_train\qwen_pair_features.tsv"
-    $p3ModelOut = Join-Path $OutputDir "phase3_gbm"
+    $trainFeats       = Join-Path $OutputDir "phase2_features_train\pair_features.tsv"
+    $bgeFeats         = Join-Path $OutputDir "phase2_features_train\bge_pair_features.tsv"
+    $qwenFeats        = Join-Path $OutputDir "phase2_features_train\qwen_pair_features.tsv"
+    $qwenMatcherFeats = Join-Path $OutputDir "phase2_features_train\qwen_matcher_features.tsv"
+    $p3ModelOut       = Join-Path $OutputDir "phase3_gbm"
 
     & "$PSScriptRoot\03_train_scoring_gbm.ps1" `
         -FeaturesFile $trainFeats `
         -BgeFeatures $bgeFeats `
         -QwenFeatures $qwenFeats `
+        -QwenMatcherFeatures $qwenMatcherFeats `
         -OutputDir $p3ModelOut `
         -DryRun:$DryRun `
         -PythonPath $python
@@ -234,18 +247,20 @@ Run-PipelinePhase 3 "Grouped-OOF GBM Training & Calibration" {
 # Phase 4: Test Scoring & Stage 4 Decision Assembly
 # ------------------------------------------------------------------------------
 Run-PipelinePhase 4 "Test Scoring & Stage 4 Decision Assembly" {
-    $testFeats   = Join-Path $OutputDir "phase2_features_test\pair_features.tsv"
-    $testBge     = Join-Path $OutputDir "phase2_features_test\bge_pair_features.tsv"
-    $testQwen    = Join-Path $OutputDir "phase2_features_test\qwen_pair_features.tsv"
-    $testCand    = Join-Path $OutputDir "phase1_blocking_test\candidate_pairs.tsv"
-    $p3ModelOut  = Join-Path $OutputDir "phase3_gbm"
-    $p4SubOut    = Join-Path $OutputDir "phase4_submission"
+    $testFeats        = Join-Path $OutputDir "phase2_features_test\pair_features.tsv"
+    $testBge          = Join-Path $OutputDir "phase2_features_test\bge_pair_features.tsv"
+    $testQwen         = Join-Path $OutputDir "phase2_features_test\qwen_pair_features.tsv"
+    $testQwenMatcher  = Join-Path $OutputDir "phase2_features_test\qwen_matcher_features.tsv"
+    $testCand         = Join-Path $OutputDir "phase1_blocking_test\candidate_pairs.tsv"
+    $p3ModelOut       = Join-Path $OutputDir "phase3_gbm"
+    $p4SubOut         = Join-Path $OutputDir "phase4_submission"
 
     & "$PSScriptRoot\04_inference_and_decision.ps1" `
         -ArtifactDir $p3ModelOut `
         -TestFeatures $testFeats `
         -TestBgeFeatures $testBge `
         -TestQwenFeatures $testQwen `
+        -TestQwenMatcherFeatures $testQwenMatcher `
         -TestCandidateFile $testCand `
         -OutputDir $p4SubOut `
         -DryRun:$DryRun `

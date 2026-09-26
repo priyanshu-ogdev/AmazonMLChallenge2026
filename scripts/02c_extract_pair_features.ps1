@@ -18,6 +18,12 @@
     Extract auxiliary Qwen3-Embedding-0.6B features (requires GPU or PyTorch).
 .PARAMETER QwenModel
     Qwen embedding model path or HuggingFace ID (default: "Qwen/Qwen3-Embedding-0.6B").
+.PARAMETER IncludeQwenMatcher
+    Extract Stage 2b Qwen3-0.6B generative-matcher probabilities (stretch goal).
+.PARAMETER QwenMatcherAdapter
+    Path to fine-tuned LoRA adapter checkpoint that passed the held-out-country gate.
+.PARAMETER QwenMatcherModel
+    Base model name for generative matcher (default: "Qwen/Qwen3-0.6B").
 .PARAMETER OutputDir
     Output directory for feature TSVs (default: output\phase2_features_<split>).
 .PARAMETER DryRun
@@ -32,6 +38,9 @@ param(
     [string]$BgeModel = "BAAI/bge-m3",
     [switch]$IncludeQwen = $false,
     [string]$QwenModel = "Qwen/Qwen3-Embedding-0.6B",
+    [switch]$IncludeQwenMatcher = $false,
+    [string]$QwenMatcherAdapter = "",
+    [string]$QwenMatcherModel = "Qwen/Qwen3-0.6B",
     [string]$OutputDir = "",
     [switch]$DryRun = $false,
     [string]$PythonPath = ""
@@ -75,9 +84,10 @@ $s1File = Join-Path $DATASET_DIR "$Split\${Split}_source1.tsv"
 $s2File = Join-Path $DATASET_DIR "$Split\${Split}_source2.tsv"
 $s3File = Join-Path $DATASET_DIR "$Split\${Split}_source3.tsv"
 
-$pairFeaturesOut = Join-Path $OutputDir "pair_features.tsv"
-$bgeFeaturesOut  = Join-Path $OutputDir "bge_pair_features.tsv"
-$qwenFeaturesOut = Join-Path $OutputDir "qwen_pair_features.tsv"
+$pairFeaturesOut        = Join-Path $OutputDir "pair_features.tsv"
+$bgeFeaturesOut         = Join-Path $OutputDir "bge_pair_features.tsv"
+$qwenFeaturesOut        = Join-Path $OutputDir "qwen_pair_features.tsv"
+$qwenMatcherFeaturesOut = Join-Path $OutputDir "qwen_matcher_features.tsv"
 
 # ------------------------------------------------------------------------------
 # 1. Deterministic Pair Features (Stage 2c)
@@ -127,8 +137,28 @@ if ($IncludeQwen) {
     Invoke-PythonModule "src.qwen_features" $qwenArgs "Qwen3 Auxiliary Features" -DryRun $DryRun -PythonExe $python
 }
 
+# ------------------------------------------------------------------------------
+# 4. Optional Qwen3 Generative Matcher Features (Stage 2b Stretch)
+# ------------------------------------------------------------------------------
+if ($IncludeQwenMatcher) {
+    if (-not $QwenMatcherAdapter) {
+        throw "IncludeQwenMatcher was specified, but QwenMatcherAdapter path was not provided."
+    }
+    Write-Step "2c.4" "Extracting Stage 2b Qwen3-0.6B Generative-Matcher Features..."
+    $matcherArgs = @(
+        "--source1", $s1File,
+        "--candidate-sources", $s2File, $s3File,
+        "--candidate-file", $CandidateFile,
+        "--output", $qwenMatcherFeaturesOut,
+        "--adapter-path", $QwenMatcherAdapter,
+        "--base-model-name", $QwenMatcherModel
+    )
+
+    Invoke-PythonModule "src.qwen_matcher_features" $matcherArgs "Qwen3 Generative Matcher Features" -DryRun $DryRun -PythonExe $python
+}
+
 if (-not $DryRun) {
-    Write-Step "2c.4" "Verifying Feature Extraction Artifacts..."
+    Write-Step "2c.5" "Verifying Feature Extraction Artifacts..."
     if (Test-Path $pairFeaturesOut) {
         $pLines = (Get-Content $pairFeaturesOut | Measure-Object -Line).Lines - 1
         Write-Success "Deterministic features: $pLines pairs -> $pairFeaturesOut"
@@ -140,6 +170,10 @@ if (-not $DryRun) {
     if ($IncludeQwen -and (Test-Path $qwenFeaturesOut)) {
         $qLines = (Get-Content $qwenFeaturesOut | Measure-Object -Line).Lines - 1
         Write-Success "Qwen features:          $qLines pairs -> $qwenFeaturesOut"
+    }
+    if ($IncludeQwenMatcher -and (Test-Path $qwenMatcherFeaturesOut)) {
+        $mLines = (Get-Content $qwenMatcherFeaturesOut | Measure-Object -Line).Lines - 1
+        Write-Success "Qwen Matcher features:  $mLines pairs -> $qwenMatcherFeaturesOut"
     }
 }
 

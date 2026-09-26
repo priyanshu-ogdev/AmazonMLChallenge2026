@@ -17,6 +17,8 @@
     Optional path to test bge_pair_features.tsv.
 .PARAMETER TestQwenFeatures
     Optional path to test qwen_pair_features.tsv.
+.PARAMETER TestQwenMatcherFeatures
+    Optional path to test qwen_matcher_features.tsv (Stage 2b stretch generative-matcher features).
 .PARAMETER TestCandidateFile
     Path to test candidate_pairs.tsv from Phase 1.
 .PARAMETER OutputDir
@@ -30,6 +32,7 @@ param(
     [string]$TestFeatures = "",
     [string]$TestBgeFeatures = "",
     [string]$TestQwenFeatures = "",
+    [string]$TestQwenMatcherFeatures = "",
     [string]$TestCandidateFile = "",
     [string]$OutputDir = "",
     [switch]$DryRun = $false,
@@ -86,6 +89,14 @@ if (-not $TestQwenFeatures) {
     }
 }
 
+if (-not $TestQwenMatcherFeatures) {
+    $autoMatcher = Join-Path (Split-Path -Parent $TestFeatures) "qwen_matcher_features.tsv"
+    if (Test-Path $autoMatcher) {
+        $TestQwenMatcherFeatures = $autoMatcher
+        Write-Info "Auto-detected Test Qwen Matcher Features: $TestQwenMatcherFeatures"
+    }
+}
+
 if (-not $TestCandidateFile) {
     $autoCand = Join-Path $DEFAULT_OUT "phase1_blocking_test\candidate_pairs.tsv"
     if (Test-Path $autoCand) {
@@ -103,6 +114,9 @@ $s1TestFile          = Join-Path $DATASET_DIR "test\test_source1.tsv"
 # 1. Score Candidates
 # ------------------------------------------------------------------------------
 Write-Step "4.1" "Applying Stage 3 GBM & Calibration to Test Candidates..."
+if ($TestQwenMatcherFeatures) {
+    Write-Info "Qwen Matcher Features:  $TestQwenMatcherFeatures"
+}
 $scoreArgs = @(
     "--mode", "score",
     "--features", $TestFeatures,
@@ -114,6 +128,9 @@ if ($TestBgeFeatures -and (Test-Path $TestBgeFeatures)) {
 }
 if ($TestQwenFeatures -and (Test-Path $TestQwenFeatures)) {
     $scoreArgs += @("--qwen-features", $TestQwenFeatures)
+}
+if ($TestQwenMatcherFeatures -and (Test-Path $TestQwenMatcherFeatures)) {
+    $scoreArgs += @("--qwen-matcher-features", $TestQwenMatcherFeatures)
 }
 
 # Pass test source files if TF-IDF vectorizer was fitted in Stage 3

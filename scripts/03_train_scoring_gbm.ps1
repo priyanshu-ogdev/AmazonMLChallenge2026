@@ -18,6 +18,8 @@
     Optional path to bge_pair_features.tsv.
 .PARAMETER QwenFeatures
     Optional path to qwen_pair_features.tsv.
+.PARAMETER QwenMatcherFeatures
+    Optional path to qwen_matcher_features.tsv (Stage 2b stretch generative-matcher features).
 .PARAMETER OutputDir
     Output directory for model artifacts (default: output\phase3_gbm).
 .PARAMETER Booster
@@ -39,6 +41,7 @@ param(
     [string]$GroundTruthFile = "",
     [string]$BgeFeatures = "",
     [string]$QwenFeatures = "",
+    [string]$QwenMatcherFeatures = "",
     [string]$OutputDir = "",
     [ValidateSet("gbtree", "dart")]
     [string]$Booster = "gbtree",
@@ -91,6 +94,14 @@ if (-not $QwenFeatures) {
     }
 }
 
+if (-not $QwenMatcherFeatures) {
+    $autoMatcher = Join-Path (Split-Path -Parent $FeaturesFile) "qwen_matcher_features.tsv"
+    if (Test-Path $autoMatcher) {
+        $QwenMatcherFeatures = $autoMatcher
+        Write-Info "Auto-detected Qwen Matcher Features: $QwenMatcherFeatures"
+    }
+}
+
 if (-not $GroundTruthFile) {
     $GroundTruthFile = Join-Path $DATASET_DIR "train\train_ground_truth.tsv"
 }
@@ -99,6 +110,9 @@ Write-Step "3.1" "Configuring Stage 3 Training Parameters..."
 Write-Info "Booster:                $Booster (eta=$Eta)"
 Write-Info "Country Masking Rate:   $CountryMaskRate"
 Write-Info "Monotonic Constraints:  $UseMonotoneConstraints"
+if ($QwenMatcherFeatures) {
+    Write-Info "Qwen Matcher Features:  $QwenMatcherFeatures"
+}
 Write-Info "Fold-Safe TF-IDF:       $IncludeTFIDF"
 Write-Info "Output Artifacts Dir:   $OutputDir"
 
@@ -117,6 +131,9 @@ if ($BgeFeatures -and (Test-Path $BgeFeatures)) {
 }
 if ($QwenFeatures -and (Test-Path $QwenFeatures)) {
     $trainArgs += @("--qwen-features", $QwenFeatures)
+}
+if ($QwenMatcherFeatures -and (Test-Path $QwenMatcherFeatures)) {
+    $trainArgs += @("--qwen-matcher-features", $QwenMatcherFeatures)
 }
 if ($UseMonotoneConstraints) {
     $trainArgs += "--use-monotone-constraints"

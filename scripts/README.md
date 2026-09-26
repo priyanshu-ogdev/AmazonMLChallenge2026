@@ -108,26 +108,30 @@ powershell -ExecutionPolicy Bypass -File scripts/02b_train_and_eval_bi_encoder.p
 - *If gate fails (NO-GO):* halts pipeline without silently deploying a degraded model.
 
 ### `02c_extract_pair_features.ps1`
-Extracts deterministic pair features and dense embeddings for candidate pairs.
+Extracts deterministic pair features, dense embeddings, and optional Stage 2b generative-matcher probabilities for candidate pairs.
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/02c_extract_pair_features.ps1 `
     -CandidateFile output/phase1_blocking_train/candidate_pairs.tsv `
-    -Split train
+    -Split train `
+    -IncludeQwenMatcher:$false `
+    -QwenMatcherAdapter "path/to/adapter"
 ```
 
 ### `03_train_scoring_gbm.ps1`
-Trains entity-grouped out-of-fold XGBoost, fits leak-safe Platt/isotonic calibrator, and optimizes macro-F0.5 threshold.
+Trains entity-grouped out-of-fold XGBoost, fits leak-safe Platt/isotonic calibrator, and optimizes macro-F0.5 threshold. Auto-detects BGE, Qwen, and Qwen Matcher features from `output/phase2_features_train/`.
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/03_train_scoring_gbm.ps1 `
     -Booster gbtree `
     -CountryMaskRate 0.15 `
-    -UseMonotoneConstraints $true
+    -UseMonotoneConstraints $true `
+    -QwenMatcherFeatures output/phase2_features_train/qwen_matcher_features.tsv
 ```
 
 ### `04_inference_and_decision.ps1`
-Applies trained GBM and calibrator to test set, then runs Stage 4 decision policy.
+Applies trained GBM and calibrator to test set, then runs Stage 4 decision policy. Auto-detects test feature tables (including Stage 2b matcher features if present).
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/04_inference_and_decision.ps1
+powershell -ExecutionPolicy Bypass -File scripts/04_inference_and_decision.ps1 `
+    -TestQwenMatcherFeatures output/phase2_features_test/qwen_matcher_features.tsv
 ```
 
 ### `05_validate_submission.ps1`
