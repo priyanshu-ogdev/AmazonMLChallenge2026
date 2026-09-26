@@ -181,7 +181,10 @@ if (-not $DryRun) {
         Write-Host "  Optimal Macro F0.5:   $([Math]::Round($meta.macro_f05, 4))" -ForegroundColor Green
         Write-Host "  Decision Threshold:  $([Math]::Round($meta.threshold, 4))" -ForegroundColor Green
         Write-Host "  OOF Average Precision: $([Math]::Round($meta.average_precision, 4))" -ForegroundColor Green
-        Write-Host "  Calibrator Method:    $($meta.calibrator_parameters.method)" -ForegroundColor White
+        $calMethod = if ($meta.calibrator_parameters.method) { $meta.calibrator_parameters.method } elseif ($meta.calibrator_parameters.name) { $meta.calibrator_parameters.name } else { $meta.calibrator }
+        $loadedBooster = if ($meta.booster) { $meta.booster } else { $meta.params.booster }
+        Write-Host "  Calibrator Method:    $calMethod" -ForegroundColor White
+        Write-Host "  Model Booster:        $loadedBooster" -ForegroundColor White
         Write-Host "  Final Estimators:     $($meta.final_n_estimators)" -ForegroundColor White
         Write-Host ""
         Write-Host "  Top 5 Predictive Features (Gain):" -ForegroundColor Yellow

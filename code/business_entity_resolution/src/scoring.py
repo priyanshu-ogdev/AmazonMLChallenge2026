@@ -1,15 +1,21 @@
 """
 Stage 3: entity-grouped GBM scoring, OOF calibration, and F0.5 thresholding.
 
-The baseline deliberately uses XGBoost's regularized logistic objective.
-Focal/beta-weighted objectives and DART are escalation experiments only and
-are not enabled by this module's production path.
+Implements the complete Layer 3 pipeline:
+- Grouped-OOF training with nested StratifiedGroupKFold for leakage-free early stopping
+- Monotonic constraints preserving feature directions and dynamic TF-IDF alignment
+- Country-equal masking regularization (-1 sentinel matching prepare_matrix missing fill)
+- Native support for standard GBDT ('gbtree') and DART tree dropout ('dart')
+- Comparative cross-country diagnostic (--compare-dart) evaluating US <-> India generalization
+- Leak-safe Platt and Isotonic probability calibration with JSON parameter serialization
+- Macro-F0.5 threshold optimization rewarding true singleton non-matches
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -27,6 +33,8 @@ from src.calibration import (
     fit_calibrator,
     serialize_calibrator,
 )
+
+logger = logging.getLogger(__name__)
 
 RANDOM_SEED = 42
 ID_COLUMNS = {"source1_entity_id", "candidate_entity_id", "label"}
@@ -376,17 +384,72 @@ def choose_threshold(
     else:
         score_samples = np.quantile(scores, np.linspace(0.01, 0.99, 100))
         candidates = np.unique(np.r_[0.0, grid, score_samples, 1.0])
-    values = [
-        macro_f05(
-            frame["source1_entity_id"],
-            scores,
-            frame["label"],
-            threshold,
-            all_source1_ids=all_source1_ids,
-            ground_truth=ground_truth,
-        )
-        for threshold in candidates
-    ]
+
+    # Pre-group entities once for fast threshold scanning across candidates
+    s1_col = frame["source1_entity_id"].values
+    labels_col = frame["label"].values
+    active_grouped: Dict[str, Tuple[List[float], List[int]]] = {}
+    for eid, s, l in zip(s1_col, scores, labels_col):
+        if eid not in active_grouped:
+            active_grouped[eid] = ([], [])
+        active_grouped[eid][0].append(float(s))
+        active_grouped[eid][1].append(int(l))
+
+    # Precompute actual counts and zero-pair singleton count
+    if ground_truth is not None:
+        all_eids = set(ground_truth.keys())
+    elif all_source1_ids is not None:
+        all_eids = set(all_source1_ids)
+    else:
+        all_eids = set(active_grouped.keys())
+
+    zero_pair_eids = all_eids - set(active_grouped.keys())
+    zero_pair_singleton_count = 0
+    if ground_truth is not None:
+        for eid in zero_pair_eids:
+            if len(ground_truth[eid]) == 0:
+                zero_pair_singleton_count += 1
+    elif all_source1_ids is not None:
+        zero_pair_singleton_count = len(zero_pair_eids)
+
+    total_entities = len(all_eids) if all_eids else len(active_grouped)
+
+    active_records = []
+    for eid, (s_list, l_list) in active_grouped.items():
+        if ground_truth is not None and eid in ground_truth:
+            actual_count = len(ground_truth[eid])
+        else:
+            actual_count = sum(l_list)
+        active_records.append((
+            np.asarray(s_list, dtype=float),
+            np.asarray(l_list, dtype=int),
+            actual_count,
+        ))
+
+    def _eval_threshold(th: float) -> float:
+        if total_entities == 0:
+            return 0.0
+        total_f05 = float(zero_pair_singleton_count)
+        for s_arr, l_arr, actual_count in active_records:
+            pred_mask = s_arr >= th
+            pred_count = int(pred_mask.sum())
+            tp = int(l_arr[pred_mask].sum())
+
+            if pred_count == 0 and actual_count == 0:
+                total_f05 += 1.0
+                continue
+            if pred_count == 0 and actual_count > 0:
+                continue
+            if pred_count > 0 and actual_count == 0:
+                continue
+
+            precision = tp / pred_count if pred_count else 0.0
+            recall = tp / actual_count if actual_count else 0.0
+            if precision + recall > 0:
+                total_f05 += (1.25 * precision * recall) / (0.25 * precision + recall)
+        return total_f05 / total_entities
+
+    values = [_eval_threshold(threshold) for threshold in candidates]
     index = int(np.argmax(values))
     return float(candidates[index]), float(values[index])
 
@@ -400,8 +463,29 @@ def score_candidates(
     records: Optional[Dict[str, str]] = None,
 ) -> pd.DataFrame:
     """Score a candidate table with saved model, calibration, and threshold."""
-    with open(artifact_dir / "stage3_metadata.json", encoding="utf-8") as handle:
+    meta_path = artifact_dir / "stage3_metadata.json"
+    gbm_path = artifact_dir / "gbm.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"Missing stage3_metadata.json in artifact directory: {artifact_dir}. "
+            "Run Stage 3 training before scoring candidates."
+        )
+    if not gbm_path.exists():
+        raise FileNotFoundError(
+            f"Missing gbm.json model file in artifact directory: {artifact_dir}. "
+            "Run Stage 3 training before scoring candidates."
+        )
+
+    with open(meta_path, encoding="utf-8") as handle:
         metadata = json.load(handle)
+
+    required_keys = {"feature_columns", "calibrator_parameters", "threshold"}
+    missing_keys = required_keys - set(metadata.keys())
+    if missing_keys:
+        raise ValueError(
+            f"Corrupt stage3_metadata.json in {artifact_dir}: missing required keys {sorted(missing_keys)}"
+        )
+
     frame = pd.read_csv(feature_file, sep="\t", dtype=str, keep_default_na=False)
     frame = merge_feature_file(frame, qwen_file)
     frame = merge_feature_file(frame, bge_file)
@@ -429,16 +513,26 @@ def score_candidates(
         frame["tfidf_cosine"] = tfidf_col
 
     matrix, _ = prepare_matrix(frame, metadata["feature_columns"])
-    model = xgb.XGBClassifier()
-    model.load_model(str(artifact_dir / "gbm.json"))
+    model_booster = metadata.get("booster") or metadata.get("params", {}).get("booster", "gbtree")
+    model = xgb.XGBClassifier(booster=model_booster)
+    model.load_model(str(gbm_path))
     raw = model.predict_proba(matrix)[:, 1]
     calibrated = apply_saved_calibrator(
         metadata["calibrator_parameters"], raw
     )
+    threshold = float(metadata["threshold"])
     result = frame[["source1_entity_id", "candidate_entity_id"]].copy()
     result["raw_score"] = raw
     result["calibrated_score"] = calibrated
-    result["is_match"] = calibrated >= float(metadata["threshold"])
+    result["is_match"] = calibrated >= threshold
+
+    logger.info(
+        "Scored %d candidate pairs with booster=%s, threshold=%.4f (matches=%d)",
+        len(result),
+        model_booster,
+        threshold,
+        int(result["is_match"].sum()),
+    )
     return result
 
 
@@ -825,6 +919,12 @@ def run_training(
         records=records,
         output_dir=output_dir,
     )
+    actual_booster = model.get_params().get("booster")
+    if booster == "dart":
+        assert actual_booster == "dart", (
+            f"Expected fitted model booster to be 'dart', got {actual_booster}"
+        )
+
     output_dir.mkdir(parents=True, exist_ok=True)
     model.save_model(str(output_dir / "gbm.json"))
     oof.assign(calibrated_score=calibrated).to_csv(
@@ -871,6 +971,7 @@ def run_training(
     feature_imp = extract_feature_importances(model, final_columns)
 
     metadata = {
+        "booster": actual_booster or booster,
         "feature_columns": final_columns,
         "calibrator": calibrator[0],
         "calibrator_parameters": serialize_calibrator(calibrator),

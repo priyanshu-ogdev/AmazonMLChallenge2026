@@ -66,12 +66,14 @@ def serialize_calibrator(calibrator) -> Dict:
     if name == "platt":
         return {
             "name": name,
+            "method": name,
             "coef": float(model.coef_[0][0]),
             "intercept": float(model.intercept_[0]),
         }
     if name == "isotonic":
         return {
             "name": name,
+            "method": name,
             "x_thresholds": [float(value) for value in model.X_thresholds_],
             "y_thresholds": [float(value) for value in model.y_thresholds_],
         }
@@ -82,7 +84,7 @@ def apply_saved_calibrator(parameters: Dict, scores: np.ndarray) -> np.ndarray:
     scores = np.asarray(scores, dtype=float).reshape(-1)
     if not np.isfinite(scores).all():
         raise ValueError("scores must contain only finite values")
-    name = parameters.get("name")
+    name = parameters.get("name") or parameters.get("method")
     clipped = np.clip(scores, 0.0, 1.0)
     if name == "platt":
         logits = float(parameters["coef"]) * clipped + float(parameters["intercept"])

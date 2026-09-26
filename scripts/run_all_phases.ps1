@@ -45,6 +45,9 @@ param(
     [string]$QwenMatcherAdapter = "",
     [switch]$RunStage0 = $false,
     [int]$NegativesPerPositive = 2,
+    [ValidateSet("gbtree", "dart")]
+    [string]$Booster = "gbtree",
+    [bool]$CompareDART = $false,
     [bool]$Injective = $true,
     [switch]$DryRun = $false,
     [string]$OutputDir = "",
@@ -240,6 +243,8 @@ Run-PipelinePhase 3 "Grouped-OOF GBM Training & Calibration" {
         FeaturesFile = $trainFeats
         BgeFeatures  = $bgeFeats
         OutputDir    = $p3ModelOut
+        Booster      = $Booster
+        CompareDART  = $CompareDART
         DryRun       = $DryRun
         PythonPath   = $python
     }

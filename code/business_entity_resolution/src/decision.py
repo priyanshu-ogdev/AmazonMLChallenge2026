@@ -15,7 +15,7 @@ def load_source1_ids(path: Path) -> list[str]:
     frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
     if "entity_id" not in frame:
         raise ValueError(f"{path} must contain entity_id")
-    ids = frame["entity_id"].tolist()
+    ids = [str(x).strip() for x in frame["entity_id"] if str(x).strip()]
     if len(ids) != len(set(ids)):
         raise ValueError(f"{path} contains duplicate entity_id values")
     return ids
@@ -40,7 +40,7 @@ def assemble_matching_results(
         raise ValueError(f"scored table is missing columns: {sorted(missing)}")
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("threshold must be within [0, 1]")
-    source1_ids = list(source1_ids)
+    source1_ids = [str(x).strip() for x in source1_ids]
     if len(source1_ids) != len(set(source1_ids)):
         raise ValueError("source1_ids contains duplicates")
     if scored[["source1_entity_id", "candidate_entity_id"]].duplicated().any():

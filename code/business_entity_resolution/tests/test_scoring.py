@@ -509,6 +509,7 @@ class TestStage3Scoring(unittest.TestCase):
             country_mask_rate=0.0,
             use_monotone_constraints=False,
         )
+        self.assertEqual(metadata["booster"], "dart")
         self.assertEqual(metadata["params"]["booster"], "dart")
         self.assertEqual(metadata["params"]["sample_type"], "uniform")
         self.assertTrue((dart_out / "gbm.json").exists())
@@ -872,6 +873,7 @@ class TestStage3Scoring(unittest.TestCase):
         self.assertTrue((stage3_dir / "gbm.json").exists())
         self.assertTrue((stage3_dir / "stage3_metadata.json").exists())
         self.assertTrue((stage3_dir / "oof_predictions.tsv").exists())
+        self.assertEqual(metadata["booster"], "dart")
         self.assertEqual(metadata["params"]["booster"], "dart")
         self.assertEqual(metadata["params"]["sample_type"], "uniform")
         self.assertEqual(metadata["params"]["normalize_type"], "tree")
@@ -1041,6 +1043,42 @@ class TestStage3Scoring(unittest.TestCase):
         self.assertIn("gbtree_mean_held_out_country_ap", cmp)
         self.assertIn("dart_mean_held_out_country_ap", cmp)
         self.assertIn("winning_booster", cmp)
+
+    def test_score_candidates_missing_artifacts_raise_clear_error(self):
+        """Verify score_candidates raises FileNotFoundError when model files are missing."""
+        empty_dir = self.output_dir / "empty_artifacts"
+        empty_dir.mkdir(parents=True, exist_ok=True)
+        feat_file = self.output_dir / "dummy_feats.tsv"
+        pd.DataFrame([{"source1_entity_id": "S1-1", "candidate_entity_id": "S2-1"}]).to_csv(feat_file, sep="\t", index=False)
+
+        with self.assertRaises(FileNotFoundError) as ctx:
+            score_candidates(feature_file=feat_file, artifact_dir=empty_dir)
+        self.assertIn("stage3_metadata.json", str(ctx.exception))
+
+        # Create metadata only, missing gbm.json
+        meta_file = empty_dir / "stage3_metadata.json"
+        meta_file.write_text(json.dumps({
+            "feature_columns": ["colA"],
+            "calibrator_parameters": {"name": "platt", "coef": 1.0, "intercept": 0.0},
+            "threshold": 0.5,
+        }))
+        with self.assertRaises(FileNotFoundError) as ctx:
+            score_candidates(feature_file=feat_file, artifact_dir=empty_dir)
+        self.assertIn("gbm.json", str(ctx.exception))
+
+    def test_score_candidates_corrupt_metadata_raises_clear_error(self):
+        """Verify score_candidates raises ValueError when metadata lacks required keys."""
+        bad_dir = self.output_dir / "bad_meta"
+        bad_dir.mkdir(parents=True, exist_ok=True)
+        (bad_dir / "gbm.json").write_text("{}")
+        (bad_dir / "stage3_metadata.json").write_text(json.dumps({"some_key": 123}))
+
+        feat_file = self.output_dir / "dummy_feats2.tsv"
+        pd.DataFrame([{"source1_entity_id": "S1-1", "candidate_entity_id": "S2-1"}]).to_csv(feat_file, sep="\t", index=False)
+
+        with self.assertRaises(ValueError) as ctx:
+            score_candidates(feature_file=feat_file, artifact_dir=bad_dir)
+        self.assertIn("missing required keys", str(ctx.exception))
 
 
 if __name__ == "__main__":
