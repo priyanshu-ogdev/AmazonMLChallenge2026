@@ -25,6 +25,8 @@ from src.normalize import (
     source_from_entity_id,
     extract_postal_code,
     extract_structural_fields,
+    is_missing_address,
+    MISSING_ADDRESS_SENTINELS,
     LEGAL_SUFFIX_MAP,
     ADDRESS_SUFFIX_MAP,
 )
@@ -246,6 +248,109 @@ class TestLayer0Normalization(unittest.TestCase):
         self.assertEqual(source_from_entity_id("S3-00012"), "S3")
         self.assertEqual(source_from_entity_id("INVALID-123"), "")
         self.assertEqual(source_from_entity_id(""), "")
+
+    def test_is_missing_address_and_sentinels(self):
+        """Verify is_missing_address correctly identifies all null/sentinel variants."""
+        sentinels = [
+            None,
+            "",
+            "   ",
+            "nan",
+            "NaN",
+            "None",
+            "null",
+            "no address",
+            "No Address",
+            "no address available",
+            "not available",
+            "Not Available",
+            "unknown",
+            "UNKNOWN",
+            "n/a",
+            "N/A",
+            "missing",
+            "MISSING",
+            "[no_address]",
+        ]
+        for s in sentinels:
+            self.assertTrue(is_missing_address(s), f"Expected '{s}' to be recognized as missing address")
+            self.assertEqual(normalize_address(s), "", f"Expected normalize_address('{s}') to be empty string")
+
+        valid_addrs = [
+            "123 Main St",
+            "Rue de la Paix",
+            "MG Road, Bangalore",
+        ]
+        for v in valid_addrs:
+            self.assertFalse(is_missing_address(v), f"Expected '{v}' to be recognized as valid address")
+
+    def test_normalize_entity_record_with_missing_sentinels(self):
+        """Verify normalize_entity_record flags is_address_missing and builds [no_address] encoder_text."""
+        for sentinel in ["no address", "Not Available", "n/a", "missing", "nan"]:
+            rec = normalize_entity_record(
+                name="Acme Corp",
+                address=sentinel,
+                entity_id="S1-101",
+                country="US",
+            )
+            self.assertTrue(rec["is_address_missing"])
+            self.assertEqual(rec["norm_address"], "")
+            self.assertIsNone(rec["postal_code"])
+            self.assertIn("[NO_ADDRESS]", rec["encoder_text"])
+
+    def test_stream_source_tsv_encoding_resilience(self):
+        """Verify stream_source_tsv handles files with non-standard byte sequences safely."""
+        import tempfile
+        from src.data_builder import stream_source_tsv
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".tsv", delete=False) as f:
+            header = b"entity_id\tbusiness_name\tbusiness_address\tcountry\n"
+            row = b"S1-1\tCaf\xe9\t10 Rue Paris\tFR\n"
+            f.write(header + row)
+            temp_path = f.name
+
+        try:
+            records = list(stream_source_tsv(temp_path))
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["entity_id"], "S1-1")
+            self.assertEqual(records[0]["country_canonical"], "france")
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+
+    def test_records_to_dict_prenormalized(self):
+        """Verify records_to_dict correctly digests pre-normalized Stage 0 DataFrames."""
+        import pandas as pd
+        from src.data_builder import records_to_dict
+
+        df = pd.DataFrame([
+            {
+                "entity_id": "S1-99",
+                "source": "S1",
+                "country": "USA",
+                "country_canonical": "us",
+                "raw_name": "Target Store #10",
+                "raw_address": "100 Target Way",
+                "norm_name": "target store 10",
+                "norm_address": "100 target way",
+                "encoder_text": "target store 10 | 100 target way",
+                "is_address_missing": 0,
+                "postal_code": "75001",
+                "street_number": "100",
+                "trailing_segment": "target way",
+                "digit_runs": "100",
+                "name_token_count": 3,
+                "address_token_count": 3,
+            }
+        ])
+        rec_map = records_to_dict(df)
+        self.assertIn("S1-99", rec_map)
+        rec = rec_map["S1-99"]
+        self.assertEqual(rec["norm_name"], "target store 10")
+        self.assertEqual(rec["norm_address"], "100 target way")
+        self.assertEqual(rec["country_canonical"], "us")
+        self.assertEqual(rec["postal_code"], "75001")
+        self.assertEqual(rec["street_number"], "100")
+        self.assertFalse(rec["is_address_missing"])
 
 
 if __name__ == "__main__":

@@ -521,6 +521,36 @@ def normalize_name(name: str) -> str:
     return name.strip()
 
 
+MISSING_ADDRESS_SENTINELS = {
+    "",
+    "nan",
+    "none",
+    "null",
+    "no address",
+    "no address available",
+    "not available",
+    "unknown",
+    "n/a",
+    "missing",
+    "[no_address]",
+}
+
+
+def is_missing_address(address: Optional[str]) -> bool:
+    """
+    Check if an address value is null, empty, or a known missing-address sentinel.
+    S2/S3 feeds contain values like 'NaN', 'None', 'no address', 'not available', 'N/A', etc.
+    """
+    if address is None:
+        return True
+    addr = str(address).strip().lower()
+    return (
+        not addr
+        or addr in MISSING_ADDRESS_SENTINELS
+        or addr.startswith("no address")
+    )
+
+
 def normalize_address(address: str) -> str:
     """
     Normalize a business address for lexical matching and embedding.
@@ -541,12 +571,9 @@ def normalize_address(address: str) -> str:
     Returns:
         Normalized address string. Empty string for null/empty/missing input.
     """
-    if address is None:
+    if is_missing_address(address):
         return ""
-    address = str(address).strip()
-    if address.lower() in ("nan", "none", "null", ""):
-        return ""
-    address = _unicode_normalize(address)
+    address = _unicode_normalize(str(address).strip())
     address = _strip_urls(address)
     address = _clean_typography_and_case(address)
     address = _strip_address_hash_prefix(address)
@@ -581,8 +608,7 @@ def normalize_entity(name: str, address: str) -> str:
     norm_name = normalize_name(name)
     norm_address = normalize_address(address)
 
-    raw_addr = str(address).strip() if address is not None else ""
-    is_structurally_missing = raw_addr.lower() in ("nan", "none", "null", "")
+    is_structurally_missing = is_missing_address(address)
 
     if norm_name and norm_address:
         return "{} | {}".format(norm_name, norm_address)
@@ -668,7 +694,7 @@ def extract_structural_fields(address: str) -> Dict[str, object]:
       - trailing_segment: last comma-separated segment (often city/state/region)
       - street_number: leading digit run if address begins with a number
     """
-    if not address:
+    if is_missing_address(address):
         return {"digit_runs": [], "trailing_segment": None, "street_number": None}
     addr_str = str(address).strip()
     digit_runs = _DIGIT_RUN_RE.findall(addr_str)
@@ -727,7 +753,7 @@ def normalize_entity_record(
     norm_address = normalize_address(address)
 
     raw_addr = str(address).strip() if address is not None else ""
-    is_missing = raw_addr.lower() in ("nan", "none", "null", "") or len(raw_addr) == 0
+    is_missing = is_missing_address(address)
 
     postal = extract_postal_code(raw_addr if not is_missing else "", country=country)
     encoder_text = normalize_entity(name, address)
@@ -774,7 +800,7 @@ def extract_postal_code(address: str, country: Optional[str] = None) -> Optional
     Returns:
         Postal code string, or None if no recognized pattern found.
     """
-    if not address:
+    if is_missing_address(address):
         return None
     addr_str = str(address)
 

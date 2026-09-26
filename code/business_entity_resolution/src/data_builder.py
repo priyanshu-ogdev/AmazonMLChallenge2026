@@ -125,19 +125,25 @@ def stream_source_tsv(path: str | Path) -> Iterator[Dict[str, Any]]:
     """
     Yields normalized entity record dictionaries one row at a time.
     Safe for 5M+ row files without loading into memory.
+    Supports raw files (business_name, business_address, country)
+    or pre-normalized files (raw_name, raw_address, norm_name, etc.).
     """
-    with open(path, newline="", encoding="utf-8") as f:
+    with open(path, newline="", encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f, delimiter="\t")
-        required = {"entity_id", "business_name", "business_address", "country"}
-        missing = required - set(reader.fieldnames or [])
-        if missing:
-            raise ValueError(f"{path}: missing expected columns {missing}")
+        fieldnames = set(reader.fieldnames or [])
+        if "entity_id" not in fieldnames:
+            raise ValueError(f"{path}: missing expected column 'entity_id'")
+        name_col = next((c for c in ("business_name", "raw_name", "norm_name") if c in fieldnames), None)
+        addr_col = next((c for c in ("business_address", "raw_address", "norm_address") if c in fieldnames), None)
+        country_col = next((c for c in ("country", "country_canonical") if c in fieldnames), None)
+        if not name_col or not addr_col or not country_col:
+            raise ValueError(f"{path}: missing expected columns (found {reader.fieldnames})")
         for row in reader:
             yield normalize_entity_record(
-                name=row["business_name"],
-                address=row["business_address"],
+                name=row[name_col],
+                address=row[addr_col],
                 entity_id=row["entity_id"],
-                country=row["country"],
+                country=row[country_col],
             )
 
 
@@ -249,9 +255,71 @@ def records_to_dict(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
 
     cols = {col: idx for idx, col in enumerate(df.columns)}
     eid_idx = cols.get("entity_id")
-    name_idx = cols.get("business_name")
-    addr_idx = cols.get("business_address")
-    country_idx = cols.get("country")
+    name_col = next((c for c in ("business_name", "raw_name", "norm_name") if c in cols), None)
+    addr_col = next((c for c in ("business_address", "raw_address", "norm_address") if c in cols), None)
+    country_col = next((c for c in ("country", "country_canonical") if c in cols), None)
+
+    name_idx = cols.get(name_col) if name_col else None
+    addr_idx = cols.get(addr_col) if addr_col else None
+    country_idx = cols.get(country_col) if country_col else None
+
+    # Check if df is already Stage 0 normalized
+    is_already_normalized = (
+        "norm_name" in cols
+        and "norm_address" in cols
+        and "country_canonical" in cols
+        and "encoder_text" in cols
+    )
+
+    if is_already_normalized:
+        norm_name_idx = cols["norm_name"]
+        norm_addr_idx = cols["norm_address"]
+        canon_c_idx = cols["country_canonical"]
+        enc_text_idx = cols["encoder_text"]
+        missing_idx = cols.get("is_address_missing")
+        postal_idx = cols.get("postal_code")
+        street_idx = cols.get("street_number")
+        trailing_idx = cols.get("trailing_segment")
+        raw_name_idx = cols.get("raw_name")
+        raw_addr_idx = cols.get("raw_address")
+        token_n_idx = cols.get("name_token_count")
+        token_a_idx = cols.get("address_token_count")
+
+        for row in df.itertuples(index=False):
+            eid = str(row[eid_idx]) if eid_idx is not None and pd.notna(row[eid_idx]) else ""
+            r_name = str(row[raw_name_idx]) if raw_name_idx is not None and pd.notna(row[raw_name_idx]) else ""
+            r_addr = str(row[raw_addr_idx]) if raw_addr_idx is not None and pd.notna(row[raw_addr_idx]) else ""
+            n_name = str(row[norm_name_idx]) if norm_name_idx is not None and pd.notna(row[norm_name_idx]) else ""
+            n_addr = str(row[norm_addr_idx]) if norm_addr_idx is not None and pd.notna(row[norm_addr_idx]) else ""
+            c_canon = str(row[canon_c_idx]) if canon_c_idx is not None and pd.notna(row[canon_c_idx]) else ""
+            enc_text = str(row[enc_text_idx]) if enc_text_idx is not None and pd.notna(row[enc_text_idx]) else ""
+            is_miss = bool(int(row[missing_idx])) if missing_idx is not None and pd.notna(row[missing_idx]) and str(row[missing_idx]) in ("1", "True", "true") else False
+            post = str(row[postal_idx]) if postal_idx is not None and pd.notna(row[postal_idx]) and str(row[postal_idx]) != "" else None
+            st_no = str(row[street_idx]) if street_idx is not None and pd.notna(row[street_idx]) and str(row[street_idx]) != "" else None
+            trail = str(row[trailing_idx]) if trailing_idx is not None and pd.notna(row[trailing_idx]) and str(row[trailing_idx]) != "" else None
+            raw_c = str(row[country_idx]) if country_idx is not None and pd.notna(row[country_idx]) else c_canon
+
+            rec = {
+                "entity_id": eid,
+                "source": source_from_entity_id(eid),
+                "country": raw_c,
+                "country_canonical": c_canon,
+                "raw_name": r_name,
+                "raw_address": r_addr,
+                "norm_name": n_name,
+                "norm_address": n_addr,
+                "encoder_text": enc_text,
+                "normalized_text": enc_text,
+                "is_address_missing": is_miss,
+                "postal_code": post,
+                "street_number": st_no,
+                "trailing_segment": trail,
+                "digit_runs": [],
+                "name_token_count": int(row[token_n_idx]) if token_n_idx is not None and pd.notna(row[token_n_idx]) else len(n_name.split()),
+                "address_token_count": int(row[token_a_idx]) if token_a_idx is not None and pd.notna(row[token_a_idx]) else len(n_addr.split()),
+            }
+            result[eid] = rec
+        return result
 
     for row in df.itertuples(index=False):
         eid = str(row[eid_idx]) if eid_idx is not None and pd.notna(row[eid_idx]) else ""

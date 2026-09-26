@@ -80,11 +80,20 @@ def _char_trigrams(value: str) -> Set[str]:
 
 
 def _record_features(record: Dict[str, str]) -> Dict[str, object]:
-    name = normalize_name(record.get("business_name", ""))
-    address = normalize_address(record.get("business_address", ""))
+    if "norm_name" in record and record["norm_name"] is not None:
+        name = record["norm_name"]
+    else:
+        name = normalize_name(record.get("business_name") or record.get("raw_name", ""))
+
+    if "norm_address" in record and record["norm_address"] is not None:
+        address = record["norm_address"]
+    else:
+        address = normalize_address(record.get("business_address") or record.get("raw_address", ""))
+
     raw_country = record.get("country", "")
     canonical_country = record.get("canonical_country") or canonicalize_country(raw_country)
     raw_addr = record.get("raw_address") or record.get("business_address", "")
+    postal = record.get("postal_code") or extract_postal_code(raw_addr, country=canonical_country)
     return {
         "entity_id": record["entity_id"],
         "country": raw_country,
@@ -95,7 +104,7 @@ def _record_features(record: Dict[str, str]) -> Dict[str, object]:
         "address_tokens": _tokens(address),
         "name_numbers": _numeric_tokens(name),
         "address_numbers": _numeric_tokens(address),
-        "postal": record.get("postal_code") or extract_postal_code(raw_addr, country=canonical_country),
+        "postal": postal,
         "name_trigrams": _char_trigrams(name),
         "address_trigrams": _char_trigrams(address),
     }
@@ -224,15 +233,24 @@ def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
         if not name_col or not addr_col:
             raise ValueError(f"{path} is missing name/address columns: {list(frame.columns)}")
 
+        has_stage0 = "norm_name" in frame.columns and "norm_address" in frame.columns
         for row in frame.to_dict("records"):
             eid = row["entity_id"]
-            records[eid] = {
+            rec: Dict[str, str] = {
                 "entity_id": eid,
                 "business_name": row.get(name_col, ""),
                 "business_address": row.get(addr_col, ""),
+                "raw_name": row.get("raw_name", ""),
+                "raw_address": row.get("raw_address", ""),
                 "country": row.get("country", row.get(country_col, "")),
                 "canonical_country": row.get("country_canonical", ""),
             }
+            if has_stage0:
+                rec["norm_name"] = row.get("norm_name", "")
+                rec["norm_address"] = row.get("norm_address", "")
+                rec["postal_code"] = row.get("postal_code", "")
+                rec["is_address_missing"] = row.get("is_address_missing", "0")
+            records[eid] = rec
     return records
 
 
