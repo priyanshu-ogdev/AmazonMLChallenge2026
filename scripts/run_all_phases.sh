@@ -62,8 +62,7 @@ while [[ $# -gt 0 ]]; do
         --to-phase|-ToPhase) TO_PHASE="$2"; shift 2 ;;
         --run-mode|-RunMode) RUN_MODE="$2"; shift 2 ;;
         --skip-gpu|-SkipGPU) SKIP_GPU=true; shift 1 ;;
-        --baseline-only) BASELINE_ONLY=true; shift 1 ;;
-    --baseline-only               Skip dense embedding extraction entirely for ultra-fast CPU baselines
+        --baseline-only|-BaselineOnly) BASELINE_ONLY=true; shift 1 ;;
         --no-qwen|-NoQwen) INCLUDE_QWEN=false; shift 1 ;;
         --include-qwen-matcher|-IncludeQwenMatcher) INCLUDE_QWEN_MATCHER=true; shift 1 ;;
         --qwen-matcher-adapter|-QwenMatcherAdapter) QWEN_MATCHER_ADAPTER="$2"; shift 2 ;;
