@@ -50,10 +50,22 @@ logs/
 *.log
 tensorboard/
 
-# Outputs, Cache & Submission Archives
-output/*
-!output/README.md
-!output/.gitkeep
+# Outputs, Cache & Submission Archives (Tracked via Git LFS)
+!output/
+!output/**
+!output/**/*.tsv
+!output/**/*.csv
+!output/**/*.pkl
+!output/**/*.pickle
+!output/**/*.pt
+!output/**/*.pth
+!output/**/*.bin
+!output/**/*.safetensors
+!output/**/*.onnx
+!output/**/*.npz
+output/**/_tmp_worker_chunks/
+output/**/checkpoint_backup/
+output/**/*.tmp
 submissions/
 *.zip
 *.tar.gz

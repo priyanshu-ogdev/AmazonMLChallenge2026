@@ -1,0 +1,21 @@
+# =============================================================================
+# Git LFS Attributes - Amazon ML Challenge 2026
+# =============================================================================
+
+# Model checkpoints & large binary weights
+*.pt filter=lfs diff=lfs merge=lfs -text
+*.pth filter=lfs diff=lfs merge=lfs -text
+*.bin filter=lfs diff=lfs merge=lfs -text
+*.safetensors filter=lfs diff=lfs merge=lfs -text
+*.onnx filter=lfs diff=lfs merge=lfs -text
+*.npz filter=lfs diff=lfs merge=lfs -text
+*.pkl filter=lfs diff=lfs merge=lfs -text
+*.pickle filter=lfs diff=lfs merge=lfs -text
+
+# Pipeline output artifacts & feature matrices
+output/**/*.tsv filter=lfs diff=lfs merge=lfs -text
+output/**/*.csv filter=lfs diff=lfs merge=lfs -text
+output/**/*.pkl filter=lfs diff=lfs merge=lfs -text
+output/**/*.bin filter=lfs diff=lfs merge=lfs -text
+output/**/*.pt filter=lfs diff=lfs merge=lfs -text
+output/**/*.safetensors filter=lfs diff=lfs merge=lfs -text

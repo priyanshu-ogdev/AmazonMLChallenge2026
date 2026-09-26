@@ -191,11 +191,14 @@ def evaluate_qwen_matcher(
     yes_id: int,
     batch_size: int = 32,
     max_seq_length: int = 224,
-    device: str = "cuda",
+    device: Optional[str] = None,
 ) -> Dict[str, float]:
     """Evaluate Qwen matcher on a validation set and compute classification metrics."""
     import torch
     import torch.nn.functional as F
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
     model.eval()
     all_preds = []

@@ -9,6 +9,9 @@ and other learned statistics belong in the Stage 3 fold-specific pipeline.
 from __future__ import annotations
 
 import argparse
+_shared_normalized = None
+_shared_provenance = None
+_shared_s1_max_score = None
 import csv
 import math
 import os
@@ -288,10 +291,15 @@ def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
 
 def _feature_worker(
     chunk_items: List[Tuple[str, List[str]]],
-    normalized: Dict[str, Dict[str, object]],
-    provenance: Dict[Tuple[str, str], Tuple[str, Optional[float], Optional[float], Optional[int]]],
-    s1_max_score: Dict[str, float],
+    normalized: Optional[Dict[str, Dict[str, object]]],
+    provenance: Optional[Dict[Tuple[str, str], Tuple[str, Optional[float], Optional[float], Optional[int]]]],
+    s1_max_score: Optional[Dict[str, float]],
 ) -> List[Dict[str, object]]:
+    global _shared_normalized, _shared_provenance, _shared_s1_max_score
+    normalized = normalized if normalized is not None else _shared_normalized
+    provenance = provenance if provenance is not None else _shared_provenance
+    s1_max_score = s1_max_score if s1_max_score is not None else _shared_s1_max_score
+
     worker_rows: List[Dict[str, object]] = []
     for s1_id, cand_ids in chunk_items:
         cand_count = len(cand_ids)
@@ -410,7 +418,7 @@ def build_pair_features(
     items = list(pairs_by_s1.items())
     num_workers = max(1, os.cpu_count() or 4)
     # Limit workers for pair features since each process duplicates the lookup dictionaries
-    num_workers = min(num_workers, 6)
+    num_workers = min(num_workers, 14)
 
     chunk_size = math.ceil(len(items) / num_workers) if num_workers > 0 else 0
     if chunk_size == 0:
@@ -422,9 +430,20 @@ def build_pair_features(
     if num_workers <= 1 or not chunks:
         rows = _feature_worker(items, normalized, provenance, s1_max_score)
     else:
-        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+        global _shared_normalized, _shared_provenance, _shared_s1_max_score
+        _shared_normalized = normalized
+        _shared_provenance = provenance
+        _shared_s1_max_score = s1_max_score
+        
+        try:
+            import multiprocessing
+            ctx = multiprocessing.get_context("fork")
+        except (ValueError, ImportError):
+            ctx = None
+
+        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as pool:
             futures = [
-                pool.submit(_feature_worker, chunk, normalized, provenance, s1_max_score)
+                pool.submit(_feature_worker, chunk, None, None, None)
                 for chunk in chunks
             ]
             for fut in as_completed(futures):

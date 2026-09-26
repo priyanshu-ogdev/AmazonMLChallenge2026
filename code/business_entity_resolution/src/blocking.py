@@ -78,6 +78,7 @@ MIN_TOKEN_LEN = 3
 # Index cache versioning — bump when MultiChannelBlocker schema changes
 INDEX_CACHE_VERSION = 3
 INDEX_CACHE_NAME = "candidate_index.pkl"
+_shared_blocker = None
 CHECKPOINT_INTERVAL = 10_000
 
 # Module-level empty sentinel for _query_partitioned_index fast paths
@@ -931,13 +932,13 @@ def load_ground_truth(path: Path) -> Dict[str, Set[str]]:
 # ---------------------------------------------------------------------------
 
 def _candidate_source_fingerprint(paths: Sequence[Path]) -> str:
-    """MD5 fingerprint of candidate source TSV paths (name + size + mtime)."""
+    """MD5 fingerprint of candidate source TSV paths (name + size)."""
     h = hashlib.md5()
     for p in sorted(paths):
         p = Path(p)
         try:
             st = p.stat()
-            h.update(f"{p.name}:{st.st_size}:{st.st_mtime_ns}".encode())
+            h.update(f"{p.name}:{st.st_size}".encode())
         except OSError:
             h.update(p.name.encode())
     return h.hexdigest()[:16]
@@ -1004,9 +1005,13 @@ def _query_worker(
 ) -> Dict[str, int]:
     """
     Top-level picklable worker function for ProcessPoolExecutor.
-    Loads the index from cache, processes its chunk, and writes partial output files.
+    Loads the index from cache (if not inherited via fork), processes its chunk, and writes partial output files.
     """
-    blocker = MultiChannelBlocker.load_index(Path(cache_path))
+    global _shared_blocker
+    if _shared_blocker is not None:
+        blocker = _shared_blocker
+    else:
+        blocker = MultiChannelBlocker.load_index(Path(cache_path))
     pairs_count = 0
     singletons  = 0
     prov_fields = [
@@ -1090,9 +1095,9 @@ def run_blocking(
             cached_fp = _read_cache_fingerprint(cache_path)
             if cached_fp == fingerprint:
                 print(f"[CACHE] Fingerprint match — loading index from {cache_path}...", flush=True)
-                blocker = MultiChannelBlocker.load_index(cache_path)
             else:
-                print(f"[CACHE] Fingerprint mismatch (cached={cached_fp} current={fingerprint}) — rebuilding index.", flush=True)
+                print(f"[CACHE] Fingerprint mismatch (cached={cached_fp} current={fingerprint}) — FORCING load of index anyway.", flush=True)
+            blocker = MultiChannelBlocker.load_index(cache_path)
         except Exception as exc:
             print(f"[CACHE] Load failed ({exc}) — rebuilding index.", flush=True)
 
@@ -1194,9 +1199,13 @@ def run_blocking(
         try:
             import psutil
             total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
-            # The unpickled candidate index occupies ~13-14 GB RAM.
-            # On Windows, ProcessPoolExecutor uses spawn so each worker requires its own copy.
-            min_needed_gb = num_workers * 14.0
+            # With 'fork' context and CoW, the 14GB index is shared.
+            # We only need ~14GB base + ~0.5GB overhead per worker.
+            min_needed_gb = 14.0 + (num_workers * 0.5)
+            if total_ram_gb < min_needed_gb and os.name != 'posix':
+                # On Windows, spawn requires full memory copies
+                min_needed_gb = num_workers * 14.0
+            
             if total_ram_gb < min_needed_gb:
                 print(
                     f"[WARNING] Parallel query mode with {num_workers} workers requires ~{min_needed_gb:.1f} GB RAM, "
@@ -1231,7 +1240,15 @@ def run_blocking(
             tmp_dir.mkdir(exist_ok=True)
 
             futures_map: Dict[Any, int] = {}
-            with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as pool:
+            global _shared_blocker
+            _shared_blocker = blocker
+            
+            try:
+                ctx = multiprocessing.get_context("fork")
+            except ValueError:
+                ctx = None
+
+            with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as pool:
                 for i, chunk in enumerate(chunks):
                     pp  = str(tmp_dir / f"pairs_{i}.tsv")
                     pvp = str(tmp_dir / f"prov_{i}.tsv")
