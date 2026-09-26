@@ -25,13 +25,15 @@ if [ "$NUM_WORKERS" -gt 14 ]; then
     NUM_WORKERS=14
 fi
 
-# Critical Fix for Colab/Kaggle instances (< 35 GB)
-# Python fork causes Copy-on-Write to duplicate the 14GB inverted index if multiple workers run, crashing Kaggle (30GB) and Colab (12GB).
+# Critical Fix for Colab/Kaggle instances
+# Python fork causes Copy-on-Write to duplicate the inverted index as reference counts dirty the memory pages.
+# The base index takes ~17 GB. Each worker dirties ~5-7 GB of pages during execution.
 TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}' || echo 0)
-if [ "$TOTAL_RAM_KB" -lt 35000000 ]; then
-    echo "[WARNING] Low RAM detected (<35GB). Forcing NUM_WORKERS=1 to prevent OOM crash."
+if [ "$TOTAL_RAM_KB" -lt 28000000 ]; then
+    echo "[WARNING] Low RAM detected (<28GB). Forcing NUM_WORKERS=1 to prevent OOM crash."
     NUM_WORKERS=1
-elif [ "$TOTAL_RAM_KB" -lt 64000000 ]; then
+elif [ "$TOTAL_RAM_KB" -lt 45000000 ]; then
+    echo "[INFO] 30GB+ RAM detected. Scaling to NUM_WORKERS=2 to maximize RAM usage safely."
     NUM_WORKERS=2
 fi
 
