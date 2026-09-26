@@ -92,14 +92,14 @@ Legal suffixes are canonicalized to standardized full forms only when appearing 
 - **United States:**
   - `inc.` / `inc` / `incorporated` $\rightarrow$ `incorporated`
   - `corp.` / `corp` / `corporation` $\rightarrow$ `corporation`
-  - `l.l.c.` / `llc.` / `llc` / `limited liability company` $\rightarrow$ `limited liability company`
+  - `l.l.c.` / `llc.` / `llc` $\rightarrow$ `llc`
   - `co.` / `co` / `company` $\rightarrow$ `company`
   - `ltd.` / `ltd` / `limited` $\rightarrow$ `limited`
   - `ent.` / `enterprise` / `enterprises` $\rightarrow$ `enterprises`
 - **India:**
   - `pvt. ltd.` / `p. ltd.` / `pvt ltd` / `private limited` $\rightarrow$ `private limited`
   - `ltd.` / `ltd` / `limited` $\rightarrow$ `limited`
-  - `l.l.p.` / `llp` / `limited liability partnership` $\rightarrow$ `limited liability partnership`
+  - `l.l.p.` / `llp` $\rightarrow$ `llp`
 - **France:**
   - `société à responsabilité limitée` / `s.a.r.l.` / `sarl` $\rightarrow$ `sarl`
   - `société par actions simplifiée` / `s.a.s.` / `sas` $\rightarrow$ `sas`
@@ -110,8 +110,8 @@ Legal suffixes are canonicalized to standardized full forms only when appearing 
 > **Context Sensitivity:** Never apply legal suffix replacements globally inside addresses. For example, replacing `co` with `company` inside an address string would corrupt street names like `Columbia St` or `Colorado Blvd`.
 
 ### Step 5: Address Component Expansion & Landmark Removal
-- **Street Suffix Expansions:** `st` / `st.` $\rightarrow$ `street`, `rd` / `rd.` $\rightarrow$ `road`, `ave` / `ave.` $\rightarrow$ `avenue`, `blvd` / `blvd.` $\rightarrow$ `boulevard`, `dr` / `dr.` $\rightarrow$ `drive`, `ste` / `ste.` $\rightarrow$ `suite`, `apt` / `apt.` $\rightarrow$ `apartment`, `bd` $\rightarrow$ `boulevard`, `r.` $\rightarrow$ `rue`.
-- **Landmark Extraction:** Indian addresses frequently contain relative directions (e.g. `Near State Bank of India`, `Opposite Railway Station`). Strip landmark clauses prefixed with `near`, `opp`, `opposite`, `behind` from the core matching string, but store them as auxiliary tokens.
+- **Street Suffix Expansions:** `st` / `st.` $\rightarrow$ `street`, `rd` / `rd.` $\rightarrow$ `road`, `ave` / `ave.` $\rightarrow$ `avenue`, `blvd` / `blvd.` $\rightarrow$ `boulevard`, `dr` / `dr.` $\rightarrow$ `drive`, `ste` / `ste.` $\rightarrow$ `suite`, `apt` / `apt.` $\rightarrow$ `apartment`, `bd` $\rightarrow$ `boulevard`, `r.` $\rightarrow$ `rue`. Also `opp` $\rightarrow$ `opposite`.
+- **Landmark Extraction:** Indian addresses frequently contain relative directions. Strip landmark clauses prefixed with `near`, `behind`, `next to`, `beside`, `above/below` from the core matching string. (`opposite` is explicitly preserved as it often carries crucial postal locality).
 
 ### Step 6: Structural Token Extraction
 Extract key tokens used in Stage 1 blocking and Stage 2 deterministic features:
@@ -120,7 +120,7 @@ Extract key tokens used in Stage 1 blocking and Stage 2 deterministic features:
   - US: 5-digit ZIP matching `\b[0-9]{5}(?:-[0-9]{4})?\b`.
   - France: 5-digit Code Postal matching `\b[0-9]{5}\b`.
 - **Street Number:** Leading digit sequence at the start of the address (`^\d+`).
-- **Digit Runs:** Tuple of all numeric runs of length $\ge 2$ appearing in name or address.
+- **Digit Runs:** Tuple of all numeric runs of length 4 to 10 appearing in address (candidate PIN/ZIP/house codes).
 
 ### Step 7: Encoder Text Assembly
 Construct the canonical sequence for transformer bi-encoder encoding (using pipe separator ` | `):
