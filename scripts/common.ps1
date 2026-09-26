@@ -113,7 +113,7 @@ function Invoke-PythonModule {
         [string]$ModuleName,
         [string[]]$Arguments,
         [string]$StepName = "",
-        [switch]$DryRun = $false,
+        [bool]$DryRun = $false,
         [string]$PythonExe = ""
     )
 
@@ -228,7 +228,7 @@ function Invoke-PythonScript {
         [string]$ScriptPath,
         [string[]]$Arguments,
         [string]$StepName = "",
-        [switch]$DryRun = $false,
+        [bool]$DryRun = $false,
         [string]$PythonExe = ""
     )
 
