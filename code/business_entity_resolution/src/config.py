@@ -83,6 +83,7 @@ class TrainingConfig:
     # Self-distillation (anti-forgetting layer 2)
     use_distillation: bool = True
     distillation_weight: float = 0.10
+    distill_anchor_positive_only: bool = True  # Restrict distillation to anchor + positive to avoid O(k) compute explosion
 
     # MNRL
     mnrl_scale: float = 20.0  # Temperature scaling for contrastive loss
@@ -124,9 +125,9 @@ class DataConfig:
     eval_corpus_negatives: int = 5000  # Non-relevant docs in eval corpus
     min_matches_for_sample: int = 1  # Skip singletons
 
-    # Negative mining
-    negatives_per_positive: int = 0  # 0 = in-batch negatives only (CachedMNRL)
-    # Set > 0 for explicit hard negatives (e.g., from blocking output)
+    # Negative mining: ratio k of mined hard negatives per positive pair (docs/14_verification_and_decisions_log.md OP-3).
+    # Default is 2 (committed middle of 1-3 range); 0 = in-batch negatives only (CachedMNRL).
+    negatives_per_positive: int = 2
 
     # Hard negative source (blocking output, when available)
     blocking_candidates_path: Optional[str] = None

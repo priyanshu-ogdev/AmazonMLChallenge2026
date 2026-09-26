@@ -938,8 +938,8 @@ def main():
                         help="Splits to process for stage0_normalize")
     parser.add_argument("--blocking_candidates", type=str, default=None,
                         help="Path to candidate_pairs.tsv for mining hard negatives")
-    parser.add_argument("--negatives_per_positive", type=int, default=0,
-                        help="Number of hard negatives per positive pair")
+    parser.add_argument("--negatives_per_positive", type=int, default=2,
+                        help="Number of hard negatives per positive pair (default: 2, set 0 for in-batch only)")
     parser.add_argument("--train_country", type=str, default=None,
                         help="Specify primary training country (e.g. us)")
     parser.add_argument("--eval_country", type=str, default=None,

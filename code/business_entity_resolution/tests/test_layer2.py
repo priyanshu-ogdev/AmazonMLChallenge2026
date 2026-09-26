@@ -542,6 +542,62 @@ class TestLayer2DataBuilder(unittest.TestCase):
         self.assertEqual(data_multi_neg["negative_1"], ["neg1_b", ""])
 
 
+    def test_dataconfig_and_trainingconfig_defaults(self):
+        """Verify committed default hyperparameters for negative mining and distillation."""
+        from src.config import DataConfig, TrainingConfig
+        data_cfg = DataConfig()
+        self.assertEqual(data_cfg.negatives_per_positive, 2)
+
+        train_cfg = TrainingConfig()
+        self.assertTrue(train_cfg.distill_anchor_positive_only)
+        self.assertTrue(train_cfg.use_distillation)
+        self.assertEqual(train_cfg.distillation_weight, 0.10)
+
+    def test_distillation_cached_mnrl_feature_slicing(self):
+        """Verify distill_anchor_positive_only limits self-distillation to anchor and positive."""
+        from src.losses import DistillationCachedMNRL
+        import torch
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.eval_calls = 0
+
+            def __getitem__(self, idx):
+                return self
+
+            def forward(self, x):
+                self.eval_calls += 1
+                batch_size = next(iter(x.values())).shape[0]
+                return {"sentence_embedding": torch.ones(batch_size, 8)}
+
+        model = DummyModel()
+        frozen = DummyModel()
+        def mock_init(loss_self, *args, **kwargs):
+            torch.nn.Module.__init__(loss_self)
+            loss_self.model = model
+            loss_self.frozen_model = frozen
+            loss_self.mini_batch_size = 4
+            loss_self.distill_anchor_positive_only = True
+
+        from unittest.mock import patch
+        with patch.object(DistillationCachedMNRL, "__init__", mock_init):
+            loss_fn = DistillationCachedMNRL()
+
+        # Batch with 4 columns: anchor, positive, neg1, neg2
+        features = [
+            {"input_ids": torch.zeros((4, 10), dtype=torch.long)},
+            {"input_ids": torch.zeros((4, 10), dtype=torch.long)},
+            {"input_ids": torch.zeros((4, 10), dtype=torch.long)},
+            {"input_ids": torch.zeros((4, 10), dtype=torch.long)},
+        ]
+        distill_loss = loss_fn._compute_distillation_chunked(features)
+        self.assertIsInstance(distill_loss, torch.Tensor)
+        # With distill_anchor_positive_only=True, only 2 columns (anchor & positive) were forwarded
+        self.assertEqual(frozen.eval_calls, 2)
+        self.assertEqual(model.eval_calls, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
 

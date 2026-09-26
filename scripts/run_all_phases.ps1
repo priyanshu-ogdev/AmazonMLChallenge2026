@@ -44,6 +44,7 @@ param(
     [switch]$IncludeQwenMatcher = $false,
     [string]$QwenMatcherAdapter = "",
     [switch]$RunStage0 = $false,
+    [int]$NegativesPerPositive = 2,
     [bool]$Injective = $true,
     [switch]$DryRun = $false,
     [string]$OutputDir = "",
@@ -166,6 +167,7 @@ Run-PipelinePhase 2 "Representation & Feature Engineering" {
     & "$PSScriptRoot\02a_prepare_bi_encoder_data.ps1" `
         -SamplePerCountry $samples `
         -BlockingCandidates $trainCandFile `
+        -NegativesPerPositive $NegativesPerPositive `
         -OutputDir $p2PrepOut `
         -DryRun:$DryRun `
         -PythonPath $python

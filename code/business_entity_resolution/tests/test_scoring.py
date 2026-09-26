@@ -803,6 +803,81 @@ class TestStage3Scoring(unittest.TestCase):
         self.assertIn("Missing requested feature columns", str(ctx.exception))
         self.assertIn("qwen_matcher_prob", str(ctx.exception))
 
+    def test_dart_booster_training(self):
+        """Verify DART escalation mode in run_training executes and sets dropout parameters."""
+        stage3_dir = self.output_dir / "stage3_dart_test"
+        pair_file = self.output_dir / "pairs_dart.tsv"
+        gt_file = self.output_dir / "gt_dart.tsv"
+
+        pair_data = []
+        gt_data = []
+        for i in range(20):
+            s1_id = f"S1-{i}"
+            c1_id = f"S2-{i}"
+            c2_id = f"S2-neg-{i}"
+            gt_data.append({"source1_entity_id": s1_id, "matched_entity_ids": c1_id})
+
+            pair_data.append({
+                "source1_entity_id": s1_id,
+                "candidate_entity_id": c1_id,
+                "country_equal": 1,
+                "bge_cosine": 0.85,
+                "name_exact": 1,
+                "same_name_different_address": 0,
+                "same_address_different_name": 0,
+                "candidate_rank": 1.0,
+                "candidate_rank_missing": 0,
+                "rank_margin_from_best": 0.0,
+                "best_blocker_score": 0.95,
+                "best_blocker_score_missing": 0,
+                "best_blocker_score_diff": 0.0,
+                "blocker_count": 2,
+                "candidate_count_for_s1": 2,
+                "has_blocker_provenance": 1,
+                "blocker_provenance": "exact",
+            })
+            pair_data.append({
+                "source1_entity_id": s1_id,
+                "candidate_entity_id": c2_id,
+                "country_equal": 1,
+                "bge_cosine": 0.20,
+                "name_exact": 0,
+                "same_name_different_address": 0,
+                "same_address_different_name": 0,
+                "candidate_rank": 2.0,
+                "candidate_rank_missing": 0,
+                "rank_margin_from_best": 0.5,
+                "best_blocker_score": 0.40,
+                "best_blocker_score_missing": 0,
+                "best_blocker_score_diff": 0.55,
+                "blocker_count": 1,
+                "candidate_count_for_s1": 2,
+                "has_blocker_provenance": 1,
+                "blocker_provenance": "token",
+            })
+
+        pd.DataFrame(pair_data).to_csv(pair_file, sep="\t", index=False)
+        pd.DataFrame(gt_data).to_csv(gt_file, sep="\t", index=False)
+
+        metadata = run_training(
+            feature_file=pair_file,
+            ground_truth_file=gt_file,
+            output_dir=stage3_dir,
+            booster="dart",
+            eta=0.03,
+            country_mask_rate=0.0,
+            use_monotone_constraints=True,
+        )
+
+        self.assertTrue((stage3_dir / "gbm.json").exists())
+        self.assertTrue((stage3_dir / "stage3_metadata.json").exists())
+        self.assertTrue((stage3_dir / "oof_predictions.tsv").exists())
+        self.assertEqual(metadata["params"]["booster"], "gbtree")
+        self.assertEqual(metadata["params"]["sample_type"], "uniform")
+        self.assertEqual(metadata["params"]["normalize_type"], "tree")
+        self.assertEqual(metadata["params"]["rate_drop"], 0.10)
+        self.assertEqual(metadata["params"]["skip_drop"], 0.50)
+
 
 if __name__ == "__main__":
     unittest.main()

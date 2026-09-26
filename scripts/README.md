@@ -87,7 +87,7 @@ Builds balanced positive pairs and bidirectional IR evaluation data (`US -> Indi
 powershell -ExecutionPolicy Bypass -File scripts/02a_prepare_bi_encoder_data.ps1 `
     -SamplePerCountry 50000 `
     -BlockingCandidates output/phase1_blocking_train/candidate_pairs.tsv `
-    -NegativesPerPositive 1
+    -NegativesPerPositive 2
 ```
 
 ### `02b_train_and_eval_bi_encoder.ps1`

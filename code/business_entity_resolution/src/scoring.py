@@ -752,8 +752,11 @@ def run_training(
     params["booster"] = booster
     params["eta"] = eta
     if booster == "dart":
-        # XGBoost 3.x: DART is no longer a separate booster value.
-        # Use gbtree with dropout parameters directly.
+        # In XGBoost 3.x, booster="dart" is deprecated in favor of using the unified
+        # tree booster with dropout parameters. Setting booster="gbtree" alongside
+        # rate_drop, skip_drop, sample_type, and normalize_type executes the exact
+        # DART regularization algorithm (Rashmi & Gilad-Bachrach 2015) while avoiding
+        # the learner deprecation warning.
         params["booster"] = "gbtree"
         params.update({
             "sample_type": "uniform",

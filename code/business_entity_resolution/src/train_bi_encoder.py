@@ -350,6 +350,9 @@ def train(
         mini_batch_size=training_config.mini_batch_size,
         scale=training_config.mnrl_scale,
         frozen_model=frozen_model,
+        distill_anchor_positive_only=getattr(
+            training_config, "distill_anchor_positive_only", True
+        ),
     )
 
     # -----------------------------------------------------------------------
@@ -546,6 +549,8 @@ def main():
     train_parser.add_argument("--no_distillation", action="store_true",
                               help="Disable self-distillation")
     train_parser.add_argument("--distill_weight", type=float, default=0.10)
+    train_parser.add_argument("--distill_all_columns", action="store_true",
+                              help="Distill across all columns including mined negatives (higher compute cost)")
     # Hardware
     train_parser.add_argument("--no_bf16", action="store_true",
                               help="Disable bf16 (use fp32)")
@@ -577,6 +582,7 @@ def main():
             num_train_epochs=args.epochs,
             use_distillation=args.use_distillation and not args.no_distillation,
             distillation_weight=args.distill_weight,
+            distill_anchor_positive_only=not args.distill_all_columns,
             bf16=not args.no_bf16,
             gradient_checkpointing=not args.no_grad_ckpt,
             seed=args.seed,

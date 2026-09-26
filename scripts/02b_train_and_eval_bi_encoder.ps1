@@ -47,6 +47,7 @@ param(
     [int]$LoraR = 64,
     [float]$DistillWeight = 0.10,
     [switch]$NoDistillation = $false,
+    [switch]$DistillAllColumns = $false,
     [switch]$SkipGate = $false,
     [switch]$SkipFullTrain = $false,
     [switch]$DryRun = $false,
@@ -99,6 +100,9 @@ if (-not $SkipGate) {
         $trainGateArgs += "--no_distillation"
     } else {
         $trainGateArgs += "--use_distillation"
+    }
+    if ($DistillAllColumns) {
+        $trainGateArgs += "--distill_all_columns"
     }
 
     Invoke-PythonModule "src.train_bi_encoder" $trainGateArgs "Held-Out Country Gate Training" -DryRun $DryRun -PythonExe $python
@@ -165,6 +169,9 @@ if ($gatePassed -and (-not $SkipFullTrain)) {
         $fullTrainArgs += "--no_distillation"
     } else {
         $fullTrainArgs += "--use_distillation"
+    }
+    if ($DistillAllColumns) {
+        $fullTrainArgs += "--distill_all_columns"
     }
 
     Invoke-PythonModule "src.train_bi_encoder" $fullTrainArgs "Full Dataset Bi-Encoder Training" -DryRun $DryRun -PythonExe $python

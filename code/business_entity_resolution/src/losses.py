@@ -18,9 +18,13 @@ Design decisions (from docs/06_stage2a_bge_m3_training_spec.md):
     from VRAM by processing activations in mini_batch_size windows.
   - Self-distillation weight=0.10: mid-point of 0.05-0.15 range.
     A compliant, no-external-data substitute for replay training.
-  - The distillation term adds ~50% compute overhead (extra forward pass).
-    Both passes are chunked to the same mini_batch_size to keep peak
-    activation memory bounded at one chunk, not the full physical batch.
+  - Compute overhead: CachedMNRL executes 2 forward passes per chunk (cache +
+    backprop). Self-distillation adds 1 forward pass with grad through the
+    trainable model and 1 pass without grad through the frozen model (~100%
+    overhead per distilled column). To prevent hard negatives from multiplying
+    this cost, distill_anchor_positive_only limits distillation to anchor and
+    positive text columns.
+  - Peak activation memory is bounded to mini_batch_size window across all passes.
 
 IMPORTANT: CachedMNRL optimizes ranking, not absolute cosine values. The GBM
   consumes raw cosine similarity as a feature, so calibration (isotonic or
@@ -50,7 +54,7 @@ class DistillationCachedMNRL(nn.Module):
 
     Where:
         distillation_loss = mean(1 - cosine_similarity(current_emb, frozen_emb))
-        over all input texts in the batch.
+        over input texts in the batch.
 
     Architecture:
         - self.model: the training model (BGE-M3 + LoRA adapter)
@@ -58,7 +62,9 @@ class DistillationCachedMNRL(nn.Module):
         - self.cached_mnrl: the contrastive loss with gradient caching
 
     Memory overhead: frozen model adds ~1.14 GB (568M × 2 bytes bf16).
-    Compute overhead: one extra forward pass per batch (~50%).
+    Compute overhead: CachedMNRL does 2 forward passes; distillation adds 2 passes
+    (1 trainable with grad + 1 frozen no_grad), totaling ~100% additional compute
+    per distilled text column.
 
     Args:
         model: The SentenceTransformer model being fine-tuned.
@@ -66,6 +72,9 @@ class DistillationCachedMNRL(nn.Module):
         mini_batch_size: GradCache chunk size for CachedMNRL.
         distill_weight: Weight for the distillation loss term.
         scale: Temperature scaling for the contrastive loss.
+        distill_anchor_positive_only: Restrict distillation to anchor + positive
+            columns (default: True), preventing hard negatives from linearly
+            scaling distillation forward pass cost.
     """
 
     def __init__(
@@ -75,11 +84,13 @@ class DistillationCachedMNRL(nn.Module):
         mini_batch_size: int = 16,
         distill_weight: float = 0.10,
         scale: float = 20.0,
+        distill_anchor_positive_only: bool = True,
     ):
         super().__init__()
         self.model = model
         self.distill_weight = distill_weight
         self.mini_batch_size = mini_batch_size   # keep for chunked distillation
+        self.distill_anchor_positive_only = distill_anchor_positive_only
 
         # Main contrastive loss with gradient caching
         self.cached_mnrl = CachedMultipleNegativesRankingLoss(
@@ -171,7 +182,8 @@ class DistillationCachedMNRL(nn.Module):
         total_distance = torch.tensor(0.0, device=device)
         n_chunks = 0
 
-        for sf in features:
+        distill_features = features[:2] if self.distill_anchor_positive_only and len(features) > 2 else features
+        for sf in distill_features:
             # Determine the batch dimension of this sentence-feature dict
             batch_size = next(iter(sf.values())).shape[0]
 
@@ -208,6 +220,7 @@ class DistillationCachedMNRL(nn.Module):
             "mini_batch_size": self.cached_mnrl.mini_batch_size
             if hasattr(self.cached_mnrl, "mini_batch_size")
             else "unknown",
+            "distill_anchor_positive_only": self.distill_anchor_positive_only,
             "model_name": getattr(self.model, "model_card_data", {}).get(
                 "base_model", "unknown"
             ),
@@ -221,6 +234,7 @@ def create_loss(
     mini_batch_size: int = 16,
     scale: float = 20.0,
     frozen_model: Optional[SentenceTransformer] = None,
+    distill_anchor_positive_only: bool = True,
 ) -> nn.Module:
     """
     Factory function to create the appropriate loss.
@@ -246,6 +260,7 @@ def create_loss(
             mini_batch_size=mini_batch_size,
             distill_weight=distill_weight,
             scale=scale,
+            distill_anchor_positive_only=distill_anchor_positive_only,
         )
     else:
         logger.info(

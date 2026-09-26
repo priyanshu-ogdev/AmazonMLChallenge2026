@@ -30,7 +30,7 @@ param(
     [int]$EvalSample = 2000,
     [int]$EvalCorpusNeg = 5000,
     [string]$BlockingCandidates = "",
-    [int]$NegativesPerPositive = 0,
+    [int]$NegativesPerPositive = 2,
     [string]$OutputDir = "",
     [int]$Seed = 42,
     [bool]$BidirectionalGate = $true,
@@ -77,7 +77,7 @@ if ($BlockingCandidates -and (Test-Path $BlockingCandidates)) {
     Write-Info "Mining hard negatives from: $BlockingCandidates ($NegativesPerPositive / pair)"
     $builderArgs += @(
         "--blocking_candidates", $BlockingCandidates,
-        "--negatives_per_positive", (([Math]::Max(1, $NegativesPerPositive)).ToString())
+        "--negatives_per_positive", $NegativesPerPositive.ToString()
     )
 }
 
