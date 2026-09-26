@@ -12,6 +12,10 @@
 *.pkl filter=lfs diff=lfs merge=lfs -text
 *.pickle filter=lfs diff=lfs merge=lfs -text
 
+# Raw and processed datasets (Tracked via Git LFS)
+dataset/**/*.tsv filter=lfs diff=lfs merge=lfs -text
+dataset/**/*.csv filter=lfs diff=lfs merge=lfs -text
+
 # Pipeline output artifacts & feature matrices
 output/**/*.tsv filter=lfs diff=lfs merge=lfs -text
 output/**/*.csv filter=lfs diff=lfs merge=lfs -text

@@ -2,8 +2,7 @@
 # Amazon ML Challenge 2026 - .gitignore
 # =============================================================================
 
-# Datasets & Large Data Files (Exceeds GitHub limits)
-dataset/
+# Large Data Files (Ignore by default, except dataset/ and output/ tracked via Git LFS)
 data/
 *.tsv
 *.csv
@@ -13,6 +12,12 @@ data/
 *.h5
 *.hdf5
 *.jsonl
+
+# Explicitly track dataset/ via Git LFS
+!dataset/
+!dataset/**
+!dataset/**/*.tsv
+!dataset/**/*.csv
 
 # Python Bytecode & Cache
 __pycache__/
