@@ -419,12 +419,16 @@ def build_pair_features(
     items = list(pairs_by_s1.items())
     num_workers = max(1, os.cpu_count() or 4)
     
-    # Critical Fix for Colab / Low-RAM GPU Instances (< 16GB RAM)
+    # Critical Fix for Colab/Kaggle / Low-RAM GPU Instances (< 35GB RAM)
     # Python's 'fork' duplicates reference-counted dictionaries, causing OOM.
-    # If system RAM is less than 16GB, we MUST disable multiprocessing.
-    if psutil.virtual_memory().total < (16 * 1024**3):
-        print("[WARNING] Low RAM detected (< 16GB). Disabling ProcessPoolExecutor to prevent OOM crash.", flush=True)
+    # If system RAM is less than 35GB, we MUST disable multiprocessing (1 worker).
+    # If system RAM is less than 64GB, we cap at 2 workers.
+    total_ram = psutil.virtual_memory().total
+    if total_ram < (35 * 1024**3):
+        print("[WARNING] Low RAM detected (< 35GB). Disabling ProcessPoolExecutor to prevent OOM crash.", flush=True)
         num_workers = 1
+    elif total_ram < (64 * 1024**3):
+        num_workers = min(num_workers, 2)
     else:
         # Limit workers for pair features since each process duplicates the lookup dictionaries
         num_workers = min(num_workers, 14)
