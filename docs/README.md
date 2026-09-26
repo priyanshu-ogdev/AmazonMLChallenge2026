@@ -92,30 +92,30 @@ The exploratory data analysis reports and visual matrices from the 24.2-million 
 The entire pipeline is automated via modular PowerShell scripts in `scripts/`:
 
 ```powershell
-# 1. Environment & Hardware Verification
+# Phase 0: Environment & Smoke Verification
 ./scripts/00_verify_environment.ps1
 
-# 2. Stage 0 Normalization & Stage 1 Multi-Channel Blocking
+# Phase 1: Stage 0 Normalization & Stage 1 Multi-Channel Blocking & Recall Audit
 ./scripts/01_run_blocking.ps1
 
-# 3. Mandatory Blocking Recall Audit Gate
-./scripts/01_audit_blocking_recall.ps1
+# Phase 2a: Bi-Encoder LoRA Dataset Prep (50k US + 50k India balanced sampling)
+./scripts/02a_prepare_bi_encoder_data.ps1
 
-# 4. Stage 2a-i BGE-M3 rsLoRA Fine-Tuning (with Anti-Forgetting)
-./scripts/02a_train_bi_encoder.ps1
+# Phase 2b: BGE-M3 rsLoRA Fine-Tuning & 2-Way Anti-Forgetting Gate
+./scripts/02b_train_and_eval_bi_encoder.ps1
 
-# 5. Stage 2c Deterministic Pair Feature Extraction
+# Phase 2c: Deterministic & Dense Pair Feature Extraction
 ./scripts/02c_extract_pair_features.ps1
 
-# 6. Stage 3 Supervised XGBoost Training & Probability Calibration
-./scripts/03_train_gbm.ps1
+# Phase 3: Stage 3 Grouped-OOF XGBoost Training & Probability Calibration
+./scripts/03_train_scoring_gbm.ps1
 
-# 7. Stage 4 Decision Threshold Tuning (Macro F0.5 Optimization)
-./scripts/04_tune_threshold.ps1
+# Phase 4: Stage 4 Candidate Scoring, F0.5 Thresholding & Decision
+./scripts/04_inference_and_decision.ps1
 
-# 8. Stage 4 Inference & Greedy 1-to-N Injective Assignment
-./scripts/05_generate_submission.ps1
+# Phase 5: Submission Validation & Audit
+./scripts/05_validate_submission.ps1
 
-# 9. Stage 5 Submission Package Validation
-./scripts/06_validate_submission.ps1
+# Master Orchestrator: Run All Phases End-to-End
+./scripts/run_all_phases.ps1 -DryRun
 ```

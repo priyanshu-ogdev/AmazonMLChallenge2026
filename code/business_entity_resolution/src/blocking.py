@@ -71,6 +71,8 @@ EXACT_BLOCKERS = {
     "exact_name_trailing",
     "name_lead_postal",
     "name_lead_street_trailing",
+    "first_2_tokens",
+    "acronym_match",
 }
 
 _WORD_RE = re.compile(r"[\w]+", flags=re.UNICODE)
@@ -81,8 +83,21 @@ def _tokenize(text: str) -> List[str]:
     return [w.lower() for w in _WORD_RE.findall(text or "") if len(w) >= MIN_TOKEN_LEN]
 
 
+def _char_ngrams(text: str) -> List[str]:
+    """Extract character 3-grams and 4-grams with edge padding per docs/04 Channel 2 spec."""
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    if not compact:
+        return []
+    padded = f"  {compact}  "
+    ngrams = []
+    for n in (3, 4):
+        for i in range(max(0, len(padded) - n + 1)):
+            ngrams.append(padded[i : i + n])
+    return ngrams
+
+
 def _char_trigrams(text: str) -> Set[str]:
-    """Extract character trigrams with edge padding."""
+    """Extract character trigrams with edge padding (backward compatibility)."""
     compact = re.sub(r"\s+", " ", text or "").strip()
     if not compact:
         return set()
@@ -101,10 +116,16 @@ class BlockingRecord:
     canonical_country: str
     norm_name: str
     norm_address: str
+    is_address_missing: bool
     postal_code: Optional[str]
     street_number: Optional[str]
     trailing_segment: Optional[str]
     tokens: List[str]
+    token_counts: Counter[str]
+    first_2_tokens: Optional[str]
+    acronyms: Set[str]
+    ngrams: List[str]
+    ngram_counts: Counter[str]
     trigrams: Set[str]
     first_word: Optional[str]
 
@@ -119,13 +140,49 @@ class BlockingRecord:
         n_name = normalize_name(name)
         n_addr = normalize_address(address)
         canon_c = canonicalize_country(country)
+        raw_addr = str(address).strip() if address is not None else ""
+        raw_addr_lower = raw_addr.lower()
+        is_addr_missing = (
+            raw_addr_lower in ("nan", "none", "null", "", "no address", "no address available", "not available", "unknown", "n/a", "missing")
+            or len(raw_addr) == 0
+            or raw_addr_lower.startswith("no address")
+        )
         struct = extract_structural_fields(address)
-        postal = extract_postal_code(address)
+        postal = extract_postal_code(address, country=canon_c)
         street_no = struct.get("street_number")
         trailing = struct.get("trailing_segment")
         tokens = _tokenize(n_name)
-        trigrams = _char_trigrams(n_name) if len(n_name) >= 3 else set()
+        token_counts = Counter(tokens)
         first_word = tokens[0] if tokens else None
+
+        # Content words for first-2-tokens and acronym extraction (preserving 2-letter tokens like 'GE')
+        raw_words = [w.lower() for w in _WORD_RE.findall(n_name or "")]
+        content_words = [w for w in raw_words if w not in ("the", "a", "an", "and", "&")]
+
+        # First-2-Tokens Key
+        first_2_tokens = " ".join(content_words[:2]) if len(content_words) >= 2 else None
+
+        # Acronym Keys (both 2-letter prefix, full initials, and explicit short tokens)
+        acronyms: Set[str] = set()
+        if len(content_words) >= 2:
+            # 2-letter prefix acronym (e.g. General Electric -> ge)
+            acronyms.add(content_words[0][0] + content_words[1][0])
+            # Full initials (e.g. General Electric Medical Systems -> gems)
+            full_acr = "".join(w[0] for w in content_words if w)
+            if 2 <= len(full_acr) <= 6:
+                acronyms.add(full_acr)
+
+        # Explicit short tokens (e.g. 'ge' in 'ge healthcare' or standalone 'ibm')
+        _short_skip = {"in", "at", "of", "on", "to", "by", "or", "an", "as", "is", "it", "de", "la", "le", "du", "et", "en", "st", "rd"}
+        for w in raw_words:
+            if 2 <= len(w) <= 4 and w not in _short_skip:
+                acronyms.add(w)
+
+
+        # 3-gram and 4-gram character tokens
+        ngrams = _char_ngrams(n_name) if len(n_name) >= 3 else []
+        ngram_counts = Counter(ngrams)
+        trigrams = set(ngrams)
 
         return cls(
             entity_id=entity_id.strip(),
@@ -136,10 +193,16 @@ class BlockingRecord:
             canonical_country=canon_c,
             norm_name=n_name,
             norm_address=n_addr,
+            is_address_missing=is_addr_missing,
             postal_code=postal,
             street_number=street_no,
             trailing_segment=trailing,
             tokens=tokens,
+            token_counts=token_counts,
+            first_2_tokens=first_2_tokens,
+            acronyms=acronyms,
+            ngrams=ngrams,
+            ngram_counts=ngram_counts,
             trigrams=trigrams,
             first_word=first_word,
         )
@@ -205,27 +268,29 @@ class MultiChannelBlocker:
         self.country_partitions: Dict[str, Set[str]] = defaultdict(set)
         self.all_candidate_ids: Set[str] = set()
 
-        # Channel 1 & 2: Exact and Composite Key Inverted Indexes
+        # Channel 1: Exact & Composite Key Inverted Indexes
         # Key tuple -> canonical_country -> list of candidate entity IDs
         self.index_exact_name: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        self.index_first_2_tokens: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        self.index_acronym: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
         self.index_name_postal: Dict[Tuple[str, str], Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
         self.index_name_street: Dict[Tuple[str, str], Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
         self.index_name_trailing: Dict[Tuple[str, str], Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
         self.index_lead_postal: Dict[Tuple[str, str], Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
         self.index_lead_street_trailing: Dict[Tuple[str, str, str], Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
 
-        # Channel 5: Address Structural
-        self.index_address_structural: Dict[Tuple[str, str], Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        # Channel 2: Character 3/4-Gram TF-IDF Inverted Index
+        self.index_ngrams: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        self.ngram_doc_counts: Counter[str] = Counter()
+        self.index_trigrams = self.index_ngrams
+        self.trigram_doc_counts = self.ngram_doc_counts
 
-        # Channel 3: Token Inverted Index
-        # token -> canonical_country -> list of candidate entity IDs
+        # Channel 3: Token Inverted Index with Sub-Linear TF-IDF
         self.index_tokens: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
         self.token_doc_counts: Counter[str] = Counter()
 
-        # Channel 4: Character 3-Gram Inverted Index
-        # trigram -> canonical_country -> list of candidate entity IDs
-        self.index_trigrams: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
-        self.trigram_doc_counts: Counter[str] = Counter()
+        # Channel 4: Address Structural Key (postal + street number)
+        self.index_address_structural: Dict[Tuple[str, str], Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
 
     def index_candidate(self, record: BlockingRecord) -> None:
         """Add a candidate record (from S2 or S3) to all blocking indexes."""
@@ -236,11 +301,15 @@ class MultiChannelBlocker:
         self.all_candidate_ids.add(cid)
         self.country_partitions[country].add(cid)
 
-        # 1. Exact Name Key
+        # 1. Exact & Structural Name Keys
         if record.norm_name:
             self.index_exact_name[record.norm_name][country].append(cid)
+        if record.first_2_tokens:
+            self.index_first_2_tokens[record.first_2_tokens][country].append(cid)
+        for acr in record.acronyms:
+            self.index_acronym[acr][country].append(cid)
 
-        # 2. Composite Keys
+        # Composite Keys
         if record.norm_name and record.postal_code:
             self.index_name_postal[(record.norm_name, record.postal_code)][country].append(cid)
 
@@ -258,20 +327,19 @@ class MultiChannelBlocker:
                 (record.first_word, record.street_number, record.trailing_segment)
             ][country].append(cid)
 
-        # 5. Address Structural Key (postal + street number)
-        if record.postal_code and record.street_number:
-            self.index_address_structural[(record.postal_code, record.street_number)][country].append(cid)
+        # 2. Character 3/4-Gram Inverted Index
+        for gram in set(record.ngrams):
+            self.index_ngrams[gram][country].append(cid)
+            self.ngram_doc_counts[gram] += 1
 
         # 3. Token Inverted Index
-        seen_tokens = set(record.tokens)
-        for tok in seen_tokens:
+        for tok in set(record.tokens):
             self.index_tokens[tok][country].append(cid)
             self.token_doc_counts[tok] += 1
 
-        # 4. Trigram Inverted Index
-        for tri in record.trigrams:
-            self.index_trigrams[tri][country].append(cid)
-            self.trigram_doc_counts[tri] += 1
+        # 4. Address Structural Key (postal + street number, bypassed if missing address)
+        if not record.is_address_missing and record.postal_code and record.street_number:
+            self.index_address_structural[(record.postal_code, record.street_number)][country].append(cid)
 
     def _query_partitioned_index(
         self,
@@ -339,16 +407,21 @@ class MultiChannelBlocker:
         country = s1.canonical_country
 
         # -------------------------------------------------------------
-        # Channel 1: Exact Name Key
+        # Channel 1: Exact Name, First-2-Tokens, Acronym & Composite Keys
         # -------------------------------------------------------------
         if s1.norm_name:
             exact_hits = self._query_partitioned_index(self.index_exact_name, s1.norm_name, country)
             for rank, cid in enumerate(exact_hits, 1):
                 record_hit(cid, "exact_name", 1.0, rank, is_exact=True)
 
-        # -------------------------------------------------------------
-        # Channel 2: Composite Keys
-        # -------------------------------------------------------------
+        if s1.first_2_tokens:
+            for rank, cid in enumerate(self._query_partitioned_index(self.index_first_2_tokens, s1.first_2_tokens, country), 1):
+                record_hit(cid, "first_2_tokens", 0.90, rank, is_exact=True)
+
+        for acr in s1.acronyms:
+            for rank, cid in enumerate(self._query_partitioned_index(self.index_acronym, acr, country), 1):
+                record_hit(cid, "acronym_match", 0.85, rank, is_exact=True)
+
         if s1.norm_name and s1.postal_code:
             key = (s1.norm_name, s1.postal_code)
             for rank, cid in enumerate(self._query_partitioned_index(self.index_name_postal, key, country), 1):
@@ -375,72 +448,90 @@ class MultiChannelBlocker:
                 record_hit(cid, "name_lead_street_trailing", 0.90, rank, is_exact=True)
 
         # -------------------------------------------------------------
-        # Channel 5: Address Structural Key
+        # Channel 2: Character 3/4-Gram Sub-Linear TF-IDF Retrieval
         # -------------------------------------------------------------
-        if s1.postal_code and s1.street_number:
-            key = (s1.postal_code, s1.street_number)
-            for rank, cid in enumerate(self._query_partitioned_index(self.index_address_structural, key, country), 1):
-                record_hit(cid, "address_structural", 0.85, rank, is_exact=False)
+        if s1.ngrams:
+            s1_gram_counts = s1.ngram_counts
+            s1_weights: Dict[str, float] = {}
+            for gram, count in s1_gram_counts.items():
+                doc_cnt = self.ngram_doc_counts.get(gram, 0)
+                if doc_cnt == 0:
+                    continue
+                tf = 1.0 + math.log(count)
+                idf = math.log(1.0 + (self.num_candidates - doc_cnt + 0.5) / (doc_cnt + 0.5))
+                s1_weights[gram] = tf * idf
+
+            if s1_weights:
+                cand_scores: Counter[str] = Counter()
+                for gram, w_s1 in s1_weights.items():
+                    for cid in self._query_partitioned_index(self.index_ngrams, gram, country):
+                        cand_rec = self.candidate_records.get(cid)
+                        if not cand_rec:
+                            continue
+                        c_cnt = cand_rec.ngram_counts.get(gram, 1)
+                        c_tf = 1.0 + math.log(c_cnt)
+                        cand_scores[cid] += w_s1 * c_tf
+
+                s1_norm = math.sqrt(sum(w * w for w in s1_weights.values()))
+                if cand_scores and s1_norm > 0:
+                    scored_cands = []
+                    for cid, raw_score in cand_scores.most_common(self.top_k_sparse * 2):
+                        cand_rec = self.candidate_records[cid]
+                        cand_len = len(cand_rec.ngrams)
+                        norm_factor = s1_norm * math.sqrt(max(1, cand_len))
+                        sim = min(1.0, raw_score / norm_factor)
+                        if sim >= 0.30:
+                            scored_cands.append((cid, sim))
+
+                    scored_cands.sort(key=lambda x: -x[1])
+                    for rank, (cid, sim) in enumerate(scored_cands[: self.top_k_sparse], 1):
+                        record_hit(cid, "char_ngram", float(sim), rank, is_exact=False)
 
         # -------------------------------------------------------------
-        # Channel 3: Token Inverted Index
+        # Channel 3: Token Inverted Index with Sub-Linear TF-IDF
         # -------------------------------------------------------------
         if s1.tokens:
-            # Score candidate entities by accumulated IDF of matched tokens
             token_scores: Counter[str] = Counter()
-            s1_token_set = set(s1.tokens)
+            s1_token_counts = s1.token_counts
             max_allowed_freq = max(10, int(self.num_candidates * self.max_token_doc_freq))
             max_allowed_count = min(self.max_token_doc_count, max_allowed_freq)
 
-            total_s1_weight = 0.0
-            for tok in s1_token_set:
+            s1_token_weights: Dict[str, float] = {}
+            for tok, count in s1_token_counts.items():
                 doc_cnt = self.token_doc_counts.get(tok, 0)
                 if doc_cnt == 0 or doc_cnt > max_allowed_count:
                     continue
-                # Standard smoothed IDF
+                tf = 1.0 + math.log(count)
                 idf = math.log(1.0 + (self.num_candidates - doc_cnt + 0.5) / (doc_cnt + 0.5))
-                total_s1_weight += idf
+                s1_token_weights[tok] = tf * idf
 
-                cands = self._query_partitioned_index(self.index_tokens, tok, country)
-                for cid in cands:
-                    token_scores[cid] += idf
+            if s1_token_weights:
+                for tok, w_s1 in s1_token_weights.items():
+                    cands = self._query_partitioned_index(self.index_tokens, tok, country)
+                    for cid in cands:
+                        cand_rec = self.candidate_records.get(cid)
+                        c_tf = (1.0 + math.log(cand_rec.token_counts.get(tok, 1))) if cand_rec else 1.0
+                        token_scores[cid] += w_s1 * c_tf
 
-            if token_scores and total_s1_weight > 0.0:
-                top_tokens = token_scores.most_common(self.top_k_sparse)
-                for rank, (cid, score_sum) in enumerate(top_tokens, 1):
-                    normalized_score = min(1.0, score_sum / total_s1_weight)
-                    record_hit(cid, "token_inverted", normalized_score, rank, is_exact=False)
-
-        # -------------------------------------------------------------
-        # Channel 4: Character 3-Gram Inverted Index
-        # -------------------------------------------------------------
-        if s1.trigrams:
-            trigram_hits: Counter[str] = Counter()
-            s1_tri_len = len(s1.trigrams)
-            for tri in s1.trigrams:
-                cands = self._query_partitioned_index(self.index_trigrams, tri, country)
-                for cid in cands:
-                    trigram_hits[cid] += 1
-
-            if trigram_hits:
-                # Rank top by Jaccard similarity approximation
-                scored_trigrams = []
-                for cid, common in trigram_hits.most_common(self.top_k_sparse * 2):
-                    cand_rec = self.candidate_records.get(cid)
-                    if not cand_rec:
-                        continue
-                    cand_tri_len = len(cand_rec.trigrams)
-                    union_size = s1_tri_len + cand_tri_len - common
-                    jaccard = common / union_size if union_size > 0 else 0.0
-                    if jaccard >= 0.35:
-                        scored_trigrams.append((cid, jaccard))
-
-                scored_trigrams.sort(key=lambda item: -item[1])
-                for rank, (cid, jaccard) in enumerate(scored_trigrams[: self.top_k_sparse], 1):
-                    record_hit(cid, "char_ngram", float(jaccard), rank, is_exact=False)
+                total_s1_weight = sum(s1_token_weights.values())
+                if token_scores and total_s1_weight > 0.0:
+                    top_tokens = token_scores.most_common(self.top_k_sparse)
+                    for rank, (cid, score_sum) in enumerate(top_tokens, 1):
+                        normalized_score = min(1.0, score_sum / total_s1_weight)
+                        record_hit(cid, "token_inverted", normalized_score, rank, is_exact=False)
 
         # -------------------------------------------------------------
-        # Channel 7: Dense Retrieval Hook (if provided)
+        # Channel 4: Address Structural Key (postal + street number)
+        # -------------------------------------------------------------
+        if not s1.is_address_missing and s1.postal_code and s1.street_number:
+            key = (s1.postal_code, s1.street_number)
+            for rank, cid in enumerate(self._query_partitioned_index(self.index_address_structural, key, country), 1):
+                cand = self.candidate_records.get(cid)
+                if cand and not cand.is_address_missing:
+                    record_hit(cid, "address_structural", 0.85, rank, is_exact=False)
+
+        # -------------------------------------------------------------
+        # Channel 5: Dense Retrieval Hook (if provided)
         # -------------------------------------------------------------
         if dense_scores:
             dense_sorted = sorted(
@@ -457,12 +548,12 @@ class MultiChannelBlocker:
         # -------------------------------------------------------------
         # Union, Deterministic Priority Ranking & Capping
         # -------------------------------------------------------------
-        # Deterministic combined priority (from docs/04_stage1_blocking.md):
-        # 1. exact/composite evidence (highest priority);
-        # 2. number of independent blockers;
-        # 3. best channel score;
-        # 4. best rank;
-        # 5. stable candidate ID tie-break.
+        # Deterministic combined priority (from docs/04_stage1_blocking.md §4.1):
+        # Tier 1: Highest number of independent matching channels (-blocker_cnt)
+        # Tier 2: Exact name or postal code match flag (-exact_val)
+        # Tier 3: Maximum channel similarity score (-round(best_score, 4))
+        # Tier 4: Best channel rank (best_rank)
+        # Tier 5: Stable candidate ID tie-break (cid)
         ranked_candidates = []
         for cid, info in hits.items():
             exact_val = 1 if info["exact_match"] or (info["blockers"] & EXACT_BLOCKERS) else 0
@@ -474,10 +565,10 @@ class MultiChannelBlocker:
             cand_rec = self.candidate_records.get(cid)
             cand_source = cand_rec.source if cand_rec else source_from_entity_id(cid)
 
-            # Sort key (negated for descending)
+            # Sort key (multi-tier priority sort per docs/04 spec)
             sort_key = (
-                -exact_val,
                 -blocker_cnt,
+                -exact_val,
                 -round(best_score, 4),
                 best_rank,
                 cid,
@@ -774,18 +865,27 @@ def run_blocking(
     mean_cands = total_pairs / n_s1 if n_s1 else 0.0
     median_cands = candidate_counts[n_s1 // 2] if n_s1 else 0
     p90_cands = candidate_counts[int(n_s1 * 0.90)] if n_s1 else 0
+    p95_cands = candidate_counts[int(n_s1 * 0.95)] if n_s1 else 0
     max_cands = candidate_counts[-1] if n_s1 else 0
 
     summary: Dict[str, Any] = {
+        "s1_count": n_s1,
         "total_source1_entities": n_s1,
         "total_candidate_pairs": total_pairs,
         "singletons_with_zero_candidates": singletons,
+        "singleton_s1_count": singletons,
         "candidates_per_s1": {
             "mean": round(mean_cands, 2),
             "median": median_cands,
             "p90": p90_cands,
+            "p95": p95_cands,
             "max": max_cands,
         },
+        "mean_candidates_per_s1": round(mean_cands, 2),
+        "median_candidates_per_s1": median_cands,
+        "p90_candidates_per_s1": p90_cands,
+        "p95_candidates_per_s1": p95_cands,
+        "max_candidates_per_s1": max_cands,
         "channel_contributions": dict(channel_counts),
         "configuration": {
             "top_k_sparse": top_k_sparse,
@@ -827,7 +927,7 @@ def run_blocking(
     print("\n" + "=" * 70)
     print("STAGE 1 BLOCKING COMPLETE")
     print(f"S1 Entities: {n_s1:,} | Total Pairs: {total_pairs:,} | Singletons: {singletons:,}")
-    print(f"Cands/S1 -> Mean: {mean_cands:.1f}, Median: {median_cands}, P90: {p90_cands}, Max: {max_cands}")
+    print(f"Cands/S1 -> Mean: {mean_cands:.1f}, Median: {median_cands}, P90: {p90_cands}, P95: {p95_cands}, Max: {max_cands}")
     if ground_truth:
         audit = summary["recall_audit"]
         print(f"Recall Audit -> Pair Recall: {audit['pair_recall']:.2%}, "
@@ -840,74 +940,112 @@ def run_blocking(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage 1 Multi-Channel Candidate Generation")
     parser.add_argument(
+        "--stage0_dir", "--stage0-dir",
+        type=Path,
+        default=None,
+        help="Directory containing Stage 0 normalized TSV files (e.g. dataset/stage0_normalized)",
+    )
+    parser.add_argument(
         "--source1",
         type=Path,
         nargs="+",
-        required=True,
+        default=None,
         help="Path(s) to Source 1 TSV(s)",
     )
     parser.add_argument(
         "--candidates",
         type=Path,
         nargs="+",
-        required=True,
+        default=None,
         help="Path(s) to Candidate Sources (S2, S3) TSV(s)",
     )
     parser.add_argument(
-        "--output-dir",
+        "--output_dir", "--output-dir",
         type=Path,
         required=True,
         help="Directory to write candidate_pairs.tsv and provenance",
     )
     parser.add_argument(
-        "--ground-truth",
+        "--ground_truth", "--ground-truth",
         type=Path,
         default=None,
         help="Optional path to ground truth TSV for recall audit gate",
     )
     parser.add_argument(
-        "--max-candidates",
+        "--max_candidates", "--max-candidates",
         type=int,
         default=MAX_CANDIDATES_PER_ENTITY,
         help=f"Max candidates per S1 entity (default: {MAX_CANDIDATES_PER_ENTITY})",
     )
     parser.add_argument(
-        "--top-k-sparse",
+        "--top_k", "--top-k",
+        type=int,
+        default=None,
+        help="Top-K for all channels (convenience flag setting both top-k-sparse and top-k-dense)",
+    )
+    parser.add_argument(
+        "--top_k_sparse", "--top-k-sparse",
         type=int,
         default=TOP_K_SPARSE_OR_CHAR,
         help=f"Top-K for sparse/char/token channels (default: {TOP_K_SPARSE_OR_CHAR})",
     )
     parser.add_argument(
-        "--top-k-dense",
+        "--top_k_dense", "--top-k-dense",
         type=int,
         default=TOP_K_DENSE,
         help=f"Top-K for dense channel (default: {TOP_K_DENSE})",
     )
     parser.add_argument(
-        "--dense-embeddings",
+        "--dense_embeddings", "--dense-embeddings",
         type=Path,
         default=None,
-        help="Optional path to .npz file containing precomputed dense embeddings for Channel 7",
+        help="Optional path to .npz file containing precomputed dense embeddings for Channel 5",
     )
     parser.add_argument(
-        "--similarity-floor",
+        "--similarity_floor", "--similarity-floor",
         type=float,
         default=SIMILARITY_FLOOR,
         help=f"Minimum cosine similarity floor for candidate acceptance (default: {SIMILARITY_FLOOR})",
     )
     args = parser.parse_args()
 
+    source1_paths = args.source1
+    candidate_paths = args.candidates
+
+    if args.stage0_dir and (not source1_paths or not candidate_paths):
+        stage0 = Path(args.stage0_dir)
+        if not stage0.exists():
+            raise FileNotFoundError(f"Stage 0 directory not found: {stage0}")
+        all_tsvs = list(stage0.rglob("*.tsv"))
+        s1_found = sorted([p for p in all_tsvs if "source1" in p.name.lower()])
+        s23_found = sorted([p for p in all_tsvs if ("source2" in p.name.lower() or "source3" in p.name.lower())])
+        if not s1_found:
+            raise FileNotFoundError(f"No source1 TSV files found in {stage0}")
+        if not s23_found:
+            raise FileNotFoundError(f"No source2 or source3 TSV files found in {stage0}")
+        source1_paths = source1_paths or s1_found
+        candidate_paths = candidate_paths or s23_found
+
+    if not source1_paths:
+        parser.error("Either --source1 or --stage0_dir containing source1 files is required.")
+    if not candidate_paths:
+        parser.error("Either --candidates or --stage0_dir containing source2/source3 files is required.")
+
+    top_k_sparse = args.top_k if args.top_k is not None else args.top_k_sparse
+    top_k_dense = args.top_k if args.top_k is not None else args.top_k_dense
+
     run_blocking(
-        source1_paths=args.source1,
-        candidate_sources=args.candidates,
+        source1_paths=source1_paths,
+        candidate_sources=candidate_paths,
         output_dir=args.output_dir,
         ground_truth_path=args.ground_truth,
         dense_embeddings_path=args.dense_embeddings,
-        top_k_sparse=args.top_k_sparse,
-        top_k_dense=args.top_k_dense,
+        top_k_sparse=top_k_sparse,
+        top_k_dense=top_k_dense,
         max_candidates_per_entity=args.max_candidates,
         similarity_floor=args.similarity_floor,
     )
+    return 0
 
 
 if __name__ == "__main__":

@@ -95,7 +95,7 @@ def _record_features(record: Dict[str, str]) -> Dict[str, object]:
         "address_tokens": _tokens(address),
         "name_numbers": _numeric_tokens(name),
         "address_numbers": _numeric_tokens(address),
-        "postal": extract_postal_code(raw_addr),
+        "postal": record.get("postal_code") or extract_postal_code(raw_addr, country=canonical_country),
         "name_trigrams": _char_trigrams(name),
         "address_trigrams": _char_trigrams(address),
     }

@@ -5,7 +5,7 @@
 
 ## 1. Executive Summary & Core Findings
 
-This comprehensive review audits the entire dataset across **7 TSV files** comprising **24,196,876 business records** and **7,638,365 ground-truth matching links**. 
+This comprehensive review audits the entire dataset across **7 TSV files** comprising **24,229,173 business records** (26,435,994 total rows including ground truth) and **7,638,365 ground-truth matching links**. 
 
 ### Critical Highlights & Strategic Takeaways
 
@@ -41,8 +41,8 @@ The challenge provides three sources:
 | **Train** | `train_ground_truth.tsv` | — | **2,206,821** | 121.13 MB | True links (7.64M pairs) |
 | **Test** | `test_source1.tsv` | `S1-` | **1,732,544** | 166.91 MB | Target entities to resolve |
 | **Test** | `test_source2.tsv` | `S2-` | **4,887,273** | 485.86 MB | Test candidate pool source 2 |
-| **Test** | `test_source3.tsv` | `S3-` | **5,082,316** | 482.56 MB | Test candidate pool source 3 |
-| **Total** | **All 7 Files** | — | **26,403,697** | **2,403.80 MB** | Full Challenge Corpus |
+| **Total** | **All 7 Files** | — | **26,435,994** | **2,403.80 MB** | Full Challenge Corpus |
+| **Total** | **6 Entity Files** | — | **24,229,173** | **2,282.67 MB** | All Business Entity Records |
 
 ---
 

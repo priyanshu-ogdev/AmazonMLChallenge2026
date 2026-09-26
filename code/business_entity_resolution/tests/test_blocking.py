@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # Ensure src is importable
 repo_root = Path(__file__).resolve().parent.parent
@@ -29,6 +30,7 @@ from src.blocking import (
     BlockingRecord,
     MultiChannelBlocker,
     run_blocking,
+    main,
 )
 
 
@@ -129,6 +131,70 @@ class TestBlockingChannels(unittest.TestCase):
         cand_hit = next(h for h in hits if h["candidate_entity_id"] == "S2-104")
         self.assertIn("char_ngram", cand_hit["blocker_provenance"])
 
+    def test_first_2_tokens_blocking(self):
+        """Verify first-2-tokens channel retrieves candidate when remaining name differs."""
+        cand = BlockingRecord.from_row(
+            entity_id="S2-105",
+            name="Apex Health Technologies LLC",
+            address="123 Hospital Way",
+            country="US",
+        )
+        self.blocker.index_candidate(cand)
+
+        s1 = BlockingRecord.from_row(
+            entity_id="S1-5",
+            name="Apex Health Care Systems",
+            address="456 Other Rd",
+            country="US",
+        )
+        hits = self.blocker.generate_candidates_for_record(s1)
+        self.assertTrue(any(h["candidate_entity_id"] == "S2-105" for h in hits))
+        cand_hit = next(h for h in hits if h["candidate_entity_id"] == "S2-105")
+        self.assertIn("first_2_tokens", cand_hit["blocker_provenance"])
+
+    def test_acronym_blocking(self):
+        """Verify acronym channel matches acronym to expanded name."""
+        cand = BlockingRecord.from_row(
+            entity_id="S2-106",
+            name="General Electric Medical Systems",
+            address="100 Innovation Way",
+            country="US",
+        )
+        self.blocker.index_candidate(cand)
+
+        s1 = BlockingRecord.from_row(
+            entity_id="S1-6",
+            name="GE Healthcare",
+            address="Different Address",
+            country="US",
+        )
+        hits = self.blocker.generate_candidates_for_record(s1)
+        self.assertTrue(any(h["candidate_entity_id"] == "S2-106" for h in hits))
+        cand_hit = next(h for h in hits if h["candidate_entity_id"] == "S2-106")
+        self.assertIn("acronym_match", cand_hit["blocker_provenance"])
+
+    def test_address_missing_bypass(self):
+        """Verify address structural channel is bypassed when address is missing or placeholder."""
+        cand = BlockingRecord.from_row(
+            entity_id="S2-107",
+            name="Acme Alpha",
+            address="",
+            country="US",
+        )
+        self.assertTrue(cand.is_address_missing)
+        self.blocker.index_candidate(cand)
+
+        s1 = BlockingRecord.from_row(
+            entity_id="S1-7",
+            name="Beta Omega",
+            address="no address available",
+            country="US",
+        )
+        self.assertTrue(s1.is_address_missing)
+        hits = self.blocker.generate_candidates_for_record(s1)
+        # Address structural must not match
+        self.assertFalse(any("address_structural" in h["blocker_provenance"] for h in hits))
+
 
 class TestCountryPartitioning(unittest.TestCase):
     """Verify strict country partitioning invariants."""
@@ -224,6 +290,36 @@ class TestDeterministicRankingAndCapping(unittest.TestCase):
         self.assertEqual(hits[0]["candidate_entity_id"], "S2-A")
         self.assertTrue(hits[0]["blocker_count"] >= 2)
 
+    def test_multi_channel_consensus_over_single_exact_hit(self):
+        """Verify candidate corroborated by multiple channels ranks ABOVE single-channel hit.
+
+        Per docs/04 Section 4.1:
+        Tier 1: Number of independent channels (higher is better).
+        Tier 2: Exact-match flag (exact_val).
+        Therefore, Candidate corroborated by 6 channels outranks a candidate with only 3 channels
+        even if the latter has an exact name match.
+        """
+        blocker = MultiChannelBlocker(similarity_floor=0.8, max_candidates_per_entity=2)
+        cand_a = BlockingRecord.from_row("CAND-A", "Vanguard", "999 Outland Road", "US")
+        cand_b = BlockingRecord.from_row(
+            "CAND-B",
+            "Vanguard Pioneer Innovations",
+            "100 Main St, Beverly Hills, CA 90210",
+            "US",
+        )
+        blocker.index_candidate(cand_a)
+        blocker.index_candidate(cand_b)
+
+        s1 = BlockingRecord.from_row("S1", "Vanguard", "100 Main St, Beverly Hills, CA 90210", "US")
+        hits = blocker.generate_candidates_for_record(s1, dense_scores={"CAND-B": 0.85})
+
+        self.assertEqual(len(hits), 2)
+        # CAND-B has higher blocker_count and must rank ahead of CAND-A
+        self.assertEqual(hits[0]["candidate_entity_id"], "CAND-B")
+        self.assertEqual(hits[1]["candidate_entity_id"], "CAND-A")
+        self.assertGreater(hits[0]["blocker_count"], hits[1]["blocker_count"])
+
+
 
 class TestEndToEndBlockingExecution(unittest.TestCase):
     """Test full run_blocking pipeline writing TSVs and summary."""
@@ -299,6 +395,11 @@ class TestEndToEndBlockingExecution(unittest.TestCase):
         self.assertEqual(audit["entity_full_recall"], 1.0)
         self.assertEqual(audit["any_hit_rate"], 1.0)
 
+        # Verify P95 candidate volume metric (mandatory audit gate per docs/04 Section 6)
+        self.assertIn("p95", summary["candidates_per_s1"])
+        self.assertIn("p95_candidates_per_s1", summary)
+        self.assertIsInstance(summary["candidates_per_s1"]["p95"], (int, float))
+
     def test_blocking_with_layer0_normalized_schema(self):
         """Verify blocker transparently ingests Layer 0 normalized artifacts."""
         s1_norm = self.test_dir / "s1_norm.tsv"
@@ -326,6 +427,31 @@ class TestEndToEndBlockingExecution(unittest.TestCase):
         with open(pairs_path, "r", encoding="utf-8") as f:
             content = f.read()
         self.assertIn("S1-N1\tS2-N2", content)
+
+    def test_cli_stage0_dir_execution(self):
+        """Verify CLI can be invoked with --stage0_dir and --output_dir as documented in docs/04."""
+        stage0_dir = self.test_dir / "stage0"
+        stage0_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(self.s1_file, stage0_dir / "train_source1_normalized.tsv")
+        shutil.copy(self.s2_file, stage0_dir / "train_source2_normalized.tsv")
+
+        cli_out = self.test_dir / "cli_out"
+        test_argv = [
+            "blocking.py",
+            "--stage0_dir", str(stage0_dir),
+            "--output_dir", str(cli_out),
+            "--top_k", "10",
+            "--max_candidates", "20",
+        ]
+        with patch.object(sys, "argv", test_argv):
+            exit_code = main()
+            self.assertEqual(exit_code, 0)
+
+        self.assertTrue((cli_out / "candidate_pairs.tsv").exists())
+        self.assertTrue((cli_out / "blocking_summary.json").exists())
+        with open(cli_out / "blocking_summary.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+            self.assertIn("p95", data["candidates_per_s1"])
 
 
 if __name__ == "__main__":

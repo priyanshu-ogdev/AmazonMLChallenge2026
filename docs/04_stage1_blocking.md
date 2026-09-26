@@ -38,15 +38,16 @@ flowchart TD
         S23["Source 2 & Source 3 Candidate Pool"]
     end
 
-    subgraph Partition["Lossless Partitioning"]
-        CP["Country Partition Gate (US, India, France)"]
+    subgraph Partition["Country-Partitioned Indexing with Fallback"]
+        CP["Country Partition Gate (US, India, France) + Global Fallback for Missing"]
     end
 
     subgraph Channels["Independent Blocking Channels"]
-        CH1["Channel 1: Exact & Normalized Name Keys"]
-        CH2["Channel 2: Character 3/4-gram TF-IDF Nearest Neighbors"]
-        CH3["Channel 3: BGE-M3 Dense Cosine ANN (FAISS)"]
-        CH4["Channel 4: Postal Code & Structural Address Match"]
+        CH1["Channel 1: Exact, First-2-Tokens, Acronym & Composite Keys"]
+        CH2["Channel 2: Character 3/4-Gram Sub-Linear TF-IDF Inverted Index"]
+        CH3["Channel 3: Token Inverted Index with Sub-Linear TF-IDF"]
+        CH4["Channel 4: Postal Code & Structural Address Match (Missing-Bypassed)"]
+        CH5["Channel 5: BGE-M3 Dense Cosine ANN (FAISS)"]
     end
 
     subgraph Aggregation["Deterministic Union & Ranking"]
@@ -61,36 +62,41 @@ flowchart TD
     end
 
     S1 & S23 --> CP
-    CP --> CH1 & CH2 & CH3 & CH4
-    CH1 & CH2 & CH3 & CH4 --> U --> F --> C --> OUT1 & OUT2
+    CP --> CH1 & CH2 & CH3 & CH4 & CH5
+    CH1 & CH2 & CH3 & CH4 & CH5 --> U --> F --> C --> OUT1 & OUT2
 ```
 
 ---
 
-## 3. Four Blocking Channels
+## 3. Five Blocking Channels
 
 ### Channel 1: Exact & Normalized Structural Keys
-- **Normalized Name Key:** Exact match on `norm_name` (post NFKC, lowercased, legal suffix stripped).
+- **Normalized Name Key:** Exact match on `norm_name` (post NFKC, lowercased, legal suffix canonicalized).
 - **First-2-Token Name Key:** Exact match on the first two significant tokens of the business name.
-- **Acronym Key:** Exact match on initialisms for multi-word business names (e.g. `General Electric` $\rightarrow$ `ge`).
+- **Acronym Key:** Exact match on initialisms for multi-word business names (e.g. `General Electric` $\rightarrow$ `ge`) and explicit short acronym tokens (`ge`, `ibm`, `hp`).
+- **Composite Structural Keys:** Exact combinations of `(name, postal_code)`, `(name, street_number)`, `(lead_word, postal_code)`, and `(lead_word, street_number, trailing_segment)`.
 
-### Channel 2: Character N-Gram TF-IDF Retrieval
-- Extracts character 3-grams and 4-grams from normalized business names.
-- Sub-linear term frequency scaling: $\text{tf} = 1 + \log(\text{count})$.
-- Queries S1 against the S2/S3 inverted index using sparse matrix dot products, retrieving the top $K=50$ candidates per entity.
+### Channel 2: Character N-Gram Sub-Linear TF-IDF Retrieval
+- Extracts character 3-grams and 4-grams with edge padding from normalized business names.
+- Sub-linear term frequency scaling: $\text{tf} = 1 + \log(\text{count})$, weighted by smoothed IDF: $\log(1 + (N - n_t + 0.5)/(n_t + 0.5))$.
+- Queries S1 against the candidate inverted index, retrieving top $K=50$ candidates per entity.
 - Highly resilient to character transpositions, missing vowels, and spelling corruptions.
 
-### Channel 3: Dense Semantic ANN Retrieval (BGE-M3)
+### Channel 3: Token Inverted Index with Sub-Linear TF-IDF
+- Extracts word tokens filtered by length $\ge 3$ and common stopword pruning.
+- Scores candidates via sub-linear TF-IDF dot products with frequency-capped upper bound (`MAX_TOKEN_DOC_FREQ = 0.02`).
+- Retrieves top $K=50$ candidates per entity.
+
+### Channel 4: Structural Address & Postal Code Matching
+- Matches candidates sharing an exact postal code (US 5-digit ZIP, India 6-digit PIN, France 5-digit Code Postal) and leading street number.
+- **Missingness Guard:** Explicitly bypassed when either record has `is_address_missing == 1` or lacks street/postal numbers to prevent false-positive collisions on empty addresses.
+
+### Channel 5: Dense Semantic ANN Retrieval (BGE-M3)
 - Encodes combined `encoder_text` using the pre-trained **BGE-M3** multilingual transformer (568M params, 8192 context window, MIT license).
 - Generates 1024-dimensional normalized dense vectors.
 - Performs cosine similarity retrieval via FAISS `IndexFlatIP` (exact inner product search on normalized vectors) or `IndexHNSWFlat`.
 - Captures semantic equivalence across vendor variations (e.g. `Walmart Supercenter #4021` $\approx$ `Wal-Mart Stores Inc`).
 - Retrieves top $K=50$ candidates per entity.
-
-### Channel 4: Structural Address & Postal Code Matching
-- Matches candidates sharing an exact postal code (US 5-digit ZIP, India 6-digit PIN, France 5-digit Code Postal).
-- Matches candidates sharing an identical leading street number and city token.
-- Operates conditionally: bypassed when either record has `is_address_missing == 1`.
 
 ---
 
@@ -142,7 +148,7 @@ country_partition         (US, India, or France)
 
 ## 6. The Mandatory Blocking Recall Audit Gate
 
-Before any Stage 2 feature engineering or Stage 3 classifier training begins, the candidate generation output is audited against `train_ground_truth.tsv` using `01_audit_blocking_recall.ps1`:
+Before any Stage 2 feature engineering or Stage 3 classifier training begins, the candidate generation output is audited against `train_ground_truth.tsv` (executed directly via `src.blocking --ground-truth` or through `scripts/01_run_blocking.ps1`):
 
 ### Audit Metric Targets:
 - **Pair-Level Recall:** $\ge 98.0\%$ of all $7,638,365$ ground-truth pairs present in candidates.

@@ -80,6 +80,21 @@ class TestLayer0Normalization(unittest.TestCase):
         norm_pvt = normalize_name(pvt_ltd)
         self.assertTrue(norm_pvt.endswith("private limited"))
 
+        # Dotted abbreviations (L.L.C., L.L.P., S.A.R.L., S.A.S., P. Ltd.)
+        self.assertEqual(normalize_name("Acme L.L.C."), "acme llc")
+        self.assertEqual(normalize_name("Acme L.L.C"), "acme llc")
+        self.assertEqual(normalize_name("Acme L. L. C."), "acme llc")
+        self.assertEqual(normalize_name("Acme L.L.P."), "acme llp")
+        self.assertEqual(normalize_name("Dupont S.A.R.L."), "dupont sarl")
+        self.assertEqual(normalize_name("Dupont S.A.S."), "dupont sas")
+        self.assertEqual(normalize_name("Dupont S.A."), "dupont sa")
+        self.assertEqual(normalize_name("Shri Krishna Enterprises P. Ltd."), "shri krishna enterprises private limited")
+        self.assertEqual(normalize_name("Shri Krishna Enterprises P Ltd"), "shri krishna enterprises private limited")
+
+        # Enterprise vs Enterprises canonicalization symmetry
+        self.assertEqual(normalize_name("Acme Enterprise"), "acme enterprises")
+        self.assertEqual(normalize_name("Acme Enterprises"), "acme enterprises")
+
         fr_sarl = "Dupont et Freres SARL"
         norm_sarl = normalize_name(fr_sarl)
         self.assertTrue(norm_sarl.endswith("sarl"))
@@ -101,6 +116,10 @@ class TestLayer0Normalization(unittest.TestCase):
         norm3 = normalize_address(addr3)
         self.assertIn("block a", norm3)
 
+        # Documented French abbreviations bd -> boulevard and r. -> rue
+        self.assertEqual(normalize_address("123 Bd Voltaire"), "123 boulevard voltaire")
+        self.assertEqual(normalize_address("12 R. de la Paix"), "12 rue de la paix")
+
     def test_landmark_removal_non_greedy(self):
         """Landmark patterns remove landmark phrase without deleting trailing address content."""
         addr = "797, Lake Town Block A, Kolkata, near SBI Bank, Howrah, West Bengal 700089"
@@ -117,6 +136,11 @@ class TestLayer0Normalization(unittest.TestCase):
         self.assertEqual(extract_postal_code("Cleveland, OH 44114-2201"), "44114")
         self.assertEqual(extract_postal_code("29 Boulevard Haussmann, 75009 Paris"), "75009")
         self.assertIsNone(extract_postal_code("No postal code here"))
+
+        # Country-aware extraction preventing cross-country misfires
+        self.assertEqual(extract_postal_code("123456 Main Street, Columbus, OH 43215", country="US"), "43215")
+        self.assertEqual(extract_postal_code("123456 Main Street, Columbus, OH 43215"), "43215")
+        self.assertIsNone(extract_postal_code("Plot 12345, MG Road, Bangalore", country="India"))
 
     def test_structural_field_extraction(self):
         """Extracts street number, trailing segment, and digit runs accurately."""

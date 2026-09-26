@@ -135,26 +135,30 @@ flowchart TD
 To ensure complete, risk-free execution within the competition timeline on an **NVIDIA RTX 3060 12GB**, components are strictly partitioned into **v1 Baseline (Committed)** and **Stretch (Conditional)**:
 
 ```
-[Phase 1: Environment & Reconnaissance]
-  00_verify_environment.ps1 (GPU, CUDA, PyTorch, dependencies)
-  00_run_eda.ps1 (Dataset audit, verify distributions)
+[Phase 0: Environment & Smoke Verification]
+  00_verify_environment.ps1 (GPU, CUDA, PyTorch, dependencies, unit test smoke test)
         │
         ▼
-[Phase 2: Blocking & Recall Audit Gate]
-  01_run_blocking.ps1 (Stage 0 normalization + Stage 1 candidate generation)
-  01_audit_blocking_recall.ps1 (MANDATORY GATE: >= 98% recall across US & India)
+[Phase 1: Stage 0 Normalization & Stage 1 Blocking]
+  01_run_blocking.ps1 (Stage 0 normalization + Stage 1 multi-channel candidate generation + recall audit gate)
         │
         ▼
-[Phase 3: Core Representation & Baseline Classifier]
-  02a_train_bi_encoder.ps1 (BGE-M3 rsLoRA rank-64 fine-tuning with anti-forgetting)
-  02c_extract_pair_features.ps1 (32 deterministic features + bi-encoder cosine)
-  03_train_gbm.ps1 (5-fold Grouped-OOF XGBoost training + probability calibration)
-  04_tune_threshold.ps1 (Macro F0.5 threshold sweep on OOF predictions)
+[Phase 2: Representation & Feature Engineering]
+  02a_prepare_bi_encoder_data.ps1 (50k US + 50k India balanced sampling & IR eval splits)
+  02b_train_and_eval_bi_encoder.ps1 (BGE-M3 rsLoRA rank-64 fine-tuning with anti-forgetting & weight merge)
+  02c_extract_pair_features.ps1 (32 deterministic features + bi-encoder dense cosine)
         │
         ▼
-[Phase 4: Submission Generation & Validation]
-  05_generate_submission.ps1 (Inference + 1-to-N injective assignment)
-  06_validate_submission.ps1 (utils/validate_submission.py formal audit)
+[Phase 3: Stage 3 Grouped-OOF Classifier & Calibration]
+  03_train_scoring_gbm.ps1 (5-fold Grouped-OOF XGBoost training + probability calibration)
+        │
+        ▼
+[Phase 4: Candidate Scoring & Stage 4 Decision]
+  04_inference_and_decision.ps1 (Inference + Macro F0.5 threshold sweep + singleton assignment)
+        │
+        ▼
+[Phase 5: Competition Submission Validation]
+  05_validate_submission.ps1 (Strict submission format & containment validation)
         │
         ▼
   [BASELINE V1 DELIVERABLE SECURED & SHIPPABLE]

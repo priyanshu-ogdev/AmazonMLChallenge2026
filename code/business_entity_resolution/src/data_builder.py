@@ -272,7 +272,7 @@ def records_to_dict(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
 
 def load_entity_country_map(
     source1_path: str,
-    chunk_size: int = 100_000,
+    chunk_size: int = 50_000,
     canonicalize: bool = True,
 ) -> Dict[str, str]:
     """
@@ -295,7 +295,7 @@ def load_entity_country_map(
 def load_records_by_ids(
     filepath: str,
     entity_ids: Set[str],
-    chunk_size: int = 100_000,
+    chunk_size: int = 50_000,
 ) -> pd.DataFrame:
     """
     Load records matching given entity IDs, reading the TSV in chunks.
@@ -323,7 +323,7 @@ def load_random_sample_by_country(
     country: str,
     n: int,
     exclude_ids: Set[str],
-    chunk_size: int = 100_000,
+    chunk_size: int = 50_000,
     seed: int = 42,
 ) -> pd.DataFrame:
     """
@@ -932,7 +932,7 @@ def main():
     parser.add_argument("--eval_corpus_neg", type=int, default=5000,
                         help="Number of negative docs in eval corpus")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--chunk_size", type=int, default=100000,
+    parser.add_argument("--chunk_size", type=int, default=50000,
                         help="Chunk size for reading large TSV files")
     parser.add_argument("--splits", nargs="+", default=["train", "test"],
                         help="Splits to process for stage0_normalize")

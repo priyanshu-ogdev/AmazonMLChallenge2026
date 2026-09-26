@@ -42,7 +42,7 @@ raw_name             : Unaltered business name as received
 raw_address          : Unaltered business address as received
 norm_name            : Canonicalized business name (NFKC, lowercase, suffix-standardized)
 norm_address         : Canonicalized address (abbreviations expanded, punctuation clean)
-encoder_text         : Canonical combined representation: "{norm_name} [SEP] {norm_address}"
+encoder_text         : Canonical combined representation: "{norm_name} | {norm_address}"
 is_address_missing   : Binary integer flag (1 if raw_address is null/whitespace, else 0)
 postal_code          : Extracted numeric/alphanumeric postal code token (or empty)
 street_number        : Extracted leading street/building number (or empty)
@@ -83,22 +83,23 @@ flowchart TD
 - Collapse consecutive spaces (`\s+`) into a single space; apply `.strip()`.
 
 ### Step 4: Legal Entity Suffix Canonicalization (Trailing Name Context Only)
-Legal suffixes are canonicalized only when appearing at the end of business names (or preceding punctuation):
+Legal suffixes are canonicalized to standardized full forms only when appearing at the end of business names (or preceding punctuation), mapping all dotted and abbreviated forms consistently:
 
 - **United States:**
-  - `incorporated` / `inc.` $\rightarrow$ `inc`
-  - `corporation` / `corp.` $\rightarrow$ `corp`
-  - `limited liability company` / `l.l.c.` / `llc.` $\rightarrow$ `llc`
-  - `company` / `co.` $\rightarrow$ `co`
-  - `limited` / `ltd.` $\rightarrow$ `ltd`
+  - `inc.` / `inc` / `incorporated` $\rightarrow$ `incorporated`
+  - `corp.` / `corp` / `corporation` $\rightarrow$ `corporation`
+  - `l.l.c.` / `llc.` / `llc` / `limited liability company` $\rightarrow$ `limited liability company`
+  - `co.` / `co` / `company` $\rightarrow$ `company`
+  - `ltd.` / `ltd` / `limited` $\rightarrow$ `limited`
+  - `ent.` / `enterprise` / `enterprises` $\rightarrow$ `enterprises`
 - **India:**
-  - `private limited` / `pvt. ltd.` / `p. ltd.` / `pvt ltd.` $\rightarrow$ `pvt ltd`
-  - `limited` / `ltd.` $\rightarrow$ `ltd`
-  - `limited liability partnership` / `l.l.p.` $\rightarrow$ `llp`
+  - `pvt. ltd.` / `p. ltd.` / `pvt ltd` / `private limited` $\rightarrow$ `private limited`
+  - `ltd.` / `ltd` / `limited` $\rightarrow$ `limited`
+  - `l.l.p.` / `llp` / `limited liability partnership` $\rightarrow$ `limited liability partnership`
 - **France:**
-  - `société à responsabilité limitée` / `s.a.r.l.` $\rightarrow$ `sarl`
-  - `société par actions simplifiée` / `s.a.s.` $\rightarrow$ `sas`
-  - `société anonyme` / `s.a.` $\rightarrow$ `sa`
+  - `société à responsabilité limitée` / `s.a.r.l.` / `sarl` $\rightarrow$ `sarl`
+  - `société par actions simplifiée` / `s.a.s.` / `sas` $\rightarrow$ `sas`
+  - `société anonyme` / `s.a.` / `sa` $\rightarrow$ `sa`
   - `entreprise unipersonnelle à responsabilité limitée` $\rightarrow$ `eurl`
 
 > [!CAUTION]
@@ -118,12 +119,12 @@ Extract key tokens used in Stage 1 blocking and Stage 2 deterministic features:
 - **Digit Runs:** Tuple of all numeric runs of length $\ge 2$ appearing in name or address.
 
 ### Step 7: Encoder Text Assembly
-Construct the canonical sequence for transformer bi-encoder encoding:
+Construct the canonical sequence for transformer bi-encoder encoding (using pipe separator ` | `):
 ```python
 if is_address_missing:
-    encoder_text = f"{norm_name} [SEP] [NO_ADDRESS]"
+    encoder_text = f"{norm_name} | [NO_ADDRESS]"
 else:
-    encoder_text = f"{norm_name} [SEP] {norm_address}"
+    encoder_text = f"{norm_name} | {norm_address}"
 ```
 
 ---
@@ -132,7 +133,7 @@ else:
 
 Stage 0 output must satisfy all of the following audit checks before Stage 1 candidate generation may proceed:
 
-1. **Row Count Preservation:** Normalized file row count must match raw TSV row count exactly across all 7 files ($26,403,697$ total records).
+1. **Row Count Preservation:** Normalized file row count must match raw TSV row count exactly across all 7 files ($26,435,994$ total rows; $24,229,173$ business records across the 6 entity files).
 2. **One-to-One Entity Mapping:** `entity_id` set in normalized output must be an exact $1:1$ match with raw TSV IDs. Zero duplicate IDs.
 3. **Diacritic Integrity:** Sample inspection of French test records must show valid accented characters (`Société`, `Hôtel`, `Boulangerie`), with $0\%$ character corruption.
 4. **Missingness Flag Consistency:** Every record where `raw_address` is null or empty string must have `is_address_missing == 1` and `encoder_text` containing `[NO_ADDRESS]`.

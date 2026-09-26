@@ -120,7 +120,7 @@ LEGAL_SUFFIX_MAP: Dict[str, str] = {
     # --- Enterprises / Enterprise ---
     "ent":            "enterprises",
     "enterprises":    "enterprises",
-    "enterprise":     "enterprise",
+    "enterprise":     "enterprises",
     # --- Industries ---
     "ind":            "industries",
     "industries":     "industries",
@@ -166,6 +166,7 @@ ADDRESS_SUFFIX_MAP: Dict[str, str] = {
     "blvd":      "boulevard",
     "boulevard": "boulevard",
     "bvd":       "boulevard",
+    "bd":        "boulevard",
     "dr":        "drive",
     "drive":     "drive",
     "ln":        "lane",
@@ -201,6 +202,7 @@ ADDRESS_SUFFIX_MAP: Dict[str, str] = {
     "department":"department",
     # French address types
     "rue":       "rue",
+    "r":         "rue",
     "allee":     "allee",
     "chemin":    "chemin",
     "chem":      "chemin",
@@ -336,13 +338,32 @@ def _strip_urls(text: str) -> str:
     return _URL_RE.sub(" ", text)
 
 
+# Pattern to match single letters separated by dots and optional spaces, e.g. L.L.C., S.A.R.L., U.S.A., L.L.C, L. L. C.
+_DOTTED_ACRONYM_RE = re.compile(r"\b(?:[a-zA-Z]\s*\.\s*)+[a-zA-Z]\b\.?")
+
+
+def _collapse_dotted_acronyms(text: str) -> str:
+    """
+    Collapse dotted single-letter acronyms (e.g. 'L.L.C.' -> 'LLC', 'S.A.R.L.' -> 'SARL',
+    'U.S.A.' -> 'USA', 'L. L. C.' -> 'LLC', 'P.L.C.' -> 'PLC', 'L.L.P.' -> 'LLP', 'S.A.S.' -> 'SAS').
+    """
+    if not text:
+        return ""
+
+    def repl(m: re.Match) -> str:
+        return re.sub(r"[\.\s]+", "", m.group(0))
+
+    return _DOTTED_ACRONYM_RE.sub(repl, text)
+
+
 def _clean_typography_and_case(text: str) -> str:
     """
-    Lowercase, standardize typographic characters, apply dba expansion.
+    Lowercase, standardize typographic characters, collapse dotted acronyms, apply dba expansion.
     Preserves commas and separators needed by downstream pattern matching.
     """
     if not text:
         return ""
+    text = _collapse_dotted_acronyms(text)
     text = text.lower().strip()
     # Typographic apostrophes -> ASCII apostrophe
     text = re.sub(r"[\u2018\u2019`\xb4\u201a]", "'", text)
@@ -419,14 +440,20 @@ def _canonicalize_legal_suffixes(name: str) -> str:
     - "est" in "West" or "Eastside"
 
     For short names (<=3 tokens), all tokens are eligible.
+    Also unifies 'p ltd' / 'p limited' (from 'P. Ltd.') -> 'private limited'.
     """
     tokens = name.split()
     if not tokens:
         return ""
-    if len(tokens) <= _N_SUFFIX_TOKENS:
-        return " ".join(LEGAL_SUFFIX_MAP.get(t, t) for t in tokens)
-    head = tokens[: len(tokens) - _N_SUFFIX_TOKENS]
-    tail = tokens[len(tokens) - _N_SUFFIX_TOKENS :]
+    n_tail = min(len(tokens), _N_SUFFIX_TOKENS)
+    head = tokens[: len(tokens) - n_tail]
+    tail = tokens[len(tokens) - n_tail :]
+
+    # Canonicalize "p" followed by "ltd" / "limited" in suffix position to "private"
+    for i in range(len(tail) - 1):
+        if tail[i] == "p" and tail[i + 1] in ("ltd", "limited"):
+            tail[i] = "private"
+
     expanded_tail = [LEGAL_SUFFIX_MAP.get(t, t) for t in tail]
     return " ".join(head + expanded_tail)
 
@@ -702,7 +729,7 @@ def normalize_entity_record(
     raw_addr = str(address).strip() if address is not None else ""
     is_missing = raw_addr.lower() in ("nan", "none", "null", "") or len(raw_addr) == 0
 
-    postal = extract_postal_code(raw_addr if not is_missing else "")
+    postal = extract_postal_code(raw_addr if not is_missing else "", country=country)
     encoder_text = normalize_entity(name, address)
     structural = extract_structural_fields(raw_addr if not is_missing else "")
 
@@ -726,39 +753,59 @@ def normalize_entity_record(
     }
 
 
-def extract_postal_code(address: str) -> Optional[str]:
+def extract_postal_code(address: str, country: Optional[str] = None) -> Optional[str]:
     """
-    Extract postal/ZIP code from an address string (country-agnostic).
+    Extract postal/ZIP code from an address string.
 
-    Priority order:
-      1. Indian PIN: exactly 6 digits, first digit 1-9. Last occurrence preferred
-         to avoid misidentifying street numbers (e.g., "H.No 570" is NOT a PIN).
-      2. US ZIP or French code: exactly 5 digits (optional +4 suffix).
-         Last occurrence preferred.
+    If country is provided:
+      - 'us': extracts 5-digit US ZIP (or ZIP+4 prefix). 6-digit street numbers ignored.
+      - 'india': extracts 6-digit Indian PIN (starting 1-9). 5-digit plot numbers ignored.
+      - 'france': extracts 5-digit French postal code.
+    If country is None or unrecognized:
+      - Searches for candidate PINs and ZIPs, preferring the occurrence latest
+        in the address string (closer to city/state/postal tail).
 
     Works on both raw and normalized address strings.
 
     Args:
         address: Address string to search.
+        country: Optional country string or canonical code.
 
     Returns:
         Postal code string, or None if no recognized pattern found.
     """
     if not address:
         return None
-    address = str(address)
+    addr_str = str(address)
 
-    # 1. Indian PIN (6-digit): prefer last occurrence
-    india_pins = _INDIA_PIN_RE.findall(address)
-    if india_pins:
-        return india_pins[-1]
+    c = canonicalize_country(country) if country else ""
 
-    # 2. US ZIP or French code (5-digit): prefer last occurrence
-    five_digit = _ZIPCODE_RE.findall(address)
-    if five_digit:
-        return five_digit[-1]
+    if c == "us":
+        us_matches = _ZIPCODE_RE.findall(addr_str)
+        return us_matches[-1] if us_matches else None
 
-    return None
+    if c == "india":
+        in_matches = _INDIA_PIN_RE.findall(addr_str)
+        return in_matches[-1] if in_matches else None
+
+    if c == "france":
+        fr_matches = _ZIPCODE_RE.findall(addr_str)
+        return fr_matches[-1] if fr_matches else None
+
+    # Country unknown / open-set fallback:
+    # Gather both 6-digit PIN and 5-digit ZIP matches with end positions in string
+    candidates = []
+    for m in _INDIA_PIN_RE.finditer(addr_str):
+        candidates.append((m.end(), m.group(1)))
+    for m in _ZIPCODE_RE.finditer(addr_str):
+        candidates.append((m.end(), m.group(1)))
+
+    if not candidates:
+        return None
+
+    # Sort by appearance position in string; prefer closest to tail
+    candidates.sort(key=lambda x: x[0])
+    return candidates[-1][1]
 
 
 # ---------------------------------------------------------------------------

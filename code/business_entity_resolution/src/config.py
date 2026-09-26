@@ -133,7 +133,7 @@ class DataConfig:
     blocking_candidates_path: Optional[str] = None
 
     # Processing
-    chunk_size: int = 100000  # Rows per chunk for memory-efficient TSV reading
+    chunk_size: int = 50000  # Rows per chunk for memory-efficient TSV reading (INV-7)
     seed: int = 42
     num_workers: int = 4
 
