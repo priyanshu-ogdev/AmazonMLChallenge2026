@@ -24,6 +24,15 @@ NUM_WORKERS=$(nproc --all || echo 4)
 if [ "$NUM_WORKERS" -gt 14 ]; then
     NUM_WORKERS=14
 fi
+
+# Critical Fix for Colab / Low-RAM instances (< 16 GB)
+# Python fork causes Copy-on-Write to duplicate the 8GB inverted index if multiple workers run, crashing Colab.
+TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}' || echo 0)
+if [ "$TOTAL_RAM_KB" -lt 16000000 ]; then
+    echo "[WARNING] Low RAM detected (<16GB). Forcing NUM_WORKERS=1 to prevent OOM crash."
+    NUM_WORKERS=1
+fi
+
 NO_RESUME=false
 NO_CACHE_INDEX=false
 CHECKPOINT_INTERVAL=10000

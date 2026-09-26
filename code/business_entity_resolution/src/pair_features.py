@@ -16,6 +16,7 @@ import csv
 import math
 import os
 import re
+import psutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -417,8 +418,16 @@ def build_pair_features(
 
     items = list(pairs_by_s1.items())
     num_workers = max(1, os.cpu_count() or 4)
-    # Limit workers for pair features since each process duplicates the lookup dictionaries
-    num_workers = min(num_workers, 14)
+    
+    # Critical Fix for Colab / Low-RAM GPU Instances (< 16GB RAM)
+    # Python's 'fork' duplicates reference-counted dictionaries, causing OOM.
+    # If system RAM is less than 16GB, we MUST disable multiprocessing.
+    if psutil.virtual_memory().total < (16 * 1024**3):
+        print("[WARNING] Low RAM detected (< 16GB). Disabling ProcessPoolExecutor to prevent OOM crash.", flush=True)
+        num_workers = 1
+    else:
+        # Limit workers for pair features since each process duplicates the lookup dictionaries
+        num_workers = min(num_workers, 14)
 
     chunk_size = math.ceil(len(items) / num_workers) if num_workers > 0 else 0
     if chunk_size == 0:
