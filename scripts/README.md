@@ -128,9 +128,10 @@ powershell -ExecutionPolicy Bypass -File scripts/03_train_scoring_gbm.ps1 `
 ```
 
 ### `04_inference_and_decision.ps1`
-Applies trained GBM and calibrator to test set, then runs Stage 4 decision policy. Auto-detects test feature tables (including Stage 2b matcher features if present).
+Applies trained GBM and calibrator to test set, then runs Stage 4 decision policy with greedy 1-to-N injective bipartite matching (enforcing candidate mutual exclusivity per competition rules). Auto-detects test feature tables (including Stage 2b matcher features if present).
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/04_inference_and_decision.ps1 `
+    -Injective $true `
     -TestQwenMatcherFeatures output/phase2_features_test/qwen_matcher_features.tsv
 ```
 

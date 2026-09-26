@@ -44,6 +44,7 @@ param(
     [switch]$IncludeQwenMatcher = $false,
     [string]$QwenMatcherAdapter = "",
     [switch]$RunStage0 = $false,
+    [bool]$Injective = $true,
     [switch]$DryRun = $false,
     [string]$OutputDir = "",
     [string]$PythonPath = ""
@@ -268,6 +269,7 @@ Run-PipelinePhase 4 "Test Scoring & Stage 4 Decision Assembly" {
         TestBgeFeatures   = $testBge
         TestCandidateFile = $testCand
         OutputDir         = $p4SubOut
+        Injective         = $Injective
         DryRun            = $DryRun
         PythonPath        = $python
     }

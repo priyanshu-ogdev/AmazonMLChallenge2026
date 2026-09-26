@@ -35,6 +35,7 @@ param(
     [string]$TestQwenMatcherFeatures = "",
     [string]$TestCandidateFile = "",
     [string]$OutputDir = "",
+    [bool]$Injective = $true,
     [switch]$DryRun = $false,
     [string]$PythonPath = ""
 )
@@ -162,6 +163,9 @@ $decisionArgs = @(
     "--metadata", $metaFile,
     "--output", $matchingResultsOut
 )
+if (-not $Injective) {
+    $decisionArgs += "--no-injective"
+}
 
 Invoke-PythonModule "src.decision" $decisionArgs "Assemble Matching Results" -DryRun $DryRun -PythonExe $python
 

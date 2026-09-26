@@ -256,6 +256,27 @@ class TestDownstreamContracts(unittest.TestCase):
             assemble_matching_results(bad_score_df, ["S1-1"], threshold=0.5)
         self.assertIn("non-numeric", str(ctx.exception))
 
+    def test_stage4_decision_injective_bipartite_matching(self):
+        """Verify injective matching assigns shared candidates to highest score only."""
+        scored = pd.DataFrame({
+            "source1_entity_id": ["S1-1", "S1-2"],
+            "candidate_entity_id": ["S2-shared", "S2-shared"],
+            "calibrated_score": [0.92, 0.78],
+        })
+        # Default injective=True: S1-1 gets S2-shared, S1-2 gets empty
+        results_injective = assemble_matching_results(scored, ["S1-1", "S1-2"], threshold=0.50, injective=True)
+        row1 = results_injective[results_injective["source1_entity_id"] == "S1-1"].iloc[0]
+        row2 = results_injective[results_injective["source1_entity_id"] == "S1-2"].iloc[0]
+        self.assertEqual(row1["matched_entity_ids"], "S2-shared")
+        self.assertEqual(row2["matched_entity_ids"], "")
+
+        # When injective=False: both S1-1 and S1-2 get S2-shared
+        results_non_injective = assemble_matching_results(scored, ["S1-1", "S1-2"], threshold=0.50, injective=False)
+        row1_non = results_non_injective[results_non_injective["source1_entity_id"] == "S1-1"].iloc[0]
+        row2_non = results_non_injective[results_non_injective["source1_entity_id"] == "S1-2"].iloc[0]
+        self.assertEqual(row1_non["matched_entity_ids"], "S2-shared")
+        self.assertEqual(row2_non["matched_entity_ids"], "S2-shared")
+
 
 if __name__ == "__main__":
     unittest.main()

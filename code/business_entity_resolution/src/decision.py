@@ -22,9 +22,18 @@ def load_source1_ids(path: Path) -> list[str]:
 
 
 def assemble_matching_results(
-    scored: pd.DataFrame, source1_ids: Iterable[str], threshold: float
+    scored: pd.DataFrame,
+    source1_ids: Iterable[str],
+    threshold: float,
+    injective: bool = True,
 ) -> pd.DataFrame:
-    """Apply one saved threshold, retaining explicit empty rows for singletons."""
+    """Apply one saved threshold, retaining explicit empty rows for singletons.
+
+    When injective=True (default, per docs/09_stage4_decision_and_singletons.md §3),
+    enforces greedy 1-to-N bipartite matching: each S2/S3 candidate record can belong
+    to at most one S1 entity, resolving competing claims in descending order of
+    calibrated match probability.
+    """
     required = {"source1_entity_id", "candidate_entity_id", "calibrated_score"}
     missing = required - set(scored.columns)
     if missing:
@@ -53,9 +62,28 @@ def assemble_matching_results(
     s1_col = scored["source1_entity_id"].values
     cand_col = scored["candidate_entity_id"].values
     score_vals = numeric_scores.values
-    for s1, cand, score in zip(s1_col, cand_col, score_vals):
-        if score >= threshold:
-            matches[s1].append(str(cand))
+
+    # Filter to pairs above or at threshold
+    mask = score_vals >= threshold
+    if mask.any():
+        passed_s1 = s1_col[mask]
+        passed_cand = cand_col[mask]
+        passed_scores = score_vals[mask]
+
+        if injective:
+            # Sort globally in descending order of calibrated probability (stable sort)
+            order = np.argsort(-passed_scores, kind="stable")
+            claimed_targets: set[str] = set()
+            for idx in order:
+                cand = str(passed_cand[idx])
+                if cand not in claimed_targets:
+                    s1 = passed_s1[idx]
+                    matches[s1].append(cand)
+                    claimed_targets.add(cand)
+        else:
+            for s1, cand in zip(passed_s1, passed_cand):
+                matches[s1].append(str(cand))
+
     return pd.DataFrame(
         {
             "source1_entity_id": source1_ids,
@@ -65,7 +93,11 @@ def assemble_matching_results(
 
 
 def write_matching_results(
-    scored_file: Path, source1_file: Path, metadata_file: Path, output_file: Path
+    scored_file: Path,
+    source1_file: Path,
+    metadata_file: Path,
+    output_file: Path,
+    injective: bool = True,
 ) -> None:
     scored = pd.read_csv(scored_file, sep="\t", dtype=str, keep_default_na=False)
     with open(metadata_file, encoding="utf-8") as handle:
@@ -74,6 +106,7 @@ def write_matching_results(
         scored,
         load_source1_ids(source1_file),
         float(metadata["threshold"]),
+        injective=injective,
     )
     output_file.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_file, sep="\t", index=False)
@@ -85,8 +118,15 @@ def main() -> None:
     parser.add_argument("--source1", type=Path, required=True)
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--no-injective",
+        dest="injective",
+        action="store_false",
+        default=True,
+        help="Disable greedy 1-to-N injective bipartite matching (default: enabled)",
+    )
     args = parser.parse_args()
-    write_matching_results(args.scored, args.source1, args.metadata, args.output)
+    write_matching_results(args.scored, args.source1, args.metadata, args.output, injective=args.injective)
 
 
 if __name__ == "__main__":
