@@ -32,7 +32,7 @@ class BGEEntityEncoder:
         self,
         model_name: str = DEFAULT_MODEL,
         max_seq_length: int = 80,
-        batch_size: int = 48,
+        batch_size: int = 128,
         device: Optional[str] = None,
     ) -> None:
         try:
@@ -53,13 +53,27 @@ class BGEEntityEncoder:
         if not clean_texts:
             dimension = getattr(self.model, "get_sentence_embedding_dimension", lambda: 1024)()
             return np.empty((0, dimension), dtype=np.float32)
-        embeddings = self.model.encode(
-            clean_texts,
-            batch_size=self.batch_size,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=True,
-        )
+            
+        import torch
+        # If multiple GPUs are available, use SentenceTransformer's native multi-processing!
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            print(f"[GPU] Detected {torch.cuda.device_count()} GPUs! Distributing BGE-M3 workload across all devices...", flush=True)
+            pool = self.model.start_multi_process_pool()
+            embeddings = self.model.encode_multi_process(
+                clean_texts,
+                pool=pool,
+                batch_size=self.batch_size,
+                normalize_embeddings=True,
+            )
+            self.model.stop_multi_process_pool(pool)
+        else:
+            embeddings = self.model.encode(
+                clean_texts,
+                batch_size=self.batch_size,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=True,
+            )
         return np.asarray(embeddings, dtype=np.float32)
 
 
@@ -209,7 +223,7 @@ def main() -> None:
     parser.add_argument("--output-file", type=Path, default=None, help="Output TSV path (alias)")
     parser.add_argument("--model-name", type=str, default=DEFAULT_MODEL)
     parser.add_argument("--max-seq-length", type=int, default=80)
-    parser.add_argument("--batch-size", type=int, default=48)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 

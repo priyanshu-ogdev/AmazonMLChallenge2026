@@ -43,7 +43,7 @@ class QwenEntityEncoder:
         model_name: str = DEFAULT_MODEL,
         instruction: str = DEFAULT_INSTRUCTION,
         max_seq_length: int = 256,
-        batch_size: int = 32,
+        batch_size: int = 128,
         device: Optional[str] = None,
     ) -> None:
         from sentence_transformers import SentenceTransformer
@@ -60,13 +60,26 @@ class QwenEntityEncoder:
         if not prompted:
             dimension = self.model.get_sentence_embedding_dimension()
             return np.empty((0, dimension), dtype=np.float32)
-        embeddings = self.model.encode(
-            prompted,
-            batch_size=self.batch_size,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=True,
-        )
+            
+        import torch
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            print(f"[GPU] Detected {torch.cuda.device_count()} GPUs! Distributing Qwen workload across all devices...", flush=True)
+            pool = self.model.start_multi_process_pool()
+            embeddings = self.model.encode_multi_process(
+                prompted,
+                pool=pool,
+                batch_size=self.batch_size,
+                normalize_embeddings=True,
+            )
+            self.model.stop_multi_process_pool(pool)
+        else:
+            embeddings = self.model.encode(
+                prompted,
+                batch_size=self.batch_size,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=True,
+            )
         return np.asarray(embeddings, dtype=np.float32)
 
 
@@ -215,7 +228,7 @@ def main() -> None:
     parser.add_argument("--model-name", default=DEFAULT_MODEL)
     parser.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
     parser.add_argument("--max-seq-length", type=int, default=256)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
