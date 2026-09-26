@@ -17,9 +17,13 @@ The architecture of Stage 2 feeding Stage 3 is theoretically grounded in **Stack
 - CLI Invocation:
   ```powershell
   python -m src.scoring `
-      --features ../../output/stage2_features.parquet `
+      --mode train `
+      --features ../../output/phase2_features_train/pair_features.tsv `
+      --bge-features ../../output/phase2_features_train/bge_pair_features.tsv `
+      --qwen-features ../../output/phase2_features_train/qwen_pair_features.tsv `
+      --qwen-matcher-features ../../output/phase2_features_train/qwen_matcher_features.tsv `
       --ground-truth ../../dataset/train/train_ground_truth.tsv `
-      --output-dir ../../output/stage3 `
+      --output-dir ../../output/phase3_gbm `
       --country-mask-rate 0.15 `
       --use-monotone-constraints `
       --booster gbtree `
@@ -92,16 +96,16 @@ flowchart TD
 ## 4. Zero-Shot Generalization Upgrades
 
 ### 4.1 Anti-Shortcut Feature Masking (`--country-mask-rate 0.15`)
-In training data, true matches exclusively share the same country. A tree model can easily learn a shortcut split: `if country_match == 1: predict True`. Because France is completely absent from training data, over-relying on this shortcut damages zero-shot transfer.
-- During training, we stochastically set `country_match = -1.0` (missing) on $15\%$ of training samples.
+In training data, true matches exclusively share the same country. A tree model can easily learn a shortcut split: `if country_equal == 1: predict True`. Because France is completely absent from training data, over-relying on this shortcut damages zero-shot transfer.
+- During training, we stochastically set `country_equal = -1.0` (missing) and `country_equal_missing = 1.0` on $15\%$ of training samples.
 - XGBoost's sparsity-aware split finding learns default split directions that rely on name, address, and dense similarity signals.
 - At test inference, feature masking is turned OFF.
 
 ### 4.2 Monotonic Constraints
 To prevent decision trees from learning spurious non-monotonic artifacts (e.g., predicting that higher name similarity decreases match probability), we enforce directionality constraints:
-- **`+1` (Positive Monotonicity):** Enforced on all similarity signals (`name_levenshtein_ratio`, `addr_token_jaccard`, `bge_cosine`, `best_blocker_score`). Increasing similarity can only increase or maintain match probability.
-- **`-1` (Negative Monotonicity):** Enforced on margin/contradiction gap features (`best_blocker_score_diff`). A larger gap to the top candidate decreases confidence.
-- **`0` (Unconstrained):** Applied to indicator flags, ambiguity counts, and `country_match`. (Monotonic constraints on `country_match` are strictly prohibited to prevent shortcut learning).
+- **`+1` (Positive Monotonicity):** Enforced on all similarity signals (`name_exact`, `address_exact`, `name_jaccard`, `name_edit_similarity`, `address_jaccard`, `address_edit_similarity`, `postal_equal`, `bge_cosine`, `qwen_cosine`, `qwen_matcher_prob`, `best_blocker_score`, `blocker_count`). Increasing similarity can only increase or maintain match probability.
+- **`-1` (Negative Monotonicity):** Enforced on margin/contradiction gap features (`best_blocker_score_diff`, `candidate_rank`, `rank_margin_from_best`, `same_name_different_address`, `same_address_different_name`, `name_length_abs_diff`, `address_length_abs_diff`). A larger gap to the top candidate or higher rank index decreases confidence.
+- **`0` (Unconstrained):** Applied to indicator flags (`*_missing`, `*_missing_either`), source flags (`source_is_s3`), candidate counts, and `country_equal`. (Monotonic constraints on `country_equal` are strictly prohibited to prevent shortcut learning).
 
 ---
 

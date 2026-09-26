@@ -114,7 +114,13 @@ $s1TestFile          = Join-Path $DATASET_DIR "test\test_source1.tsv"
 # 1. Score Candidates
 # ------------------------------------------------------------------------------
 Write-Step "4.1" "Applying Stage 3 GBM & Calibration to Test Candidates..."
-if ($TestQwenMatcherFeatures) {
+if ($TestBgeFeatures -and (Test-Path $TestBgeFeatures)) {
+    Write-Info "BGE Features:           $TestBgeFeatures"
+}
+if ($TestQwenFeatures -and (Test-Path $TestQwenFeatures)) {
+    Write-Info "Qwen Features:          $TestQwenFeatures"
+}
+if ($TestQwenMatcherFeatures -and (Test-Path $TestQwenMatcherFeatures)) {
     Write-Info "Qwen Matcher Features:  $TestQwenMatcherFeatures"
 }
 $scoreArgs = @(

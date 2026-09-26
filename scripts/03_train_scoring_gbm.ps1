@@ -110,7 +110,13 @@ Write-Step "3.1" "Configuring Stage 3 Training Parameters..."
 Write-Info "Booster:                $Booster (eta=$Eta)"
 Write-Info "Country Masking Rate:   $CountryMaskRate"
 Write-Info "Monotonic Constraints:  $UseMonotoneConstraints"
-if ($QwenMatcherFeatures) {
+if ($BgeFeatures -and (Test-Path $BgeFeatures)) {
+    Write-Info "BGE Features:           $BgeFeatures"
+}
+if ($QwenFeatures -and (Test-Path $QwenFeatures)) {
+    Write-Info "Qwen Features:          $QwenFeatures"
+}
+if ($QwenMatcherFeatures -and (Test-Path $QwenMatcherFeatures)) {
     Write-Info "Qwen Matcher Features:  $QwenMatcherFeatures"
 }
 Write-Info "Fold-Safe TF-IDF:       $IncludeTFIDF"

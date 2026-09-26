@@ -233,14 +233,21 @@ Run-PipelinePhase 3 "Grouped-OOF GBM Training & Calibration" {
     $qwenMatcherFeats = Join-Path $OutputDir "phase2_features_train\qwen_matcher_features.tsv"
     $p3ModelOut       = Join-Path $OutputDir "phase3_gbm"
 
-    & "$PSScriptRoot\03_train_scoring_gbm.ps1" `
-        -FeaturesFile $trainFeats `
-        -BgeFeatures $bgeFeats `
-        -QwenFeatures $qwenFeats `
-        -QwenMatcherFeatures $qwenMatcherFeats `
-        -OutputDir $p3ModelOut `
-        -DryRun:$DryRun `
-        -PythonPath $python
+    $p3Params = @{
+        FeaturesFile = $trainFeats
+        BgeFeatures  = $bgeFeats
+        OutputDir    = $p3ModelOut
+        DryRun       = $DryRun
+        PythonPath   = $python
+    }
+    if ($IncludeQwen -and (Test-Path $qwenFeats)) {
+        $p3Params["QwenFeatures"] = $qwenFeats
+    }
+    if ($IncludeQwenMatcher -and (Test-Path $qwenMatcherFeats)) {
+        $p3Params["QwenMatcherFeatures"] = $qwenMatcherFeats
+    }
+
+    & "$PSScriptRoot\03_train_scoring_gbm.ps1" @p3Params
 }
 
 # ------------------------------------------------------------------------------
@@ -255,16 +262,23 @@ Run-PipelinePhase 4 "Test Scoring & Stage 4 Decision Assembly" {
     $p3ModelOut       = Join-Path $OutputDir "phase3_gbm"
     $p4SubOut         = Join-Path $OutputDir "phase4_submission"
 
-    & "$PSScriptRoot\04_inference_and_decision.ps1" `
-        -ArtifactDir $p3ModelOut `
-        -TestFeatures $testFeats `
-        -TestBgeFeatures $testBge `
-        -TestQwenFeatures $testQwen `
-        -TestQwenMatcherFeatures $testQwenMatcher `
-        -TestCandidateFile $testCand `
-        -OutputDir $p4SubOut `
-        -DryRun:$DryRun `
-        -PythonPath $python
+    $p4Params = @{
+        ArtifactDir       = $p3ModelOut
+        TestFeatures      = $testFeats
+        TestBgeFeatures   = $testBge
+        TestCandidateFile = $testCand
+        OutputDir         = $p4SubOut
+        DryRun            = $DryRun
+        PythonPath        = $python
+    }
+    if ($IncludeQwen -and (Test-Path $testQwen)) {
+        $p4Params["TestQwenFeatures"] = $testQwen
+    }
+    if ($IncludeQwenMatcher -and (Test-Path $testQwenMatcher)) {
+        $p4Params["TestQwenMatcherFeatures"] = $testQwenMatcher
+    }
+
+    & "$PSScriptRoot\04_inference_and_decision.ps1" @p4Params
 }
 
 # ------------------------------------------------------------------------------

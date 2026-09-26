@@ -357,9 +357,13 @@ def choose_threshold(
     scores = np.asarray(scores, dtype=float)
     if len(scores) != len(frame):
         raise ValueError("scores must match threshold frame length")
-    # Grid search 0.05 to 0.95 with step 0.01 per parameters table + unique scores + boundaries
+    # Grid search 0.05 to 0.95 with step 0.01 per parameters table + unique scores/quantiles + boundaries
     grid = np.arange(0.05, 0.96, 0.01)
-    candidates = np.unique(np.r_[0.0, grid, scores, 1.0])
+    if len(scores) <= 1000:
+        candidates = np.unique(np.r_[0.0, grid, scores, 1.0])
+    else:
+        score_samples = np.quantile(scores, np.linspace(0.01, 0.99, 100))
+        candidates = np.unique(np.r_[0.0, grid, score_samples, 1.0])
     values = [
         macro_f05(
             frame["source1_entity_id"],

@@ -18,10 +18,10 @@ Stage 4 is **strictly deterministic**:
 - CLI Invocation:
   ```powershell
   python -m src.decision `
-      --scores ../../output/stage3/calibrated_scores.parquet `
-      --metadata ../../output/stage3/stage3_metadata.json `
-      --test_s1 ../../dataset/test/test_source1.tsv `
-      --output_file ../../output/matching_results.tsv
+      --scored ../../output/phase4_submission/scored_candidates.tsv `
+      --source1 ../../dataset/test/test_source1.tsv `
+      --metadata ../../output/phase3_gbm/stage3_metadata.json `
+      --output ../../output/phase4_submission/matching_results.tsv
   ```
 
 ---
