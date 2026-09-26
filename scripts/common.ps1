@@ -31,9 +31,16 @@ function Get-PythonExecutable {
         return (Resolve-Path $env:PYTHON_BIN).Path
     }
 
-    $venvPython = Join-Path $CODE_DIR ".venv\Scripts\python.exe"
-    if (Test-Path $venvPython) {
-        return (Resolve-Path $venvPython).Path
+    # 1. Project root virtualenv (preferred: holds CUDA-enabled PyTorch for GPU training)
+    $rootVenv = Join-Path $PROJECT_ROOT ".venv\Scripts\python.exe"
+    if (Test-Path $rootVenv) {
+        return (Resolve-Path $rootVenv).Path
+    }
+
+    # 2. Package subdirectory virtualenv
+    $codeVenv = Join-Path $CODE_DIR ".venv\Scripts\python.exe"
+    if (Test-Path $codeVenv) {
+        return (Resolve-Path $codeVenv).Path
     }
 
     $cmdPython = Get-Command "python" -ErrorAction SilentlyContinue
