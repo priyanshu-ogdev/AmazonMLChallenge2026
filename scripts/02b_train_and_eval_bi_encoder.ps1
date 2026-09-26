@@ -61,6 +61,9 @@ $ErrorActionPreference = "Stop"
 
 Write-Header "PHASE 2b: BGE-M3 LORA TRAINING & BIDIRECTIONAL GATE EVALUATION"
 
+$_log = Initialize-Logging -ScriptName "02b_train_and_eval_bi_encoder"
+
+
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
 if (-not $DataDir) {
@@ -124,7 +127,8 @@ if (-not $SkipGate) {
         $evalResultPath = Join-Path $DataDir "eval_results_bidirectional.json"
         if (Test-Path $evalResultPath) {
             $evalData = Get-Content $evalResultPath -Raw | ConvertFrom-Json
-            $decision = $evalData.overall_gate_decision
+            # eval_bi_encoder.py writes keys: "decision" and "reasons" (not overall_gate_decision/gate_reasons)
+            $decision = $evalData.decision
             Write-Host ""
             Write-Host "  ========================================================" -ForegroundColor Cyan
             Write-Host "  HELD-OUT COUNTRY GATE DECISION: $decision" -ForegroundColor $(if ($decision -eq "GO") { "Green" } else { "Red" })
@@ -133,7 +137,7 @@ if (-not $SkipGate) {
             if ($decision -ne "GO") {
                 $gatePassed = $false
                 Write-WarningMessage "Bidirectional Gate resulted in NO-GO. Reasons:"
-                foreach ($r in $evalData.gate_reasons) {
+                foreach ($r in $evalData.reasons) {
                     Write-Host "    - $r" -ForegroundColor Yellow
                 }
                 Write-WarningMessage "Actionable Recovery Policy (per system architecture plan):"
@@ -189,3 +193,4 @@ if ($gatePassed -and (-not $SkipFullTrain)) {
 }
 
 Write-Header "PHASE 2b COMPLETE"
+Close-Logging

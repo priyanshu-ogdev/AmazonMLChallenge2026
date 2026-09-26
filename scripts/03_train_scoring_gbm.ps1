@@ -61,6 +61,9 @@ $ErrorActionPreference = "Stop"
 
 Write-Header "PHASE 3: STAGE 3 GROUPED-OOF GBM TRAINING & CALIBRATION"
 
+$_log = Initialize-Logging -ScriptName "03_train_scoring_gbm"
+
+
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
 if (-not $OutputDir) {
@@ -208,3 +211,4 @@ if (-not $DryRun) {
 }
 
 Write-Header "PHASE 3 COMPLETE"
+Close-Logging

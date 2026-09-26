@@ -49,6 +49,9 @@ param(
     [string]$Booster = "gbtree",
     [bool]$CompareDART = $false,
     [bool]$Injective = $true,
+    # B-2: explicitly wire docs/10 canonical values so they appear in one place
+    [float]$CountryMaskRate = 0.15,
+    [bool]$UseMonotoneConstraints = $true,
     [switch]$DryRun = $false,
     [string]$OutputDir = "",
     [string]$PythonPath = ""
@@ -58,6 +61,14 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 . "$PSScriptRoot\common.ps1"
+
+# C-1: open the master pipeline transcript — sub-scripts get their own transcripts too
+$script:_masterLog = Initialize-Logging -ScriptName "run_all_phases"
+
+# A-2: declare QwenMatcher state at script scope so mutations inside scriptblocks
+# (Run-PipelinePhase invokes via & {}) are visible to all downstream phases.
+$script:IncludeQwenMatcher  = $IncludeQwenMatcher
+$script:QwenMatcherAdapter   = $QwenMatcherAdapter
 
 $pipelineStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -77,11 +88,15 @@ Write-Host "  - To Phase:              $ToPhase" -ForegroundColor White
 Write-Host "  - Run Mode:              $RunMode" -ForegroundColor White
 Write-Host "  - Skip GPU:              $SkipGPU (Use BGE-M3 base if true)" -ForegroundColor White
 Write-Host "  - Include Qwen:          $IncludeQwen" -ForegroundColor White
-Write-Host "  - Include Qwen Matcher:  $IncludeQwenMatcher" -ForegroundColor White
+Write-Host "  - Include Qwen Matcher:  $($script:IncludeQwenMatcher)" -ForegroundColor White
+Write-Host "  - Qwen Matcher Adapter:  $(if ($script:QwenMatcherAdapter) { $script:QwenMatcherAdapter } else { '(none)' })" -ForegroundColor White
 Write-Host "  - Run Stage 0:           $RunStage0" -ForegroundColor White
+Write-Host "  - Country Mask Rate:     $CountryMaskRate" -ForegroundColor White
+Write-Host "  - Monotone Constraints:  $UseMonotoneConstraints" -ForegroundColor White
 Write-Host "  - Dry Run:               $DryRun" -ForegroundColor White
 Write-Host "  - Python:                $python" -ForegroundColor White
 Write-Host "  - Output Root:           $OutputDir" -ForegroundColor White
+Write-Host "  - Master Log:            $($script:_masterLog)" -ForegroundColor DarkGray
 Write-Host ""
 
 $phaseTimings = @{}
@@ -135,13 +150,19 @@ if ($RunMode -eq "InferenceOnly") {
 # Phase 1: Candidate Generation (Blocking) - Train & Test
 # ------------------------------------------------------------------------------
 Run-PipelinePhase 1 "Candidate Generation / Blocking" {
-    $sampleMax = if ($RunMode -eq "FastSample") { 20 } else { 50 }
+    # B-1: MaxCandidates is the per-entity budget (docs/10 canonical = 50).
+    # FastSample speed comes from blocking fewer entities inside Python, NOT
+    # from reducing the per-entity budget below the retrieval depths (also 50).
+    $maxCandidates = 50   # always canonical; never lower than TopKSparse/TopKDense
+    $topK          = if ($RunMode -eq "FastSample") { 20 } else { 50 }
 
     # Train blocking
     & "$PSScriptRoot\01_run_blocking.ps1" `
         -Split "train" `
         -RunStage0:$RunStage0 `
-        -MaxCandidates $sampleMax `
+        -MaxCandidates $maxCandidates `
+        -TopKSparse $topK `
+        -TopKDense  $topK `
         -OutputDir (Join-Path $OutputDir "phase1_blocking_train") `
         -DryRun:$DryRun `
         -PythonPath $python
@@ -150,7 +171,9 @@ Run-PipelinePhase 1 "Candidate Generation / Blocking" {
     & "$PSScriptRoot\01_run_blocking.ps1" `
         -Split "test" `
         -RunStage0:$RunStage0 `
-        -MaxCandidates $sampleMax `
+        -MaxCandidates $maxCandidates `
+        -TopKSparse $topK `
+        -TopKDense  $topK `
         -OutputDir (Join-Path $OutputDir "phase1_blocking_test") `
         -DryRun:$DryRun `
         -PythonPath $python
@@ -199,14 +222,48 @@ Run-PipelinePhase 2 "Representation & Feature Engineering" {
         return
     }
 
+    # 2b-2. Qwen Generative-Matcher Training (stretch goal, only when flag is set)
+    # A-2: use $script: prefix so mutations are visible outside this scriptblock
+    if ($script:IncludeQwenMatcher -and (-not $SkipGPU)) {
+        Write-Step "2b-2" "Training Qwen3-0.6B Generative Matcher (stretch goal)..."
+        $qwenMatcherOutDir = Join-Path $OutputDir "phase2_qwen_matcher"
+        & "$PSScriptRoot\02b2_train_and_eval_qwen_matcher.ps1" `
+            -OutputDir $qwenMatcherOutDir `
+            -BlockingCandidates $trainCandFile `
+            -DryRun:$DryRun `
+            -PythonPath $python
+
+        # Only propagate the adapter path if the gate actually passed
+        if (-not $DryRun) {
+            $qwenMetaFile = Join-Path $qwenMatcherOutDir "qwen_matcher_train_metadata.json"
+            if (Test-Path $qwenMetaFile) {
+                $qwenMeta = Get-Content $qwenMetaFile -Raw | ConvertFrom-Json
+                if ($qwenMeta.gate_decision -eq "GO") {
+                    $script:QwenMatcherAdapter  = $qwenMatcherOutDir
+                    Write-Success "Qwen Matcher gate PASSED -> adapter will be used in Phase 2c/3/4."
+                } else {
+                    Write-WarningMessage "Qwen Matcher gate NO-GO. IncludeQwenMatcher will be disabled for downstream phases."
+                    $script:IncludeQwenMatcher = $false
+                }
+            } else {
+                Write-WarningMessage "Qwen Matcher metadata not found after training. Disabling for downstream phases."
+                $script:IncludeQwenMatcher = $false
+            }
+        }
+    } elseif ($script:IncludeQwenMatcher -and $SkipGPU) {
+        Write-WarningMessage "IncludeQwenMatcher=true but SkipGPU=true: Qwen Matcher training requires GPU. Skipping."
+        $script:IncludeQwenMatcher = $false
+    }
+
     # 2c. Feature Extraction (Train & Test)
+    # A-2: read from $script: scope to get the gate-updated values
     & "$PSScriptRoot\02c_extract_pair_features.ps1" `
         -CandidateFile $trainCandFile `
         -Split "train" `
         -BgeModel $bgeModel `
         -IncludeQwen:$IncludeQwen `
-        -IncludeQwenMatcher:$IncludeQwenMatcher `
-        -QwenMatcherAdapter $QwenMatcherAdapter `
+        -IncludeQwenMatcher:$($script:IncludeQwenMatcher) `
+        -QwenMatcherAdapter $script:QwenMatcherAdapter `
         -OutputDir (Join-Path $OutputDir "phase2_features_train") `
         -DryRun:$DryRun `
         -PythonPath $python
@@ -216,8 +273,8 @@ Run-PipelinePhase 2 "Representation & Feature Engineering" {
         -Split "test" `
         -BgeModel $bgeModel `
         -IncludeQwen:$IncludeQwen `
-        -IncludeQwenMatcher:$IncludeQwenMatcher `
-        -QwenMatcherAdapter $QwenMatcherAdapter `
+        -IncludeQwenMatcher:$($script:IncludeQwenMatcher) `
+        -QwenMatcherAdapter $script:QwenMatcherAdapter `
         -OutputDir (Join-Path $OutputDir "phase2_features_test") `
         -DryRun:$DryRun `
         -PythonPath $python
@@ -239,19 +296,26 @@ Run-PipelinePhase 3 "Grouped-OOF GBM Training & Calibration" {
     $qwenMatcherFeats = Join-Path $OutputDir "phase2_features_train\qwen_matcher_features.tsv"
     $p3ModelOut       = Join-Path $OutputDir "phase3_gbm"
 
+    # B-2: forward canonical docs/10 values explicitly — never rely on sub-script defaults
     $p3Params = @{
-        FeaturesFile = $trainFeats
-        BgeFeatures  = $bgeFeats
-        OutputDir    = $p3ModelOut
-        Booster      = $Booster
-        CompareDART  = $CompareDART
-        DryRun       = $DryRun
-        PythonPath   = $python
+        FeaturesFile           = $trainFeats
+        OutputDir              = $p3ModelOut
+        Booster                = $Booster
+        CompareDART            = $CompareDART
+        CountryMaskRate        = $CountryMaskRate
+        UseMonotoneConstraints = $UseMonotoneConstraints
+        DryRun                 = $DryRun
+        PythonPath             = $python
+    }
+    # BGE features: always present when SkipGPU=false; skip check if DryRun
+    if ($DryRun -or (Test-Path $bgeFeats)) {
+        $p3Params["BgeFeatures"] = $bgeFeats
     }
     if ($IncludeQwen -and ($DryRun -or (Test-Path $qwenFeats))) {
         $p3Params["QwenFeatures"] = $qwenFeats
     }
-    if ($IncludeQwenMatcher -and ($DryRun -or (Test-Path $qwenMatcherFeats))) {
+    # A-2: read from $script: scope
+    if ($script:IncludeQwenMatcher -and ($DryRun -or (Test-Path $qwenMatcherFeats))) {
         $p3Params["QwenMatcherFeatures"] = $qwenMatcherFeats
     }
 
@@ -273,17 +337,21 @@ Run-PipelinePhase 4 "Test Scoring & Stage 4 Decision Assembly" {
     $p4Params = @{
         ArtifactDir       = $p3ModelOut
         TestFeatures      = $testFeats
-        TestBgeFeatures   = $testBge
         TestCandidateFile = $testCand
         OutputDir         = $p4SubOut
         Injective         = $Injective
         DryRun            = $DryRun
         PythonPath        = $python
     }
+    # B-5: BGE features are only available when SkipGPU=false (guard same as Qwen)
+    if ($DryRun -or (Test-Path $testBge)) {
+        $p4Params["TestBgeFeatures"] = $testBge
+    }
     if ($IncludeQwen -and ($DryRun -or (Test-Path $testQwen))) {
         $p4Params["TestQwenFeatures"] = $testQwen
     }
-    if ($IncludeQwenMatcher -and ($DryRun -or (Test-Path $testQwenMatcher))) {
+    # A-2: read from $script: scope
+    if ($script:IncludeQwenMatcher -and ($DryRun -or (Test-Path $testQwenMatcher))) {
         $p4Params["TestQwenMatcherFeatures"] = $testQwenMatcher
     }
 
@@ -325,7 +393,12 @@ $reportLines.Add("- **Execution Date:** $((Get-Date).ToString('yyyy-MM-dd HH:mm:
 $reportLines.Add("- **Run Mode:** $RunMode")
 $reportLines.Add("- **Skip GPU:** $SkipGPU")
 $reportLines.Add("- **Include Qwen:** $IncludeQwen")
+$reportLines.Add("- **Include Qwen Matcher:** $($script:IncludeQwenMatcher)")
+$reportLines.Add("- **Qwen Matcher Adapter:** $(if ($script:QwenMatcherAdapter) { $script:QwenMatcherAdapter } else { 'n/a' })")
+$reportLines.Add("- **Country Mask Rate:** $CountryMaskRate")
+$reportLines.Add("- **Monotone Constraints:** $UseMonotoneConstraints")
 $reportLines.Add("- **Total Duration:** $($totalSec)s")
+$reportLines.Add("- **Master Log:** $($script:_masterLog)")
 $reportLines.Add("")
 $reportLines.Add("## Phase Timings")
 $reportLines.Add("")
@@ -336,6 +409,7 @@ foreach ($key in $phaseTimings.Keys) {
 }
 $reportLines.Add("")
 $reportLines.Add("## Key Artifact Locations")
+$reportLines.Add("- **Logs Directory:** logs/")
 $reportLines.Add("- **Phase 1 Train Blocking:** output/phase1_blocking_train")
 $reportLines.Add("- **Phase 1 Test Blocking:** output/phase1_blocking_test")
 $reportLines.Add("- **Phase 2 Prepared Data:** output/phase2_prepared_data")
@@ -348,3 +422,4 @@ Set-Content -Path $reportPath -Value $reportLines
 Write-Info "Saved execution summary -> $reportPath"
 
 Write-Header "PIPELINE ORCHESTRATION COMPLETE"
+Close-Logging

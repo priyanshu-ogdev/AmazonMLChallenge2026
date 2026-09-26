@@ -45,6 +45,9 @@ $ErrorActionPreference = "Stop"
 
 Write-Header "PHASE 2a: BI-ENCODER TRAINING & EVALUATION DATA PREPARATION"
 
+$_log = Initialize-Logging -ScriptName "02a_prepare_bi_encoder_data"
+
+
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
 if (-not $OutputDir) {
@@ -100,3 +103,4 @@ if (-not $DryRun) {
 }
 
 Write-Header "PHASE 2a COMPLETE"
+Close-Logging

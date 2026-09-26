@@ -36,7 +36,7 @@ param(
     [ValidateSet("train", "test")]
     [string]$Split = "train",
     [string]$BgeModel = "BAAI/bge-m3",
-    [bool]$IncludeQwen = $true,
+    [switch]$IncludeQwen,
     [string]$QwenModel = "Qwen/Qwen3-Embedding-0.6B",
     [switch]$IncludeQwenMatcher = $false,
     [string]$QwenMatcherAdapter = "",
@@ -52,6 +52,9 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\common.ps1"
 
 Write-Header "PHASE 2c: PAIR FEATURES EXTRACTION ($($Split.ToUpper()))"
+
+$_log = Initialize-Logging -ScriptName "02c_extract_pair_features_$Split"
+
 
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
@@ -184,3 +187,4 @@ if (-not $DryRun) {
 }
 
 Write-Header "PHASE 2c COMPLETE"
+Close-Logging

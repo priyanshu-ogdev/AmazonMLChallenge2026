@@ -47,6 +47,9 @@ $ErrorActionPreference = "Stop"
 
 Write-Header "PHASE 4: TEST CANDIDATE SCORING & STAGE 4 DECISION ASSEMBLY"
 
+$_log = Initialize-Logging -ScriptName "04_inference_and_decision"
+
+
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
 if (-not $OutputDir) {
@@ -207,3 +210,4 @@ if (-not $DryRun) {
 }
 
 Write-Header "PHASE 4 COMPLETE: SUBMISSION PACKAGE ASSEMBLED -> $OutputDir"
+Close-Logging

@@ -52,6 +52,9 @@ $ErrorActionPreference = "Stop"
 
 Write-Header "PHASE 2b-2: QWEN3-0.6B GENERATIVE MATCHER LORA TRAINING (STRETCH)"
 
+$_log = Initialize-Logging -ScriptName "02b2_train_and_eval_qwen_matcher"
+
+
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
 if (-not $DatasetDir) {
@@ -121,3 +124,4 @@ if (-not $DryRun) {
 }
 
 Write-Header "PHASE 2b-2 COMPLETE"
+Close-Logging

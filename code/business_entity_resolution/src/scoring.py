@@ -920,7 +920,10 @@ def run_training(
         for fold in diagnostics["folds"]
         if fold.get("best_iteration", 0) > 0
     ]
-    final_n_est = max(50, int(np.mean(best_iters) * 1.1)) if best_iters else 300
+    # Cap at 1000 (the n_estimators ceiling in DEFAULT_PARAMS) so that if early
+    # stopping never fired in any fold the mean could be ≈1000 and ×1.1 = 1100,
+    # which would silently exceed the declared budget.
+    final_n_est = min(1000, max(50, int(np.mean(best_iters) * 1.1))) if best_iters else 300
 
     model, final_columns = fit_final(
         labeled,

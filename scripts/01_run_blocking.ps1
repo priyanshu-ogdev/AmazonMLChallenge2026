@@ -52,6 +52,9 @@ $ErrorActionPreference = "Stop"
 
 Write-Header "PHASE 1: STAGE 0 NORMALIZATION & STAGE 1 BLOCKING ($($Split.ToUpper()))"
 
+$_log = Initialize-Logging -ScriptName "01_run_blocking_$Split"
+
+
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
 # Determine default output directory
@@ -154,3 +157,4 @@ if (-not $DryRun) {
 }
 
 Write-Header "PHASE 1 COMPLETE"
+Close-Logging

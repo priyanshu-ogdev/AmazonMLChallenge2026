@@ -34,6 +34,9 @@ $ErrorActionPreference = "Stop"
 
 Write-Header "PHASE 5: COMPETITION SUBMISSION VALIDATION & INTEGRITY AUDIT"
 
+$_log = Initialize-Logging -ScriptName "05_validate_submission"
+
+
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
 if (-not $SubmissionDir) {
@@ -59,8 +62,8 @@ if (Test-Path $candidateFile) {
 }
 
 Write-Step "5.2" "Executing Submission Validator..."
-$valArgs = @(
-    "utils/validate_submission.py",
+$valScript = Join-Path $PROJECT_ROOT "utils\validate_submission.py"
+$valArgs   = @(
     "--matching", $matchingFile,
     "--test-dir", $TestDir
 )
@@ -72,7 +75,7 @@ if ($CheckIds) {
     $valArgs += "--check-ids"
 }
 
-Invoke-PythonScript "utils\validate_submission.py" $valArgs[1..($valArgs.Length-1)] "Submission Validator" -DryRun $DryRun -PythonExe $python
+Invoke-PythonScript $valScript $valArgs "Submission Validator" -DryRun $DryRun -PythonExe $python
 
 if (-not $DryRun) {
     Write-Host ""
@@ -83,3 +86,4 @@ if (-not $DryRun) {
 }
 
 Write-Header "PHASE 5 COMPLETE"
+Close-Logging

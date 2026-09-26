@@ -21,6 +21,8 @@ $ErrorActionPreference = "Stop"
 
 . "$PSScriptRoot\common.ps1"
 
+$_log = Initialize-Logging -ScriptName "00_verify_environment"
+
 Write-Header "PHASE 0: ENVIRONMENT VERIFICATION & HARDWARE AUDIT"
 
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
@@ -133,3 +135,4 @@ if (-not $SkipTests) {
 }
 
 Write-Header "PHASE 0 COMPLETE: ENVIRONMENT IS READY"
+Close-Logging

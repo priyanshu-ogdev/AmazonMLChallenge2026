@@ -155,6 +155,67 @@ function Invoke-PythonModule {
     return $true
 }
 
+# ------------------------------------------------------------------------------
+# Logging: Persistent Transcript Capture
+# ------------------------------------------------------------------------------
+
+# Central log directory (sibling of output/)
+$LOG_DIR = Join-Path $PROJECT_ROOT "logs"
+
+function Initialize-Logging {
+    <#
+    .SYNOPSIS
+        Opens a timestamped transcript file under logs/ and starts capturing
+        all stdout + stderr for the calling script.
+    .PARAMETER ScriptName
+        Short label used in the log filename (e.g. "01_run_blocking_train").
+    .PARAMETER LogDir
+        Override log directory (default: <project_root>/logs).
+    .OUTPUTS
+        Absolute path to the opened log file.
+    #>
+    param(
+        [string]$ScriptName = "pipeline",
+        [string]$LogDir     = ""
+    )
+
+    if (-not $LogDir) { $LogDir = $LOG_DIR }
+
+    if (-not (Test-Path $LogDir)) {
+        New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+    }
+
+    $ts      = Get-Date -Format "yyyyMMdd_HHmmss"
+    $logFile = Join-Path $LogDir "${ts}_${ScriptName}.log"
+
+    try {
+        # PS 5.0+ supports multiple concurrent transcripts
+        Start-Transcript -Path $logFile -Append | Out-Null
+        Write-Host "[LOG] Transcript -> $logFile" -ForegroundColor DarkGray
+    }
+    catch {
+        # Transcript already running from parent orchestrator — that transcript
+        # captures all output anyway; just return the path for reference.
+        Write-Host "[LOG] Nested transcript skipped (parent transcript active): $logFile" -ForegroundColor DarkGray
+    }
+
+    return $logFile
+}
+
+function Close-Logging {
+    <#
+    .SYNOPSIS
+        Stops the active transcript started by Initialize-Logging.
+        Safe to call even if no transcript is running.
+    #>
+    try {
+        Stop-Transcript | Out-Null
+    }
+    catch {
+        # Already stopped or never started; silently ignore.
+    }
+}
+
 function Invoke-PythonScript {
     param(
         [string]$ScriptPath,
