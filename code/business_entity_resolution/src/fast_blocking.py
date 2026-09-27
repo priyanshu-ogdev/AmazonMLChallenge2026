@@ -36,7 +36,7 @@ import polars as pl
 # ---------------------------------------------------------------------------
 TOP_K_SPARSE = 50
 TOP_K_DENSE = 50
-MAX_CANDIDATES = 25
+MAX_CANDIDATES = 50
 SIMILARITY_FLOOR = 0.30
 MAX_TOKEN_DOC_FREQ = 0.02
 MAX_TOKEN_DOC_COUNT = 2500

@@ -559,33 +559,50 @@ def build_pair_features(
 
     items = list(pairs_by_s1.items())
     num_workers = max(1, os.cpu_count() or 4)
-    
+
+    import multiprocessing
+    import sys as _sys
+    _platform = _sys.platform
+
     try:
-        import multiprocessing
-        ctx = multiprocessing.get_context("fork")
-        ExecutorClass = ProcessPoolExecutor
-        kwargs = {"mp_context": ctx}
-        
-        # Critical Fix for Linux/Mac: 'fork' duplicates reference-counted dictionaries.
-        # The dictionaries take ~10GB. Dirtied pages take ~3-4GB per worker.
-        total_ram = psutil.virtual_memory().total if psutil is not None else 32 * 1024**3
-        if total_ram < (28 * 1024**3):
-            print("[WARNING] Low RAM detected (< 28GB). Disabling ProcessPoolExecutor to prevent OOM crash.", flush=True)
-            num_workers = 1
-        elif total_ram < (45 * 1024**3):
-            print("[INFO] 30GB+ RAM detected. Scaling to NUM_WORKERS=2 to maximize RAM usage safely.", flush=True)
-            num_workers = min(num_workers, 2)
+        if _platform == "win32":
+            # Windows: 'fork' is unavailable; use 'spawn' for true multiprocessing parallelism.
+            # ThreadPoolExecutor on Windows is GIL-bound for CPU-heavy string/set ops and
+            # gives virtually no speedup for pair_feature_row(). Spawn-based ProcessPool
+            # provides true OS-level parallelism at the cost of per-worker startup (~2-3 sec).
+            ctx = multiprocessing.get_context("spawn")
+            ExecutorClass = ProcessPoolExecutor
+            kwargs = {"mp_context": ctx}
+            # Spawn duplicates ~100 MB of state per worker (acceptable on Windows 32GB machines).
+            total_ram = psutil.virtual_memory().total if psutil is not None else 32 * 1024**3
+            if total_ram < (16 * 1024**3):
+                print("[WARNING] Low RAM detected (< 16GB). Capping workers=4 on Windows spawn.", flush=True)
+                num_workers = min(num_workers, 4)
+            else:
+                num_workers = min(num_workers, 10)  # cap at 10 spawn workers to avoid startup overhead
+            print(f"[INFO] Windows detected. Using ProcessPoolExecutor (spawn) with {num_workers} workers.", flush=True)
         else:
-            num_workers = min(num_workers, 14)
-            
+            # Linux/Mac: use 'fork' for zero-copy COW sharing of large dicts.
+            ctx = multiprocessing.get_context("fork")
+            ExecutorClass = ProcessPoolExecutor
+            kwargs = {"mp_context": ctx}
+            # Critical Fix for Linux/Mac: 'fork' duplicates reference-counted dictionaries.
+            # The dictionaries take ~10GB. Dirtied pages take ~3-4GB per worker.
+            total_ram = psutil.virtual_memory().total if psutil is not None else 32 * 1024**3
+            if total_ram < (28 * 1024**3):
+                print("[WARNING] Low RAM detected (< 28GB). Disabling ProcessPoolExecutor to prevent OOM crash.", flush=True)
+                num_workers = 1
+            elif total_ram < (45 * 1024**3):
+                print("[INFO] 30GB+ RAM detected. Scaling to NUM_WORKERS=2 to maximize RAM usage safely.", flush=True)
+                num_workers = min(num_workers, 2)
+            else:
+                num_workers = min(num_workers, 14)
     except (ValueError, ImportError):
         from concurrent.futures import ThreadPoolExecutor
         ExecutorClass = ThreadPoolExecutor
         kwargs = {}
-        # Windows/spawn environment: ThreadPoolExecutor shares RAM cleanly.
-        # We can safely use all cores to maximize speed.
-        num_workers = min(num_workers, 16)
-        print(f"[INFO] Windows/spawn environment detected. Using ThreadPoolExecutor with {num_workers} workers.", flush=True)
+        num_workers = min(num_workers, 8)
+        print(f"[INFO] ProcessPoolExecutor unavailable. Falling back to ThreadPoolExecutor with {num_workers} workers.", flush=True)
 
     # Chunk into 5,000 S1 entities to keep memory footprint strictly bounded (< 1.8 GB RAM)
     chunk_size = 5000

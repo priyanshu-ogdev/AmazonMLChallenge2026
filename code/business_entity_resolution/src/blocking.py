@@ -75,7 +75,7 @@ from src.normalize import (
 # Configuration defaults matching docs/04_stage1_blocking.md
 TOP_K_DENSE = 50
 TOP_K_SPARSE_OR_CHAR = 50
-MAX_CANDIDATES_PER_ENTITY = 25
+MAX_CANDIDATES_PER_ENTITY = 50
 SIMILARITY_FLOOR = 0.30
 MAX_TOKEN_DOC_FREQ = 0.02
 MAX_TOKEN_DOC_COUNT = 2500

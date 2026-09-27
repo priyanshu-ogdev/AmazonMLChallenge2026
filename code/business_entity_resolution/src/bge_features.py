@@ -31,7 +31,7 @@ class BGEEntityEncoder:
     def __init__(
         self,
         model_name: str = DEFAULT_MODEL,
-        max_seq_length: int = 80,
+        max_seq_length: int = 128,  # Increased from 80: French legal names + addresses need ~100-120 tokens
         batch_size: int = 256,
         device: Optional[str] = None,
     ) -> None:
