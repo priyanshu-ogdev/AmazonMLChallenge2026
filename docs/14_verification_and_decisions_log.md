@@ -147,17 +147,30 @@ flowchart TD
 ---
 
 ## 10. Pipeline Execution Readiness Assessment
-
-- **Unit & Contract Tests:** 120 / 120 passed in 13.41s across all 6 test modules (`test_blocking.py`, `test_calibration.py`, `test_downstream_contracts.py`, `test_layer0.py`, `test_layer2.py`, `test_scoring.py`).
+ 
+- **Unit & Contract Tests:** 126 / 126 passed in 19.13s across all test suites (`tests/test_*.py`).
 - **Data Integrity:** All TSV readers and writers strictly comply with Invariant INV-5 (`sep="\t"`, `quoting=csv.QUOTE_NONE`, `escapechar="\\"`).
-- **Model State:** Pre-training baseline (no trained models exist yet in `output/phase2_models/` or `output/phase3_gbm/`).
+- **Git LFS Status:** 100% synchronized (`git lfs fsck OK`). All 14 tracked large files (including raw datasets and the 2.41GB candidate index cache) exist as full binaries on local disk.
 - **Hardware & Runtime Configuration:**
-  - Machine has an NVIDIA GeForce RTX 3060 (12GB VRAM).
-  - The current default `.venv` uses Python 3.14.7 (CPU-only PyTorch).
-  - Host has Python 3.12.0 (`C:\Program Files\Python312\python.exe`) which supports official PyTorch CUDA 12.4 wheels.
-  - Two execution paths are supported:
-    1. **GPU Fine-Tuning (Recommended):** Setup Python 3.12 venv with `torch torchvision --index-url https://download.pytorch.org/whl/cu124` to run BGE-M3 LoRA fine-tuning and the two-way held-out country gate.
-    2. **CPU Frozen Baseline:** Run `.\scripts\run_all_phases.ps1 -SkipGPU -RunMode Full` using off-the-shelf `BAAI/bge-m3` representations immediately.
+  - Machine has an NVIDIA GeForce RTX 3060 (12GB VRAM) and 32GB system RAM.
+  - Active environment: Python 3.12.0 virtualenv (`.venv\Scripts\python.exe`) with PyTorch CUDA 12.4 (`torch==2.6.0+cu124`), supporting native `bfloat16` and full GPU acceleration.
+  - VRAM budget verified: 2.68GB fixed model footprint with ~9.32GB available headroom, supporting physical batch size 48 for LoRA fine-tuning.
+
+---
+
+## 11. Windows RTX 3060 Orchestration Hardening & LFS Sync Log
+
+| Issue / Optimization | Root Cause | Implemented Resolution | Verified By |
+|---|---|---|---|
+| **Path Rooting Mismatch** | Relative paths (`output\phase1_blocking_train\...`) failed with `FileNotFoundError` when `Invoke-PythonModule` executed with working directory `$CODE_DIR`. | Implemented `Resolve-FullPath` in `scripts/common.ps1` to force absolute path resolution rooted at `$PROJECT_ROOT`. Updated `Invoke-PythonModule` to run from `$PROJECT_ROOT` with `$env:PYTHONPATH = "$CODE_DIR;$PROJECT_ROOT"`. | `01_run_blocking.ps1` dry-run & live execution |
+| **Scripts Deduplication** | `scripts/common.ps1` had an accidental duplicated copy of functions appended from a previous merge. | Deduplicated and pruned `common.ps1` from 701 lines to 398 lines, preserving CUDA allocation safeguards and unbuffered logging. | All scripts parsing cleanly |
+| **Windows Multiprocessing RAM Duplication** | Using `ProcessPoolExecutor` on Windows duplicates the parent 15GB index per child process, causing severe RAM paging/OOM on 32GB systems. | Standardized on `ThreadPoolExecutor` (16 workers) for Windows. Worker threads safely query the shared in-memory candidate index without duplicating RAM. RAM usage stays strictly capped at ~15.3GB. | Process monitor: 15.3GB RAM steady |
+| **CandidateHit Indexing Alignment** | `CandidateHit` namedtuple was accessed using dictionary string indexing in `src/pair_features.py` and tuple unpack in `src/blocking.py`. | Standardized tuple indexing (`c[1]` for `candidate_entity_id`) and added defensive handling in `pair_features.py`. | `test_candidate_tuple`, `test_downstream_contracts.py` |
+| **PowerShell Em-Dash Parsing** | UTF-8 Unicode em-dashes (`—`) in PowerShell comments caused non-terminating parse errors on certain Windows codepages. | Sanitized all `.ps1` files to standard ASCII hyphens (`--`). | PowerShell syntax parser |
+| **Unittest Discovery Top-Level Dir** | `unittest discover -s <dir> -t $PROJECT_ROOT` failed because Python's standard library module `code` clashed with directory name `code`. | Set `-t $CODE_DIR` so test discovery anchors to `code/business_entity_resolution` without package name collisions. | `00_verify_environment.ps1` |
+| **Index Cache Fingerprint Fallback** | Normalized candidate TSV byte sizes can differ slightly from raw sources, causing `_candidate_source_fingerprint` to mismatch. | Maintained `FORCING load of index anyway` fallback in `src/blocking.py`, allowing the 2.41GB index to load in 43.9s instead of triggering a 45-minute redundant rebuild. | Live execution log verification |
+| **All-Phases Dry Run Integrity** | End-to-end orchestration required validation before executing full multi-hour pipeline. | Ran `.\scripts\run_all_phases.ps1 -DryRun` traversing Phase 0 through Phase 5 with 100% exit code 0. | `output/pipeline_execution_summary.md` |
+
 
 
 

@@ -22,95 +22,74 @@ anti-forgetting stack protects the pretrained multilingual space, but the
 adapter is accepted only after the two-direction held-out-country gate. A
 failed gate must not be silently deployed.
 
-## Quick Start
+## Quick Start (Local RTX 3060 / 32GB RAM Environment)
 
-### Step 1: Install Dependencies
+All operations run locally with full CUDA 12.4 acceleration and ThreadPoolExecutor multi-core CPU sharing.
 
-```bash
-pip install -r requirements.txt
+### Step 1: Environment & Virtualenv
+Ensure the project virtualenv (`.venv`) is activated. It contains PyTorch 2.6.0 with CUDA 12.4, PEFT, XGBoost, and sentence-transformers:
+```powershell
+.\scripts\00_verify_environment.ps1
 ```
 
-**Critical packages** (not in default env):
-- `peft>=0.7.0` — LoRA adapter support
-- `accelerate>=0.25.0` — training acceleration
-- `datasets>=2.14.0` — HuggingFace datasets
+### Step 2: Phase 1 Candidate Generation (Blocking)
+Generates high-recall candidates across exact, n-gram, address, and phonetic channels:
+```powershell
+.\scripts\01_run_blocking.ps1 -Split "train" -MaxCandidates 50 -TopKSparse 50 -TopKDense 50 -NumWorkers 0
+```
+- **Index Caching:** Automatically reuses the cached 2.41GB inverted index (`candidate_index.pkl`) in ~44 seconds.
+- **Multithreading:** Uses `ThreadPoolExecutor` sharing the 15.3GB index safely in RAM across all available CPU cores.
 
-### Step 2: Prepare Training Data (CPU — this laptop)
-
+### Step 3: Phase 2a Data Preparation
+Samples 50K entities per country (US + India balanced), mines hard negatives from Phase 1 candidate pairs, and builds bidirectional evaluation splits:
+```powershell
+.\scripts\02a_prepare_bi_encoder_data.ps1 `
+    -SamplePerCountry 50000 `
+    -BlockingCandidates output/phase1_blocking_train/candidate_pairs.tsv `
+    -NegativesPerPositive 2
+```
+Or directly via Python:
 ```bash
-cd code/business_entity_resolution
-
 python -m src.data_builder \
-    --data_dir ../../dataset \
-    --output_dir ./prepared_data \
+    --mode train_data \
+    --data_dir dataset \
+    --output_dir output/phase2_prepared_data \
     --sample_per_country 50000 \
-    --seed 42
+    --eval_sample 2000 \
+    --eval_corpus_neg 5000 \
+    --seed 42 \
+    --bidirectional_gate \
+    --blocking_candidates output/phase1_blocking_train/candidate_pairs.tsv \
+    --negatives_per_positive 2
 ```
 
-This samples 50K entities per country (US + India), creates positive pairs from ground truth, and builds IR evaluation data for the held-out country gate. Takes ~15-30 minutes on CPU.
-
-**Output**:
+### Step 4: Phase 2b BGE-M3 LoRA Training & 2-Way Gate
+Trains the BGE-M3 rsLoRA adapter on GPU (RTX 3060 12GB VRAM, physical batch 48, mini-batch 16 with CachedMNRL) and automatically evaluates the bidirectional generalization gate (`US -> India` and `India -> US`):
+```powershell
+.\scripts\02b_train_and_eval_bi_encoder.ps1 -Epochs 3 -BatchSize 48 -MiniBatchSize 16 -LoraR 64
 ```
-prepared_data/
-├── held_out_country_dataset/   # Train: US, Eval: India
-├── full_training_dataset/      # Both countries (for final model)
-├── eval_queries.json           # IR evaluator queries
-├── eval_corpus.json            # IR evaluator corpus
-├── eval_relevant.json          # Ground truth relevance
-└── data_stats.json             # Statistics
-```
+If the gate passes:
+- Automatically trains on the full dataset.
+- Automatically merges the LoRA adapter into a clean standalone model in `output/phase2_models/bge-m3-merged` with zero inference overhead.
 
-### Step 3: Transfer to GPU Machine
-
-Copy the entire `code/business_entity_resolution/` directory and `dataset/` to the RTX 3060 machine. Adjust `--data_dir` paths as needed.
-
-### Step 4: Run Held-Out Country Gate (GPU — RTX 3060)
-
-```bash
-python -m src.train_bi_encoder train \
-    --data_dir ./prepared_data \
-    --output_dir ./output/bge-m3-lora-gate \
-    --mode held_out_country \
-    --use_distillation \
-    --epochs 3 \
-    --batch_size 48 \
-    --learning_rate 2e-5 \
-    --lora_r 64
+### Step 5: Phase 2c Pair Features Extraction
+Extracts deterministic lexical/address features on CPU and dense BGE-M3 cosine similarities on GPU:
+```powershell
+.\scripts\02c_extract_pair_features.ps1 -Split "train"
 ```
 
-### Step 5: Evaluate Gate
-
-```bash
-# Evaluate bidirectional 2-way gate (evaluates US->India and India->US against baseline)
-python -m src.eval_bi_encoder \
-    --model_path ./output/bge-m3-lora-gate/final \
-    --data_dir ./prepared_data \
-    --baseline_model BAAI/bge-m3 \
-    --direction bidirectional
+### Step 6: Phase 3 Grouped-OOF GBM Training & Calibration
+Trains the entity-grouped XGBoost scorer with monotonic constraints and Platt/isotonic probability calibration:
+```powershell
+.\scripts\03_train_scoring_gbm.ps1 -Booster "gbtree" -Eta 0.03 -CountryMaskRate 0.15
 ```
 
-This computes Recall@K and hard-negative margins on both held-out country splits
-and enforces the joint **GO** / **NO-GO** decision against off-the-shelf BGE-M3.
-
-### Step 6: Full Training (if gate passes)
-
-```bash
-python -m src.train_bi_encoder train \
-    --data_dir ./prepared_data \
-    --output_dir ./output/bge-m3-lora-final \
-    --mode full \
-    --use_distillation
+### Step 7: Phase 4 & 5 Test Inference, Decision Assembly & Validation
+Scores test candidates, applies injective 1-to-N assignment with optimal macro-$F_{0.5}$ thresholding, and audits the submission package:
+```powershell
+.\scripts\04_inference_and_decision.ps1
+.\scripts\05_validate_submission.ps1
 ```
-
-### Step 7: Merge LoRA for Inference
-
-```bash
-python -m src.train_bi_encoder merge \
-    --adapter_path ./output/bge-m3-lora-final/final \
-    --output_path ./output/bge-m3-merged
-```
-
-The merged model is a plain SentenceTransformer — zero adapter overhead at inference.
 
 ## Architecture
 

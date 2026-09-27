@@ -35,37 +35,50 @@ graph TD
 
 ## Quick Start Examples
 
-All commands are executed using PowerShell from the repository root:
+All commands can be executed directly in PowerShell from the repository root:
 
 ### 1. Verify Environment & Smoke Tests (Phase 0)
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/00_verify_environment.ps1
+.\scripts\00_verify_environment.ps1
 ```
 
 ### 2. Master Pipeline: Dry-Run Mode (Inspect Execution Plan)
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_all_phases.ps1 -DryRun
+.\scripts\run_all_phases.ps1 -DryRun
 ```
 
-### 3. Fast Sample Run (5,000 Entities, CPU Fallback)
+### 3. Fast Sample Run (5,000 Entities, Fast CPU Fallback)
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_all_phases.ps1 -RunMode FastSample -SkipGPU
+.\scripts\run_all_phases.ps1 -RunMode FastSample -SkipGPU
 ```
 
 ### 4. Full GPU Production Run
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_all_phases.ps1 -RunMode Full
+.\scripts\run_all_phases.ps1 -RunMode Full
 ```
 
 ### 5. Resume from a Specific Phase (e.g. from Phase 3 to 5)
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_all_phases.ps1 -FromPhase 3 -ToPhase 5
+.\scripts\run_all_phases.ps1 -FromPhase 3 -ToPhase 5
 ```
 
 ### 6. Inference Only (Score Test Set using Trained Model)
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_all_phases.ps1 -RunMode InferenceOnly
+.\scripts\run_all_phases.ps1 -RunMode InferenceOnly
 ```
+
+---
+
+## Windows Memory & Hardware Architecture (RTX 3060 12GB + 32GB RAM)
+
+- **ThreadPoolExecutor Shared RAM:**
+  Under Windows, `ProcessPoolExecutor` uses `spawn` which duplicates the parent 15GB blocking index for each child process, easily overflowing 32GB RAM. All multi-core stages (Blocking and Deterministic Pair Features) utilize `ThreadPoolExecutor` (16 worker threads), which safely read the single shared in-memory index in the parent process without duplicating memory. System RAM usage remains strictly capped at ~15.3GB.
+- **VRAM Safeguards & Release:**
+  Foreground GPU stages (BGE-M3 and Qwen embeddings) use explicit VRAM cleanup via `Release-GpuMemory`, clearing PyTorch caches and fragmentations between pipeline steps.
+- **Robust Path Resolution:**
+  All scripts utilize `Resolve-FullPath` from `common.ps1` to convert relative arguments into absolute paths rooted at `$PROJECT_ROOT`, preventing `FileNotFoundError` across changing working directories.
+- **Persistent Logging:**
+  Every script automatically opens a timestamped transcript in `logs/<timestamp>_<script>.log` capturing all stdout, stderr, and execution timings.
 
 ---
 
@@ -75,10 +88,10 @@ powershell -ExecutionPolicy Bypass -File scripts/run_all_phases.ps1 -RunMode Inf
 Generates candidate pairs using exact names, character 3-grams, address tokens, phonetic keys, and token inverted index.
 ```powershell
 # Run blocking on train set with ground truth recall audit
-powershell -ExecutionPolicy Bypass -File scripts/01_run_blocking.ps1 -Split train -MaxCandidates 50
+.\scripts\01_run_blocking.ps1 -Split "train" -MaxCandidates 50 -TopKSparse 50 -TopKDense 50 -NumWorkers 0
 
 # Run blocking on test set
-powershell -ExecutionPolicy Bypass -File scripts/01_run_blocking.ps1 -Split test -MaxCandidates 50
+.\scripts\01_run_blocking.ps1 -Split "test" -MaxCandidates 50 -TopKSparse 50 -TopKDense 50 -NumWorkers 0
 ```
 
 ### `02a_prepare_bi_encoder_data.ps1`
