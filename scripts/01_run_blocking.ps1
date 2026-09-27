@@ -121,6 +121,13 @@ foreach ($root in $s0Roots) {
     if (-not (Test-Path $cS3)) { $cS3 = Join-Path $root "${Split}_source3_norm.tsv" }
 
     if ((Test-Path $cS1) -and (Test-Path $cS2) -and (Test-Path $cS3)) {
+        # Integrity check: normalized files must not be truncated relative to raw
+        $s2RawLen = (Get-Item $s2Raw).Length
+        $s2NormLen = (Get-Item $cS2).Length
+        if ($s2NormLen -lt $s2RawLen) {
+            Write-WarningMessage "Stage 0 file $cS2 appears truncated (${s2NormLen} bytes vs raw ${s2RawLen} bytes). Skipping corrupted normalized cache."
+            continue
+        }
         $s1File = $cS1
         $s2File = $cS2
         $s3File = $cS3

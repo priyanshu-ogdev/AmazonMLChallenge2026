@@ -159,12 +159,19 @@ if [ "$RUN_STAGE0" = true ]; then
 fi
 
 if [ -f "$s1_norm" ] && [ -f "$s2_norm" ] && [ -f "$s3_norm" ]; then
-    s1_file="$s1_norm"
-    s2_file="$s2_norm"
-    s3_file="$s3_norm"
-    write_info "Using Stage 0 S1 normalized: $s1_file"
-    write_info "Using Stage 0 S2 normalized: $s2_file"
-    write_info "Using Stage 0 S3 normalized: $s3_file"
+    # Integrity check: normalized files must not be smaller than raw files
+    s2_raw_size=$(wc -c < "$s2_raw" 2>/dev/null || stat -c%s "$s2_raw" 2>/dev/null || echo 0)
+    s2_norm_size=$(wc -c < "$s2_norm" 2>/dev/null || stat -c%s "$s2_norm" 2>/dev/null || echo 0)
+    if [ "$s2_norm_size" -lt "$s2_raw_size" ]; then
+        write_warning "Stage 0 file $s2_norm appears truncated ($s2_norm_size vs raw $s2_raw_size bytes). Using raw input files."
+    else
+        s1_file="$s1_norm"
+        s2_file="$s2_norm"
+        s3_file="$s3_norm"
+        write_info "Using Stage 0 S1 normalized: $s1_file"
+        write_info "Using Stage 0 S2 normalized: $s2_file"
+        write_info "Using Stage 0 S3 normalized: $s3_file"
+    fi
 else
     write_info "Using raw input files (Stage 0 normalized files not present or not requested)."
 fi

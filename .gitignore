@@ -2,8 +2,11 @@
 # Amazon ML Challenge 2026 - .gitignore
 # =============================================================================
 
-# Large Data Files (Ignore by default, except dataset/ and output/ tracked via Git LFS)
+# Large Data & Datasets
 data/
+dataset/
+output/
+scratch/
 *.tsv
 *.csv
 *.parquet
@@ -12,12 +15,6 @@ data/
 *.h5
 *.hdf5
 *.jsonl
-
-# Explicitly track dataset/ via Git LFS
-!dataset/
-!dataset/**
-!dataset/**/*.tsv
-!dataset/**/*.csv
 
 # Python Bytecode & Cache
 __pycache__/
@@ -35,7 +32,7 @@ ENV/
 env.bak/
 venv.bak/
 
-# Model Checkpoints & Large Weights
+# Model Checkpoints, Large Weights & Cache
 *.pt
 *.pth
 *.bin
@@ -55,24 +52,7 @@ logs/
 *.log
 tensorboard/
 
-# Outputs, Cache & Submission Archives (Tracked via Git LFS)
-!output/
-!output/**
-!output/**/*.tsv
-!output/**/*.csv
-!output/**/*.pkl
-!output/**/*.pickle
-!output/**/*.part*
-!output/**/*.pt
-!output/**/*.pth
-!output/**/*.bin
-!output/**/*.safetensors
-!output/**/*.onnx
-!output/**/*.npz
-output/**/candidate_index.pkl
-output/**/_tmp_worker_chunks/
-output/**/checkpoint_backup/
-output/**/*.tmp
+# Submissions & Archives
 submissions/
 *.zip
 *.tar.gz

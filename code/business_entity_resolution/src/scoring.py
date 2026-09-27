@@ -99,7 +99,6 @@ def build_monotonic_constraints(columns: Sequence[str]) -> Tuple[int, ...]:
     """
     negative_features = {
         "same_name_different_address",
-        "same_address_different_name",
         "name_length_abs_diff",
         "address_length_abs_diff",
         "best_blocker_score_diff",

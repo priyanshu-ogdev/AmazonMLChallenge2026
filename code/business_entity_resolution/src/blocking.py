@@ -34,12 +34,16 @@ import itertools
 import json
 import math
 import multiprocessing
+import operator
 import os
 import pickle
 import re
 import shutil
 import sys
 import time
+
+_itemgetter_0 = operator.itemgetter(0)
+_itemgetter_1 = operator.itemgetter(1)
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,15 +77,15 @@ TOP_K_DENSE = 50
 TOP_K_SPARSE_OR_CHAR = 50
 MAX_CANDIDATES_PER_ENTITY = 100
 SIMILARITY_FLOOR = 0.30
-MAX_TOKEN_DOC_FREQ = 0.01
-MAX_TOKEN_DOC_COUNT = 500
-MAX_NGRAM_DOC_FREQ = 0.05
-MAX_NGRAM_DOC_COUNT = 1000
+MAX_TOKEN_DOC_FREQ = 0.02
+MAX_TOKEN_DOC_COUNT = 2500
+MAX_NGRAM_DOC_FREQ = 0.10
+MAX_NGRAM_DOC_COUNT = 5000
 MIN_TOKEN_LEN = 3
 
 # Index cache versioning — bump when MultiChannelBlocker schema changes
-# v4: precomputed IDF lookup tables stored in pickle for zero-cost per-entity scoring
-INDEX_CACHE_VERSION = 4
+# v5: address inverted index channel for high-noise vendor entity retrieval
+INDEX_CACHE_VERSION = 5
 
 # Worker I/O batch size: flush StringIO buffer every N entities (reduces CSV writer overhead)
 _IO_BATCH_SIZE = 500
@@ -147,6 +151,20 @@ _ACRONYM_SKIP = {
     "de", "la", "le", "du", "et", "en", "st", "rd", "and", "the", "for",
 } | set(LEGAL_SUFFIX_MAP.keys()) | set(LEGAL_SUFFIX_MAP.values())
 
+_ADDRESS_STOPWORDS = {
+    "road", "street", "st", "rd", "ave", "avenue", "lane", "ln", "dr", "drive",
+    "blvd", "boulevard", "floor", "fl", "unit", "suite", "ste", "apt", "apartment",
+    "no", "near", "opp", "opposite", "behind", "court", "ct", "way", "parkway",
+    "pkwy", "city", "state", "county", "block", "house", "building", "bldg",
+    "first", "second", "third", "main", "cross", "north", "south",
+    "east", "west", "c/o", "co", "india", "usa", "us",
+    # French street/locality generics
+    "rue", "bd", "route", "chemin", "allee", "place", "impasse", "quai", "cours",
+    "passage", "square", "france", "paris",
+    # Common Indian locality generics
+    "nagar", "marg", "colony", "sector", "plot", "bengal", "delhi", "mumbai",
+}
+
 
 def _tokenize(text: str) -> List[str]:
     """Extract lowercased word tokens."""
@@ -187,6 +205,8 @@ class BlockingRecord:
     acronyms: Set[str]
     ngram_counts: Counter[str]
     first_word: Optional[str]
+    address_tokens: List[str] = field(default_factory=list)
+    address_token_counts: Counter[str] = field(default_factory=Counter)
 
     @property
     def ngrams(self) -> List[str]:
@@ -268,6 +288,13 @@ class BlockingRecord:
         ngrams = _char_ngrams(n_name) if len(n_name) >= 3 else []
         ngram_counts = Counter(ngrams)
 
+        # Address tokens for Channel 4b (address inverted index)
+        if n_addr and not is_addr_missing:
+            addr_tokens = [t for t in _tokenize(n_addr) if len(t) >= 3 and t not in _ADDRESS_STOPWORDS]
+        else:
+            addr_tokens = []
+        addr_token_counts = Counter(addr_tokens)
+
         return cls(
             entity_id=entity_id.strip(),
             source=source_from_entity_id(entity_id),
@@ -287,47 +314,73 @@ class BlockingRecord:
             acronyms=acronyms,
             ngram_counts=ngram_counts,
             first_word=first_word,
+            address_tokens=addr_tokens,
+            address_token_counts=addr_token_counts,
         )
 
 
 def read_tsv_records(paths: Iterable[Path]) -> Iterator[Dict[str, Any]]:
-    """Yield entity rows from one or more raw challenge TSVs or Layer 0 normalized TSVs."""
+    """Yield entity rows from one or more raw challenge TSVs or Layer 0 normalized TSVs via fast line streaming."""
     for path in paths:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Input TSV does not exist: {path}")
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            reader = csv.DictReader(handle, delimiter="\t", quoting=csv.QUOTE_NONE)
-            fieldnames = set(reader.fieldnames or [])
-            if "entity_id" not in fieldnames:
+            header_line = handle.readline()
+            if not header_line:
+                continue
+            header = [col.strip() for col in header_line.rstrip("\r\n").split("\t")]
+            col_map = {col: i for i, col in enumerate(header)}
+            if "entity_id" not in col_map:
                 raise ValueError(f"{path} is missing required 'entity_id' column")
-            has_name = any(c in fieldnames for c in ("business_name", "raw_name", "norm_name"))
-            has_addr = any(c in fieldnames for c in ("business_address", "raw_address", "norm_address"))
-            if not has_name:
+
+            eid_idx = col_map["entity_id"]
+            name_idx = next((col_map[c] for c in ("business_name", "raw_name", "norm_name") if c in col_map), None)
+            addr_idx = next((col_map[c] for c in ("business_address", "raw_address", "norm_address") if c in col_map), None)
+            country_idx = next((col_map[c] for c in ("country", "country_canonical") if c in col_map), None)
+
+            if name_idx is None:
                 raise ValueError(f"{path} is missing name column (expected business_name, raw_name, or norm_name)")
-            if not has_addr:
+            if addr_idx is None:
                 raise ValueError(f"{path} is missing address column (expected business_address, raw_address, or norm_address)")
 
-            is_stage0 = "norm_name" in fieldnames and "norm_address" in fieldnames
-            for row in reader:
-                name = row.get("business_name") or row.get("raw_name") or row.get("norm_name") or ""
-                addr = row.get("business_address") or row.get("raw_address") or row.get("norm_address") or ""
-                country = row.get("country") or row.get("country_canonical") or ""
+            is_stage0 = "norm_name" in col_map and "norm_address" in col_map
+            norm_name_idx = col_map.get("norm_name")
+            norm_addr_idx = col_map.get("norm_address")
+            canon_c_idx = col_map.get("country_canonical")
+            postal_idx = col_map.get("postal_code")
+            street_idx = col_map.get("street_number")
+            trailing_idx = col_map.get("trailing_segment")
+            miss_idx = col_map.get("is_address_missing")
+
+            for line in handle:
+                parts = line.rstrip("\r\n").split("\t")
+                n_parts = len(parts)
+                if n_parts <= eid_idx:
+                    continue
+                eid = parts[eid_idx]
+                name = parts[name_idx] if name_idx < n_parts else ""
+                addr = parts[addr_idx] if addr_idx < n_parts else ""
+                country = parts[country_idx] if (country_idx is not None and country_idx < n_parts) else ""
+
                 rec: Dict[str, Any] = {
-                    "entity_id": row.get("entity_id", ""),
+                    "entity_id": eid,
                     "business_name": name,
                     "business_address": addr,
                     "country": country,
                 }
                 if is_stage0:
-                    rec["norm_name"] = row.get("norm_name", "")
-                    rec["norm_address"] = row.get("norm_address", "")
-                    rec["canonical_country"] = row.get("country_canonical", "")
-                    rec["postal_code"] = row.get("postal_code", "")
-                    rec["street_number"] = row.get("street_number", "")
-                    rec["trailing_segment"] = row.get("trailing_segment", "")
-                    raw_miss = row.get("is_address_missing")
-                    rec["is_address_missing"] = str(raw_miss).strip().lower() in ("1", "true", "t") if raw_miss is not None else False
+                    rec["norm_name"] = parts[norm_name_idx] if (norm_name_idx is not None and norm_name_idx < n_parts) else ""
+                    rec["norm_address"] = parts[norm_addr_idx] if (norm_addr_idx is not None and norm_addr_idx < n_parts) else ""
+                    rec["canonical_country"] = parts[canon_c_idx] if (canon_c_idx is not None and canon_c_idx < n_parts) else ""
+                    rec["postal_code"] = parts[postal_idx] if (postal_idx is not None and postal_idx < n_parts) else ""
+                    rec["street_number"] = parts[street_idx] if (street_idx is not None and street_idx < n_parts) else ""
+                    rec["trailing_segment"] = parts[trailing_idx] if (trailing_idx is not None and trailing_idx < n_parts) else ""
+                    if miss_idx is not None and miss_idx < n_parts:
+                        raw_miss = parts[miss_idx].strip().lower()
+                        rec["is_address_missing"] = raw_miss in ("1", "true", "t")
+                    else:
+                        rec["is_address_missing"] = False
                 yield rec
 
 
@@ -392,6 +445,13 @@ class MultiChannelBlocker:
 
         # Channel 4: Address Structural Key (postal + street number)
         self.index_address_structural: Dict[Tuple[str, str], Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+
+        # Channel 4b: Address Inverted Index with Sub-Linear TF-IDF
+        self.index_address_tokens: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        self.addr_token_doc_counts: Counter[str] = Counter()
+        self.addr_token_idf_table: Dict[str, float] = {}
+        self.candidate_addr_lens: Dict[str, int] = {}
+        self.max_addr_doc_count: int = 5000
 
         # Precomputed IDF lookup tables (built by build_idf_tables() after indexing)
         # gram -> float IDF weight (avoids per-entity math.log calls in hot loop)
@@ -467,8 +527,19 @@ class MultiChannelBlocker:
         if not record.is_address_missing and record.postal_code and record.street_number:
             self.index_address_structural[(record.postal_code, record.street_number)][country].append(cid)
 
+        # 5. Address Inverted Index (Tokens with Sub-Linear TF-IDF)
+        if not record.is_address_missing and record.address_tokens:
+            self.candidate_addr_lens[cid] = sum(record.address_token_counts.values())
+            for tok in set(record.address_tokens):
+                cnt = self.addr_token_doc_counts[tok] + 1
+                self.addr_token_doc_counts[tok] = cnt
+                if cnt <= self.max_addr_doc_count:
+                    self.index_address_tokens[tok][country].append(cid)
+                elif cnt == self.max_addr_doc_count + 1:
+                    self.index_address_tokens.pop(tok, None)
+
     def build_idf_tables(self) -> None:
-        """Precompute IDF weights for all grams and tokens.
+        """Precompute IDF weights for all grams, tokens, and address tokens.
 
         Call once after all candidates are indexed (or after load_index) to eliminate
         per-entity math.log() calls from the hot query loop. This is the single biggest
@@ -504,6 +575,16 @@ class MultiChannelBlocker:
                 continue
             token_idf[tok] = _log(1.0 + (n - doc_cnt + 0.5) / (doc_cnt + 0.5))
         self.token_idf_table = token_idf
+
+        # Address token IDF table: only compute for address tokens still in the active index
+        addr_idf: Dict[str, float] = {}
+        for tok, doc_cnt in self.addr_token_doc_counts.items():
+            if tok not in self.index_address_tokens:
+                continue
+            if doc_cnt == 0 or doc_cnt > self.max_addr_doc_count:
+                continue
+            addr_idf[tok] = _log(1.0 + (n - doc_cnt + 0.5) / (doc_cnt + 0.5))
+        self.addr_token_idf_table = addr_idf
 
     def _query_partitioned_index(
         self,
@@ -586,10 +667,13 @@ class MultiChannelBlocker:
         index_ngrams             = self.index_ngrams
         index_tokens             = self.index_tokens
         index_addr_struct        = self.index_address_structural
+        index_addr_tokens        = self.index_address_tokens
         ngram_idf_table          = self.ngram_idf_table
         token_idf_table          = self.token_idf_table
+        addr_token_idf_table     = self.addr_token_idf_table
         candidate_ngram_lens     = self.candidate_ngram_lens
         candidate_token_lens     = self.candidate_token_lens
+        candidate_addr_lens      = self.candidate_addr_lens
         top_k_sparse             = self.top_k_sparse
         similarity_floor         = self.similarity_floor
         max_candidates           = self.max_candidates_per_entity
@@ -599,18 +683,13 @@ class MultiChannelBlocker:
         _sqrt                    = math.sqrt
         _log                     = math.log
 
-        # --- hit accumulation dicts (flat dict: cid -> scalar, avoids defaultdict overhead) ---
-        hit_blockers:   Dict[str, List[str]] = {}
-        hit_best_score: Dict[str, float]     = {}
-        hit_best_rank:  Dict[str, int]        = {}
-        hit_exact:      Dict[str, bool]       = {}
+        # --- single flat hit accumulation dict: cid -> [best_score, best_rank, hit_exact, blockers_list] ---
+        hits: Dict[str, List[Any]] = {}
 
         country = s1.canonical_country
 
         # ------------------------------------------------------------------
         # INLINED _query_partitioned_index helper (macro-expanded per channel)
-        # Eliminates ~100 Python function calls per entity at the cost of
-        # verbosity. Logic is identical to the old method.
         # ------------------------------------------------------------------
         def _hits(index: Dict, key) -> Iterable[str]:
             """Inline-friendly country-partitioned index lookup."""
@@ -618,12 +697,12 @@ class MultiChannelBlocker:
             if not sub:
                 return _EMPTY
             if country:
-                exact      = sub.get(country, _EMPTY)
-                global_p   = sub.get("", _EMPTY)
-                if exact or global_p:
-                    if not global_p:
+                exact = sub.get(country)
+                global_p = sub.get("")
+                if exact is not None or global_p is not None:
+                    if global_p is None:
                         return exact
-                    if not exact:
+                    if exact is None:
                         return global_p
                     return itertools.chain(exact, global_p)
                 # Soft fallback for open-set / unrecognized countries
@@ -641,21 +720,19 @@ class MultiChannelBlocker:
                         yield from pl
                 return _gb()
 
-        # Inlined record_hit — avoids function-call overhead on inner loop
+        # Inlined record_hit — single dict lookup + update
         def _rh(cid: str, blocker: str, score: float, rank: int, exact: bool = False) -> None:
-            if cid not in hit_best_score:
-                hit_blockers[cid]   = [blocker]
-                hit_best_score[cid] = score
-                hit_best_rank[cid]  = rank
-                hit_exact[cid]      = exact
+            entry = hits.get(cid)
+            if entry is None:
+                hits[cid] = [score, rank, exact, [blocker]]
             else:
-                hit_blockers[cid].append(blocker)
-                if score > hit_best_score[cid]:
-                    hit_best_score[cid] = score
-                if rank < hit_best_rank[cid]:
-                    hit_best_rank[cid] = rank
+                entry[3].append(blocker)
+                if score > entry[0]:
+                    entry[0] = score
+                if rank < entry[1]:
+                    entry[1] = rank
                 if exact:
-                    hit_exact[cid] = True
+                    entry[2] = True
 
         # -------------------------------------------------------------
         # Channel 1: Exact Name, First-2-Tokens, Acronym & Composite Keys
@@ -694,26 +771,20 @@ class MultiChannelBlocker:
 
         # -------------------------------------------------------------
         # Channel 2: Character 3-Gram Sub-Linear TF-IDF Retrieval
-        # Perf v4: reads from precomputed ngram_idf_table (no math.log per gram)
         # -------------------------------------------------------------
         s1_gram_counts = s1.ngram_counts
         if s1_gram_counts and ngram_idf_table:
-            # Build s1 TF*IDF weights using precomputed IDF (single table lookup per gram)
             s1_weights: Dict[str, float] = {}
             for gram, count in s1_gram_counts.items():
-                idf = ngram_idf_table.get(gram)  # None = evicted stop-gram or above cap
+                idf = ngram_idf_table.get(gram)
                 if idf is None:
                     continue
                 s1_weights[gram] = (1.0 + _log(count)) * idf
 
             if s1_weights:
-                # Keep only top-15 weighted grams to cap index fan-out
                 if len(s1_weights) > 15:
-                    # heapq.nlargest is O(n + 15*log(15)) vs sorted O(n log n)
-                    top_items = heapq.nlargest(15, s1_weights.items(), key=lambda kv: kv[1])
-                    s1_weights = dict(top_items)
+                    s1_weights = dict(heapq.nlargest(15, s1_weights.items(), key=_itemgetter_1))
 
-                # Accumulate candidate scores (faster aggregation via defaultdict)
                 cand_scores: Dict[str, float] = defaultdict(float)
                 for gram, w_s1 in s1_weights.items():
                     for cid in _hits(index_ngrams, gram):
@@ -724,40 +795,38 @@ class MultiChannelBlocker:
                     if s1_norm > 0:
                         sim_floor = similarity_floor
                         cand_len_get = candidate_ngram_lens.get
-                        # Use nlargest to get top_k*3 candidates without full sort
-                        top_cands = heapq.nlargest(top_k_sparse * 3, cand_scores.items(), key=lambda kv: kv[1])
+                        top_k_check = top_k_sparse * 3
+                        if len(cand_scores) > top_k_check:
+                            top_cands = heapq.nlargest(top_k_check, cand_scores.items(), key=_itemgetter_1)
+                        else:
+                            top_cands = cand_scores.items()
+
                         scored_cands = []
                         for cid, raw_score in top_cands:
                             cand_len = cand_len_get(cid, 25)
                             sim = raw_score / (s1_norm * _sqrt(cand_len if cand_len > 0 else 1))
-                            if sim > 1.0:
-                                sim = 1.0
                             if sim >= sim_floor:
-                                scored_cands.append((sim, cid))
+                                scored_cands.append((-min(1.0, sim), cid))
 
-                        # Sort descending by sim, take top_k_sparse
-                        scored_cands.sort(key=lambda x: -x[0])
-                        for rank, (sim, cid) in enumerate(scored_cands[:top_k_sparse], 1):
-                            _rh(cid, "char_ngram", sim, rank, False)
+                        scored_cands.sort()
+                        for rank, (neg_sim, cid) in enumerate(scored_cands[:top_k_sparse], 1):
+                            _rh(cid, "char_ngram", -neg_sim, rank, False)
 
         # -------------------------------------------------------------
         # Channel 3: Token Inverted Index with Sub-Linear TF-IDF
-        # Perf v4: reads from precomputed token_idf_table (no math.log per token)
         # -------------------------------------------------------------
-        if s1.tokens:
+        if s1.tokens and token_idf_table:
             s1_token_counts = s1.token_counts
             s1_token_weights: Dict[str, float] = {}
             for tok, count in s1_token_counts.items():
-                idf = token_idf_table.get(tok)  # None = evicted stop-token or above cap
+                idf = token_idf_table.get(tok)
                 if idf is None:
                     continue
                 s1_token_weights[tok] = (1.0 + _log(count)) * idf
 
             if s1_token_weights:
-                # Cap at top-10 tokens by weight
                 if len(s1_token_weights) > 10:
-                    top_t = heapq.nlargest(10, s1_token_weights.items(), key=lambda kv: kv[1])
-                    s1_token_weights = dict(top_t)
+                    s1_token_weights = dict(heapq.nlargest(10, s1_token_weights.items(), key=_itemgetter_1))
 
                 token_scores: Dict[str, float] = defaultdict(float)
                 for tok, w_s1 in s1_token_weights.items():
@@ -767,19 +836,21 @@ class MultiChannelBlocker:
                 s1_norm = _sqrt(sum(w * w for w in s1_token_weights.values()))
                 if token_scores and s1_norm > 0.0:
                     cand_tok_len_get = candidate_token_lens.get
-                    # nlargest instead of full sort (3x to allow post-normalization filtering)
-                    top_tok_cands = heapq.nlargest(top_k_sparse * 3, token_scores.items(), key=lambda kv: kv[1])
+                    top_k_check = top_k_sparse * 3
+                    if len(token_scores) > top_k_check:
+                        top_tok_cands = heapq.nlargest(top_k_check, token_scores.items(), key=_itemgetter_1)
+                    else:
+                        top_tok_cands = token_scores.items()
+
                     scored_tok_cands = []
                     for cid, raw_score in top_tok_cands:
                         cand_len = cand_tok_len_get(cid, 3)
                         sim = raw_score / (s1_norm * _sqrt(cand_len if cand_len > 0 else 1))
-                        if sim > 1.0:
-                            sim = 1.0
-                        scored_tok_cands.append((sim, cid))
+                        scored_tok_cands.append((-min(1.0, sim), cid))
                     
-                    scored_tok_cands.sort(key=lambda x: -x[0])
-                    for rank, (sim, cid) in enumerate(scored_tok_cands[:top_k_sparse], 1):
-                        _rh(cid, "token_inverted", sim, rank, False)
+                    scored_tok_cands.sort()
+                    for rank, (neg_sim, cid) in enumerate(scored_tok_cands[:top_k_sparse], 1):
+                        _rh(cid, "token_inverted", -neg_sim, rank, False)
 
         # -------------------------------------------------------------
         # Channel 4: Address Structural Key (postal + street number)
@@ -789,56 +860,88 @@ class MultiChannelBlocker:
                 _rh(cid, "address_structural", 0.85, rank, False)
 
         # -------------------------------------------------------------
+        # Channel 4b: Address Inverted Index (Tokens with Sub-Linear TF-IDF)
+        # -------------------------------------------------------------
+        if not s1.is_address_missing and s1.address_tokens and addr_token_idf_table:
+            s1_addr_counts = s1.address_token_counts
+            s1_addr_weights: Dict[str, float] = {}
+            for tok, count in s1_addr_counts.items():
+                idf = addr_token_idf_table.get(tok)
+                if idf is not None:
+                    s1_addr_weights[tok] = (1.0 + _log(count)) * idf
+
+            if s1_addr_weights:
+                if len(s1_addr_weights) > 10:
+                    s1_addr_weights = dict(heapq.nlargest(10, s1_addr_weights.items(), key=_itemgetter_1))
+
+                addr_scores: Dict[str, float] = defaultdict(float)
+                for tok, w_s1 in s1_addr_weights.items():
+                    for cid in _hits(index_addr_tokens, tok):
+                        addr_scores[cid] += w_s1
+
+                if addr_scores:
+                    s1_a_norm = _sqrt(sum(w * w for w in s1_addr_weights.values()))
+                    if len(addr_scores) > top_k_sparse:
+                        top_addr_cands = heapq.nlargest(top_k_sparse, addr_scores.items(), key=_itemgetter_1)
+                    else:
+                        top_addr_cands = addr_scores.items()
+
+                    cand_addr_len_get = candidate_addr_lens.get
+                    for rank, (cid, raw_score) in enumerate(top_addr_cands, 1):
+                        cand_len = cand_addr_len_get(cid, 3)
+                        sim = raw_score / (s1_a_norm * _sqrt(cand_len if cand_len > 0 else 1))
+                        if sim > 1.0:
+                            sim = 1.0
+                        if sim >= 0.20:
+                            _rh(cid, "address_tokens", sim, rank, exact=(sim >= 0.75))
+
+        # -------------------------------------------------------------
         # Channel 5: Dense Retrieval Hook (if provided)
         # -------------------------------------------------------------
         if dense_scores:
             for rank, (cid, score) in enumerate(
-                heapq.nlargest(self.top_k_dense, ((c, s) for c, s in dense_scores.items() if s >= similarity_floor), key=lambda x: x[1]),
+                heapq.nlargest(self.top_k_dense, ((c, s) for c, s in dense_scores.items() if s >= similarity_floor), key=_itemgetter_1),
                 1,
             ):
                 _rh(cid, "dense_bge", float(score), rank, False)
 
         # ------------------------------------------------------------------
         # Union, Deterministic Priority Ranking & Capping
-        # Perf v4: build (sort_key, hit) tuples in one pass, single sort()
-        # Provenance string built once; source prefix extracted by slice.
         # ------------------------------------------------------------------
-        if not hit_best_score:
+        if not hits:
             return []
 
-        # 1. Build only cheap sort keys for ALL candidates
+        # 1. Build sort keys for candidates
         cheap_candidates = []
-        for cid, best_score in hit_best_score.items():
-            blockers_list = hit_blockers[cid]
+        for cid, (best_score, best_rank, hit_exact, blockers_list) in hits.items():
             if len(blockers_list) == 1:
                 blocker_cnt = 1
-                is_exact = hit_exact[cid] or (blockers_list[0] in _EXACT_B)
+                is_exact = hit_exact or (blockers_list[0] in _EXACT_B)
             else:
-                blocker_cnt = len(set(blockers_list))
-                is_exact = hit_exact[cid] or bool(set(blockers_list) & _EXACT_B)
+                uniq_set = set(blockers_list)
+                blocker_cnt = len(uniq_set)
+                is_exact = hit_exact or bool(uniq_set & _EXACT_B)
             
-            best_rank = hit_best_rank[cid]
-            
-            # Using -best_score is sufficient for sorting, no need to call round() thousands of times here
+            # Exact hits strictly prioritized, followed by consensus count and score
             sort_key = (
-                -blocker_cnt,
                 -1 if is_exact else 0,
+                -blocker_cnt,
                 -best_score,
                 best_rank,
                 cid
             )
-            cheap_candidates.append( (sort_key, cid, blockers_list) )
+            cheap_candidates.append( (sort_key, cid, blockers_list, best_score, best_rank) )
 
-        # 2. Sort to find the top candidates (we only need the top max_candidates)
-        cheap_candidates.sort(key=lambda item: item[0])
+        # 2. Sort to find the top candidates (fast C-speed via itemgetter_0)
+        cheap_candidates.sort(key=_itemgetter_0)
         top_cheap = cheap_candidates[:max_candidates]
 
-        # 3. Build the expensive final objects ONLY for the top K candidates
+        # 3. Build the final CandidateHit objects ONLY for top K candidates
         s1_entity_id  = s1.entity_id
-        s1_country    = s1.canonical_country or "global"
+        s1_country    = country or "global"
         final_candidates = []
         
-        for sort_key, cid, blockers_list in top_cheap:
+        for sort_key, cid, blockers_list, best_score, best_rank in top_cheap:
             if len(blockers_list) == 1:
                 uniq_sorted = blockers_list
                 blocker_cnt = 1
@@ -849,8 +952,6 @@ class MultiChannelBlocker:
             provenance_str = ",".join(uniq_sorted)
             dash = cid.index("-")
             cand_source = cid[:dash]
-            best_score = hit_best_score[cid]
-            best_rank = hit_best_rank[cid]
             
             final_candidates.append(
                 CandidateHit((
@@ -894,6 +995,10 @@ class MultiChannelBlocker:
             "index_tokens":               dict(self.index_tokens),
             "token_doc_counts":           dict(self.token_doc_counts),
             "index_address_structural":   dict(self.index_address_structural),
+            "index_address_tokens":       dict(self.index_address_tokens),
+            "addr_token_doc_counts":      dict(self.addr_token_doc_counts),
+            "addr_token_idf_table":       self.addr_token_idf_table,
+            "candidate_addr_lens":        self.candidate_addr_lens,
             "ngram_idf_table":            self.ngram_idf_table,
             "token_idf_table":            self.token_idf_table,
             "config": {
@@ -961,21 +1066,25 @@ class MultiChannelBlocker:
             "index_name_postal", "index_name_street", "index_name_trailing",
             "index_lead_postal", "index_lead_street_trailing",
             "index_ngrams", "index_tokens", "index_address_structural",
+            "index_address_tokens",
         ):
-            raw = payload[attr]
+            raw = payload.get(attr, {})
             setattr(blocker, attr, defaultdict(_dd, raw))
         # Aliases
         blocker.index_trigrams     = blocker.index_ngrams
         blocker.trigram_doc_counts = blocker.ngram_doc_counts
         blocker.ngram_doc_counts   = defaultdict(int, payload["ngram_doc_counts"])
         blocker.token_doc_counts   = defaultdict(int, payload["token_doc_counts"])
+        blocker.addr_token_doc_counts = defaultdict(int, payload.get("addr_token_doc_counts", {}))
+        blocker.candidate_addr_lens = payload.get("candidate_addr_lens", {})
         
-        # v4: precomputed IDF tables
+        # v5: precomputed IDF tables
         blocker.ngram_idf_table         = payload.get("ngram_idf_table", {})
         blocker.token_idf_table         = payload.get("token_idf_table", {})
+        blocker.addr_token_idf_table    = payload.get("addr_token_idf_table", {})
         blocker._cached_max_ngram_count = cfg.get("_cached_max_ngram_count", 0)
         blocker._cached_max_token_count = cfg.get("_cached_max_token_count", 0)
-        if not blocker.ngram_idf_table:
+        if not blocker.ngram_idf_table or not blocker.addr_token_idf_table:
             blocker.build_idf_tables()
         elapsed = time.time() - t0
         print(

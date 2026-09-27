@@ -110,6 +110,30 @@ class TestBlockingChannels(unittest.TestCase):
         self.assertEqual(hits[0]["candidate_entity_id"], "S3-103")
         self.assertIn("address_structural", hits[0]["blocker_provenance"])
 
+    def test_address_inverted_index_blocking(self):
+        """Verify address inverted index recovers candidates with synthetic/corrupted names and unformatted addresses (no postal)."""
+        cand = BlockingRecord.from_row(
+            entity_id="S3-104",
+            name="Kelonyla",  # synthetic corrupted name in S3
+            address="Floor 3 Sakar Natraj Cinema Ashram Ahmedabad",
+            country="India",
+        )
+        self.blocker.index_candidate(cand)
+        self.blocker.build_idf_tables()
+
+        s1 = BlockingRecord.from_row(
+            entity_id="S1-4",
+            name="Smart Healthcare Private Limited",
+            address="Sakar Natraj Cinema Ashram Road Ahmedabad",
+            country="India",
+        )
+        hits = self.blocker.generate_candidates_for_record(s1)
+        self.assertTrue(len(hits) >= 1)
+        cand_ids = [h["candidate_entity_id"] for h in hits]
+        self.assertIn("S3-104", cand_ids)
+        target_hit = next(h for h in hits if h["candidate_entity_id"] == "S3-104")
+        self.assertIn("address_tokens", target_hit["blocker_provenance"])
+
     def test_char_trigram_blocking_on_typos(self):
         """Verify character 3-gram retrieval recovers candidates with spelling errors."""
         cand = BlockingRecord.from_row(
