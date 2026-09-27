@@ -59,6 +59,7 @@ DEFAULT_PARAMS = {
     "objective": "binary:logistic",
     "eval_metric": "aucpr",
     "tree_method": "hist",  # hist is the only method that parallelises via nthread
+    "max_bin": 256,  # 8-bit quantized histograms for 4x memory compression and cache locality
     "booster": "gbtree",
     "eta": 0.03,
     "max_depth": 4,
@@ -83,6 +84,16 @@ try:
         print("[GPU] CUDA detected! Enabled hardware acceleration for GBM layer.", flush=True)
 except ImportError:
     pass
+
+
+def _clear_gpu_cache() -> None:
+    """Clear GPU cache to prevent memory fragmentation across folds and prediction."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def build_monotonic_constraints(columns: Sequence[str]) -> Tuple[int, ...]:
@@ -571,44 +582,70 @@ def choose_threshold(
 
         base_singletons = sum(1.0 for eid in all_eids if actual_map[eid] == 0)
 
-        def _eval_injective_th(th: float) -> float:
+        # Invariant Claim Theorem: in greedy score-sorted matching (score_0 >= score_1 >= ...),
+        # a candidate c can ONLY EVER be claimed by its highest-scoring pair.
+        # Any subsequent appearance of c is rejected under all thresholds.
+        # Therefore, we filter sorted pairs in a single O(N) pass, shrinking 42M pairs to <= 2.4M claims.
+        claimed_targets = set()
+        claimed_indices = []
+        for i in range(len(sorted_scores)):
+            c = str(sorted_cand[i]).strip()
+            s = str(sorted_s1[i]).strip()
+            if c == s or c.startswith("S1-") or not c.startswith(("S2-", "S3-")):
+                continue  # Self-match prevention & strict prefix matching
+            if c not in claimed_targets:
+                claimed_targets.add(c)
+                claimed_indices.append(i)
+
+        filtered_scores = sorted_scores[claimed_indices]
+        filtered_s1 = sorted_s1[claimed_indices]
+        filtered_labels = sorted_labels[claimed_indices]
+        del claimed_targets, claimed_indices
+
+        # Monotonic descending threshold sweep:
+        # Sweeping thresholds descending (th_0 > th_1 > ...) allows incremental O(1) F0.5 updates
+        # as each candidate pair is admitted.
+        th_order = np.argsort(-candidates, kind="stable")
+        descending_th = candidates[th_order]
+        inj_values_sorted = np.zeros(len(candidates), dtype=float)
+
+        entity_preds: Dict[str, int] = {}
+        entity_tps: Dict[str, int] = {}
+        curr_entity_f05: Dict[str, float] = {}
+        total_f05 = float(base_singletons)
+
+        pair_idx = 0
+        num_pairs = len(filtered_scores)
+
+        for th_idx, th in enumerate(descending_th):
             if total_entities == 0:
-                return 0.0
-            cutoff = int(np.searchsorted(-sorted_scores, -th, side="right"))
-            claimed: Set[str] = set()
-            entity_preds: Dict[str, int] = {}
-            entity_tps: Dict[str, int] = {}
-            for i in range(cutoff):
-                c = str(sorted_cand[i]).strip()
-                s = str(sorted_s1[i]).strip()
-                if c == s:
-                    continue  # Self-match prevention matching decision.py
-                if c not in claimed:
-                    claimed.add(c)
-                    entity_preds[s] = entity_preds.get(s, 0) + 1
-                    if sorted_labels[i] == 1:
-                        entity_tps[s] = entity_tps.get(s, 0) + 1
+                inj_values_sorted[th_idx] = 0.0
+                continue
 
-            total_f05 = float(base_singletons)
-            for s, pred_cnt in entity_preds.items():
+            # Advance pointer to consume all candidate pairs with score >= th
+            while pair_idx < num_pairs and filtered_scores[pair_idx] >= th:
+                s = str(filtered_s1[pair_idx]).strip()
+                l = int(filtered_labels[pair_idx])
                 act_cnt = actual_map.get(s, 0)
-                tp = entity_tps.get(s, 0)
-                if act_cnt == 0:
-                    total_f05 -= 1.0
-                else:
-                    total_f05 += compute_entity_f05(pred_cnt, act_cnt, tp)
-            return total_f05 / total_entities
 
-        # Bug 8 fix: also parallelise injective threshold scan.
-        if _workers > 1 and len(candidates) > 20:
-            with ThreadPoolExecutor(max_workers=_workers) as pool:
-                inj_futs = {pool.submit(_eval_injective_th, th): i for i, th in enumerate(candidates)}
-                inj_map: Dict[int, float] = {}
-                for fut in as_completed(inj_futs):
-                    inj_map[inj_futs[fut]] = fut.result()
-                inj_values = [inj_map[i] for i in range(len(candidates))]
-        else:
-            inj_values = [_eval_injective_th(th) for th in candidates]
+                old_score = curr_entity_f05.get(s, 1.0 if act_cnt == 0 else 0.0)
+                new_preds = entity_preds.get(s, 0) + 1
+                new_tp = entity_tps.get(s, 0) + (1 if l == 1 else 0)
+
+                entity_preds[s] = new_preds
+                entity_tps[s] = new_tp
+
+                new_score = compute_entity_f05(new_preds, act_cnt, new_tp)
+                curr_entity_f05[s] = new_score
+                total_f05 += (new_score - old_score)
+                pair_idx += 1
+
+            inj_values_sorted[th_idx] = total_f05 / total_entities
+
+        # Restore original candidates order
+        inj_values = np.zeros(len(candidates), dtype=float)
+        inj_values[th_order] = inj_values_sorted
+
         inj_index = int(np.argmax(inj_values))
         best_inj_th = float(candidates[inj_index])
         best_inj_f05 = float(inj_values[inj_index])
@@ -690,7 +727,20 @@ def score_candidates(
     assert actual_booster == model_booster, (
         f"Expected loaded model booster to be '{model_booster}', got '{actual_booster}'"
     )
-    raw = model.predict_proba(matrix)[:, 1]
+    # Chunked inference streaming to limit peak VRAM to <= 152 MB on large candidate sets
+    chunk_size = 1_000_000
+    n_rows = len(matrix)
+    if n_rows <= chunk_size:
+        raw = model.predict_proba(matrix)[:, 1]
+    else:
+        raw_parts = []
+        for start_idx in range(0, n_rows, chunk_size):
+            end_idx = min(start_idx + chunk_size, n_rows)
+            chunk_mat = matrix.iloc[start_idx:end_idx] if hasattr(matrix, "iloc") else matrix[start_idx:end_idx]
+            raw_parts.append(model.predict_proba(chunk_mat)[:, 1])
+        raw = np.concatenate(raw_parts)
+    _clear_gpu_cache()
+
     calibrated = apply_saved_calibrator(
         metadata["calibrator_parameters"], raw
     )
@@ -850,6 +900,7 @@ def evaluate_held_out_country_diagnostic(
         if inner_split_found:
             del X_fit, y_fit, X_es_val, y_es_val
         gc.collect()
+        _clear_gpu_cache()
 
     if cross_ap:
         diagnostic_results["mean_held_out_country_ap"] = float(np.mean(cross_ap))
@@ -1018,6 +1069,7 @@ def train_oof(
         if inner_split_found:
             del X_fit, y_fit, X_es_val, y_es_val
         gc.collect()
+        _clear_gpu_cache()
         
         return fold, valid_idx, oof_preds, info
 

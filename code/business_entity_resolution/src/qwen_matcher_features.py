@@ -176,6 +176,9 @@ class QwenMatcherScorer:
             ) from exc
 
         self.torch = torch
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         self.tokenizer = AutoTokenizer.from_pretrained(base_model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token

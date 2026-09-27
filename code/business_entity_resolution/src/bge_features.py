@@ -32,10 +32,14 @@ class BGEEntityEncoder:
         self,
         model_name: str = DEFAULT_MODEL,
         max_seq_length: int = 80,
-        batch_size: int = 128,
+        batch_size: int = 256,
         device: Optional[str] = None,
     ) -> None:
         try:
+            import torch
+            if torch.cuda.is_available():
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(model_name, device=device)
             if device and "cuda" in device:

@@ -215,6 +215,26 @@ class TestStage3Scoring(unittest.TestCase):
         self.assertGreater(best_f05, 0.0)
         self.assertLess(best_f05, 1.0)  # Cannot be 1.0 because S1-miss is 0.0
 
+    def test_choose_threshold_injective_invariant_claim(self):
+        """Verify injective threshold optimization with competing claims between S1 entities."""
+        frame = pd.DataFrame({
+            "source1_entity_id": ["S1-1", "S1-2", "S1-3"],
+            "candidate_entity_id": ["S2-shared", "S2-shared", "S3-unique"],
+            "label": [1, 0, 1],
+        })
+        scores = np.array([0.90, 0.85, 0.70])
+        gt = {
+            "S1-1": {"S2-shared"},
+            "S1-2": set(),
+            "S1-3": {"S3-unique"},
+        }
+        th, best_f05, diag = choose_threshold(
+            frame, scores, ground_truth=gt, injective=True, return_diagnostics=True
+        )
+        self.assertIn("threshold_injective", diag)
+        self.assertIn("macro_f05_injective", diag)
+        self.assertAlmostEqual(best_f05, 1.0)
+
     def test_run_training_and_score_candidates_end_to_end(self):
         """End-to-end integration test of Stage 3 training and test scoring."""
         # 1. Prepare synthetic pair features

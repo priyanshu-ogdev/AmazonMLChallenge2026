@@ -80,7 +80,7 @@ def assemble_matching_results(
             for idx in order:
                 cand = passed_cand_clean[idx]
                 s1 = passed_s1_clean[idx]
-                if cand == s1:
+                if cand == s1 or cand.startswith("S1-") or not cand.startswith(("S2-", "S3-")):
                     continue
                 if cand not in claimed_targets:
                     matches[s1].append(cand)
@@ -89,7 +89,7 @@ def assemble_matching_results(
             for s1_val, cand_val in zip(passed_s1, passed_cand):
                 s1 = str(s1_val).strip()
                 cand = str(cand_val).strip()
-                if cand == s1:
+                if cand == s1 or cand.startswith("S1-") or not cand.startswith(("S2-", "S3-")):
                     continue
                 if cand not in matches[s1]:
                     matches[s1].append(cand)

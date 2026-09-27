@@ -177,19 +177,36 @@ except ImportError:
         return 1.0 - previous[-1] / max(len(left), len(right))
 
 
+def _fast_jaccard_overlap(left: Set[str], right: Set[str]) -> Tuple[float, float]:
+    """
+    Zero-allocation Jaccard similarity and Overlap coefficient.
+    Iterates over the smaller set without allocating any intermediate set objects on the heap.
+    """
+    len_l = len(left)
+    len_r = len(right)
+    if not len_l and not len_r:
+        return 1.0, 1.0
+    if not len_l or not len_r:
+        return 0.0, 0.0
+    smaller, larger = (left, right) if len_l <= len_r else (right, left)
+    inter = 0
+    for item in smaller:
+        if item in larger:
+            inter += 1
+    union = len_l + len_r - inter
+    jaccard = inter / union if union else 0.0
+    min_len = len_l if len_l < len_r else len_r
+    overlap = inter / min_len if min_len else 0.0
+    return jaccard, overlap
+
+
 def _jaccard(left: Set[str], right: Set[str]) -> float:
-    if not left and not right:
-        return 1.0
-    union = left | right
-    return len(left & right) / len(union) if union else 0.0
+    return _fast_jaccard_overlap(left, right)[0]
 
 
 def _overlap(left: Set[str], right: Set[str]) -> float:
     """Overlap coefficient, useful when one address is a partial observation."""
-    if not left and not right:
-        return 1.0
-    denominator = min(len(left), len(right))
-    return len(left & right) / denominator if denominator else 0.0
+    return _fast_jaccard_overlap(left, right)[1]
 
 
 def _char_trigrams(value: str) -> Set[str]:
@@ -260,6 +277,55 @@ def pair_feature_row(
     canon_right = right["canonical_country"]
     match_flag = country_match_flag(canon_left, canon_right)
 
+    # Exact string short-circuits (bypasses Levenshtein and token ratios on identical strings)
+    if name_left and name_left == name_right:
+        name_exact = 1
+        name_tok_jaccard = 1.0
+        name_tok_overlap = 1.0
+        name_ratio = 1.0
+        name_tri_jaccard = 1.0
+        name_sort_ratio = 1.0
+        name_f_ratio = 1.0
+    elif not name_left and not name_right:
+        name_exact = 0
+        name_tok_jaccard = 1.0
+        name_tok_overlap = 1.0
+        name_ratio = 1.0
+        name_tri_jaccard = 1.0
+        name_sort_ratio = 1.0
+        name_f_ratio = 1.0
+    else:
+        name_exact = 0
+        name_tok_jaccard, name_tok_overlap = _fast_jaccard_overlap(name_tokens_left, name_tokens_right)
+        name_ratio = _safe_ratio(name_left, name_right)
+        name_tri_jaccard, _ = _fast_jaccard_overlap(left["name_trigrams"], right["name_trigrams"])
+        name_sort_ratio = _token_sort_ratio(name_left, name_right)
+        name_f_ratio = _fuzz_ratio(name_left, name_right)
+
+    if address_left and address_left == address_right:
+        addr_exact = 1
+        addr_tok_jaccard = 1.0
+        addr_tok_overlap = 1.0
+        addr_ratio = 1.0
+        addr_tri_jaccard = 1.0
+        addr_set_ratio = 1.0
+    elif not address_left and not address_right:
+        addr_exact = 0
+        addr_tok_jaccard = 1.0
+        addr_tok_overlap = 1.0
+        addr_ratio = 1.0
+        addr_tri_jaccard = 1.0
+        addr_set_ratio = 1.0
+    else:
+        addr_exact = 0
+        addr_tok_jaccard, addr_tok_overlap = _fast_jaccard_overlap(address_tokens_left, address_tokens_right)
+        addr_ratio = _safe_ratio(address_left, address_right)
+        addr_tri_jaccard, _ = _fast_jaccard_overlap(left["address_trigrams"], right["address_trigrams"])
+        addr_set_ratio = _token_set_ratio(address_left, address_right)
+
+    _, name_num_overlap = _fast_jaccard_overlap(name_numbers_left, name_numbers_right)
+    _, addr_num_overlap = _fast_jaccard_overlap(address_numbers_left, address_numbers_right)
+
     row = (
         left["entity_id"],
         right["entity_id"],
@@ -274,21 +340,21 @@ def pair_feature_row(
         int(not right["country"]),
         int(not name_left and not name_right),
         int(not address_left and not address_right),
-        int(bool(name_left) and name_left == name_right),
-        int(bool(address_left) and address_left == address_right),
-        _jaccard(name_tokens_left, name_tokens_right),
-        _overlap(name_tokens_left, name_tokens_right),
-        _safe_ratio(name_left, name_right),
-        _jaccard(left["name_trigrams"], right["name_trigrams"]),
-        _token_sort_ratio(name_left, name_right),
-        _fuzz_ratio(name_left, name_right),
-        _jaccard(address_tokens_left, address_tokens_right),
-        _overlap(address_tokens_left, address_tokens_right),
-        _safe_ratio(address_left, address_right),
-        _jaccard(left["address_trigrams"], right["address_trigrams"]),
-        _token_set_ratio(address_left, address_right),
-        _overlap(name_numbers_left, name_numbers_right),
-        _overlap(address_numbers_left, address_numbers_right),
+        name_exact,
+        addr_exact,
+        name_tok_jaccard,
+        name_tok_overlap,
+        name_ratio,
+        name_tri_jaccard,
+        name_sort_ratio,
+        name_f_ratio,
+        addr_tok_jaccard,
+        addr_tok_overlap,
+        addr_ratio,
+        addr_tri_jaccard,
+        addr_set_ratio,
+        name_num_overlap,
+        addr_num_overlap,
         int(bool(left["postal"]) and bool(right["postal"]) and left["postal"] == right["postal"]),
         int(not left["postal"] or not right["postal"]),
         abs(len(name_left) - len(name_right)),
@@ -378,6 +444,7 @@ def _feature_worker(
     worker_rows: List[Tuple[Any, ...]] = []
     for s1_id, cand_ids in chunk_items:
         cand_count = len(cand_ids)
+        s1_norm = normalized[s1_id]
         max_s = s1_max_score.get(s1_id)
         for candidate_id in cand_ids:
             pair = (s1_id, candidate_id)
@@ -385,7 +452,7 @@ def _feature_worker(
             margin = (max_s - score) if (max_s is not None and score is not None) else None
             worker_rows.append(
                 pair_feature_row(
-                    normalized[s1_id],
+                    s1_norm,
                     normalized[candidate_id],
                     provenance=blocker,
                     left_rank=rank,
@@ -520,34 +587,46 @@ def build_pair_features(
         num_workers = min(num_workers, 16)
         print(f"[INFO] Windows/spawn environment detected. Using ThreadPoolExecutor with {num_workers} workers.", flush=True)
 
-    chunk_size = math.ceil(len(items) / num_workers) if num_workers > 0 else 0
-    if chunk_size == 0:
-        chunks = []
-    else:
-        chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
-
-    rows: List[Tuple[Any, ...]] = []
-    if num_workers <= 1 or not chunks:
-        rows = _feature_worker(items, normalized, provenance, s1_max_score)
-    else:
-        global _shared_normalized, _shared_provenance, _shared_s1_max_score
-        _shared_normalized = normalized
-        _shared_provenance = provenance
-        _shared_s1_max_score = s1_max_score
-        
-        with ExecutorClass(max_workers=num_workers, **kwargs) as pool:
-            futures = [
-                pool.submit(_feature_worker, chunk, None, None, None)
-                for chunk in chunks
-            ]
-            for fut in as_completed(futures):
-                rows.extend(fut.result())
+    # Chunk into 5,000 S1 entities to keep memory footprint strictly bounded (< 1.8 GB RAM)
+    chunk_size = 5000
+    chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)] if items else []
 
     feature_columns = list(PairFeatureRow._FIELDS)
-    result = pd.DataFrame(rows, columns=feature_columns)
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    result.to_csv(output_file, sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
-    return result
+
+    with open(output_file, "w", encoding="utf-8", newline="") as out_f:
+        writer = csv.writer(out_f, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
+        writer.writerow(feature_columns)
+
+        if num_workers <= 1 or not chunks:
+            for chunk in chunks:
+                chunk_rows = _feature_worker(chunk, normalized, provenance, s1_max_score)
+                writer.writerows(chunk_rows)
+        else:
+            global _shared_normalized, _shared_provenance, _shared_s1_max_score
+            _shared_normalized = normalized
+            _shared_provenance = provenance
+            _shared_s1_max_score = s1_max_score
+            
+            with ExecutorClass(max_workers=num_workers, **kwargs) as pool:
+                futures = [
+                    pool.submit(_feature_worker, chunk, None, None, None)
+                    for chunk in chunks
+                ]
+                for fut in as_completed(futures):
+                    chunk_rows = fut.result()
+                    writer.writerows(chunk_rows)
+
+    str_cols = {
+        "source1_entity_id": str,
+        "candidate_entity_id": str,
+        "source1_country": str,
+        "candidate_country": str,
+        "source1_canonical_country": str,
+        "candidate_canonical_country": str,
+        "blocker_provenance": str,
+    }
+    return pd.read_csv(output_file, sep="\t", keep_default_na=False, quoting=csv.QUOTE_NONE, dtype=str_cols)
 
 
 def main() -> None:

@@ -126,13 +126,13 @@ _EMPTY_LIST: List[str] = []
 
 EXACT_BLOCKERS = {
     "exact_name",
+    "sorted_name_tokens",
     "exact_name_postal",
     "exact_name_street",
     "exact_name_trailing",
     "name_lead_postal",
     "name_lead_street_trailing",
     "first_2_tokens",
-    "acronym_match",
 }
 
 _WORD_RE = re.compile(r"[\w]+", flags=re.UNICODE)
@@ -163,6 +163,19 @@ _ADDRESS_STOPWORDS = {
     "passage", "square", "france", "paris",
     # Common Indian locality generics
     "nagar", "marg", "colony", "sector", "plot", "bengal", "delhi", "mumbai",
+    # French postal / generic address noise
+    "cedex", "bp", "boite", "cs",
+}
+
+_NAME_PREFIX_STOPWORDS = {
+    # English articles & conjunctions
+    "the", "a", "an", "and",
+    # French articles, prepositions & contractions
+    "le", "la", "les", "l", "d", "de", "du", "des", "et", "en", "au", "aux",
+    # French corporate prefixes
+    "sarl", "sas", "sasu", "sa", "eurl", "eirl", "sci", "snc", "scp", "ste", "societe", "ets", "etablissements", "cie", "compagnie", "gie",
+    # Indian honorifics / business prefixes
+    "ms", "m/s", "shree", "sri", "shri", "smt", "om",
 }
 
 
@@ -205,6 +218,7 @@ class BlockingRecord:
     acronyms: Set[str]
     ngram_counts: Counter[str]
     first_word: Optional[str]
+    sorted_name_tokens: Optional[str] = None
     address_tokens: List[str] = field(default_factory=list)
     address_token_counts: Counter[str] = field(default_factory=Counter)
 
@@ -258,11 +272,19 @@ class BlockingRecord:
         first_word = tokens[0] if tokens else None
 
         # Content words for first-2-tokens and acronym extraction (preserving 2-letter tokens like 'GE')
-        raw_words = (w.group().lower() for w in _WORD_RE.finditer(n_name or ""))
-        content_words = [w for w in raw_words if w not in ("the", "a", "an", "and", "&")]
+        raw_words = [w.group().lower() for w in _WORD_RE.finditer(n_name or "")]
+        content_words = [w for w in raw_words if w not in _NAME_PREFIX_STOPWORDS]
+        if not content_words:
+            content_words = [w for w in raw_words if w not in ("the", "a", "an", "and", "&")]
+        if not content_words:
+            content_words = raw_words
 
         # First-2-Tokens Key
         first_2_tokens = " ".join(content_words[:2]) if len(content_words) >= 2 else None
+        first_word = content_words[0] if content_words else (tokens[0] if tokens else None)
+
+        # Sorted Name Tokens Key (for corporate name word permutations)
+        sorted_name_tokens = " ".join(sorted(set(tokens))) if len(tokens) >= 2 else None
 
         # Acronym Keys (both 2-letter prefix, full initials, and explicit short acronym tokens)
         acronyms: Set[str] = set()
@@ -314,6 +336,7 @@ class BlockingRecord:
             acronyms=acronyms,
             ngram_counts=ngram_counts,
             first_word=first_word,
+            sorted_name_tokens=sorted_name_tokens,
             address_tokens=addr_tokens,
             address_token_counts=addr_token_counts,
         )
@@ -425,6 +448,7 @@ class MultiChannelBlocker:
         # Channel 1: Exact & Composite Key Inverted Indexes
         # Key tuple -> canonical_country -> list of candidate entity IDs
         self.index_exact_name: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        self.index_sorted_tokens: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
         self.index_first_2_tokens: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
         self.index_acronym: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
         self.index_name_postal: Dict[Tuple[str, str], Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
@@ -474,6 +498,10 @@ class MultiChannelBlocker:
         # 1. Exact & Structural Name Keys (cap postings at 1000 to prevent degenerate key explosion)
         if record.norm_name:
             sub = self.index_exact_name[record.norm_name][country]
+            if len(sub) < 1000:
+                sub.append(cid)
+        if record.sorted_name_tokens:
+            sub = self.index_sorted_tokens[record.sorted_name_tokens][country]
             if len(sub) < 1000:
                 sub.append(cid)
         if record.first_2_tokens:
@@ -657,6 +685,7 @@ class MultiChannelBlocker:
 
         # --------------- local aliases (eliminate per-call LOAD_ATTR overhead) --------
         index_exact_name         = self.index_exact_name
+        index_sorted_tokens      = self.index_sorted_tokens
         index_first_2_tokens     = self.index_first_2_tokens
         index_acronym            = self.index_acronym
         index_name_postal        = self.index_name_postal
@@ -735,19 +764,23 @@ class MultiChannelBlocker:
                     entry[2] = True
 
         # -------------------------------------------------------------
-        # Channel 1: Exact Name, First-2-Tokens, Acronym & Composite Keys
+        # Channel 1: Exact Name, Sorted Tokens, First-2-Tokens, Acronym & Composite Keys
         # -------------------------------------------------------------
         if s1.norm_name:
             for rank, cid in enumerate(itertools.islice(_hits(index_exact_name, s1.norm_name), max_candidates), 1):
                 _rh(cid, "exact_name", 1.0, rank, True)
+
+        if s1.sorted_name_tokens:
+            for rank, cid in enumerate(itertools.islice(_hits(index_sorted_tokens, s1.sorted_name_tokens), max_candidates), 1):
+                _rh(cid, "sorted_name_tokens", 0.98, rank, True)
 
         if s1.first_2_tokens:
             for rank, cid in enumerate(itertools.islice(_hits(index_first_2_tokens, s1.first_2_tokens), max_candidates), 1):
                 _rh(cid, "first_2_tokens", 0.90, rank, True)
 
         for acr in s1.acronyms:
-            for rank, cid in enumerate(itertools.islice(_hits(index_acronym, acr), max_candidates), 1):
-                _rh(cid, "acronym_match", 0.85, rank, True)
+            for rank, cid in enumerate(itertools.islice(_hits(index_acronym, acr), 10), 1):
+                _rh(cid, "acronym_match", 0.70, rank, False)
 
         if s1.norm_name and s1.postal_code:
             for rank, cid in enumerate(itertools.islice(_hits(index_name_postal, (s1.norm_name, s1.postal_code)), max_candidates), 1):

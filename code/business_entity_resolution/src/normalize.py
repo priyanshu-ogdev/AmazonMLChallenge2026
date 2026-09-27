@@ -138,12 +138,17 @@ LEGAL_SUFFIX_MAP: Dict[str, str] = {
     # --- French legal forms (normalized regardless of country field) ---
     "sarl":           "sarl",
     "sas":            "sas",
+    "sasu":           "sas",
     "sa":             "sa",
     "eurl":           "eurl",
+    "eirl":           "eirl",
+    "gie":            "gie",
     "sci":            "sci",
     "snc":            "snc",
     "scp":            "scp",
     "societe":        "societe",
+    "ets":            "etablissements",
+    "cie":            "compagnie",
 }
 
 # ---------------------------------------------------------------------------
@@ -444,10 +449,13 @@ def _canonicalize_legal_suffixes(name: str) -> str:
     """
     # Multi-word trailing legal forms canonicalization (French corporate forms)
     for phrase, canon in (
+        ("societe par actions simplifiee unipersonnelle", "sas"),
         ("societe par actions simplifiee", "sas"),
         ("societe a responsabilite limitee", "sarl"),
         ("entreprise unipersonnelle a responsabilite limitee", "eurl"),
         ("societe anonyme", "sa"),
+        ("societe civile immobiliere", "sci"),
+        ("groupement d interet economique", "gie"),
     ):
         if name.endswith(" " + phrase):
             name = name[: -len(phrase)] + canon

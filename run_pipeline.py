@@ -41,6 +41,11 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+_ROOT = Path(__file__).resolve().parent
+_SRC_DIR = _ROOT / "code" / "business_entity_resolution"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
 logger = logging.getLogger("pipeline")
 
 

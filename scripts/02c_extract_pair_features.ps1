@@ -139,8 +139,8 @@ $s2File = Resolve-FullPath $s2File
 $s3File = Resolve-FullPath $s3File
 
 # Resolve batch sizes -- GPU vs CPU defaults
-if ($BgeBatchSize -le 0)  { $BgeBatchSize  = if ($script:_GpuAvailable) { 128 } else { 32  } }
-if ($QwenBatchSize -le 0) { $QwenBatchSize = if ($script:_GpuAvailable) { 64  } else { 16  } }
+if ($BgeBatchSize -le 0)  { $BgeBatchSize  = if ($script:_GpuAvailable) { 256 } else { 32  } }
+if ($QwenBatchSize -le 0) { $QwenBatchSize = if ($script:_GpuAvailable) { 256 } else { 16  } }
 
 $pairFeaturesOut        = Join-Path $OutputDir "pair_features.tsv"
 $bgeFeaturesOut         = Join-Path $OutputDir "bge_pair_features.tsv"

@@ -43,9 +43,13 @@ class QwenEntityEncoder:
         model_name: str = DEFAULT_MODEL,
         instruction: str = DEFAULT_INSTRUCTION,
         max_seq_length: int = 256,
-        batch_size: int = 128,
+        batch_size: int = 256,
         device: Optional[str] = None,
     ) -> None:
+        import torch
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         from sentence_transformers import SentenceTransformer
 
         self.instruction = instruction

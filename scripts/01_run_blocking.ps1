@@ -52,7 +52,8 @@ param(
     [switch]$NoCacheIndex = $false,
     [int]$CheckpointInterval = 10000,
     [switch]$DryRun = $false,
-    [string]$PythonPath = ""
+    [string]$PythonPath = "",
+    [switch]$UseFast = $true
 )
 
 Set-StrictMode -Version Latest
@@ -196,7 +197,8 @@ if ($DenseEmbeddings -and (Test-Path $DenseEmbeddings)) {
     $blockerArgs += @("--dense-embeddings", $DenseEmbeddings)
 }
 
-Invoke-PythonModule "src.blocking" $blockerArgs "Stage 1 Blocking" -DryRun $DryRun -PythonExe $python
+$moduleName = if ($UseFast) { "src.fast_blocking" } else { "src.blocking" }
+Invoke-PythonModule $moduleName $blockerArgs "Stage 1 Blocking" -DryRun $DryRun -PythonExe $python
 
 # Summary verification
 if (-not $DryRun) {

@@ -45,11 +45,30 @@ MAX_NGRAM_DOC_COUNT = 5000
 MAX_ADDR_TOKEN_DOC_COUNT = 5000
 MIN_TOKEN_LEN = 3
 
+BLOCKER_NAMES = [
+    "exact_name", "sorted_name_tokens", "first_2_tokens",
+    "exact_name_postal", "exact_name_street", "exact_name_trailing",
+    "name_lead_postal", "name_lead_street_trailing", "address_structural",
+    "address_tokens", "token_inverted", "char_ngram", "acronym_match"
+]
+BLOCKER_BITS = {name: (1 << i) for i, name in enumerate(BLOCKER_NAMES)}
+EXACT_MASK = (
+    BLOCKER_BITS["exact_name"] |
+    BLOCKER_BITS["sorted_name_tokens"] |
+    BLOCKER_BITS["first_2_tokens"] |
+    BLOCKER_BITS["exact_name_postal"] |
+    BLOCKER_BITS["exact_name_street"] |
+    BLOCKER_BITS["exact_name_trailing"] |
+    BLOCKER_BITS["name_lead_postal"] |
+    BLOCKER_BITS["name_lead_street_trailing"]
+)
+
 EXACT_BLOCKERS = frozenset({
-    "exact_name", "first_2_tokens", "acronym_match",
+    "exact_name", "sorted_name_tokens", "first_2_tokens",
     "exact_name_postal", "exact_name_street", "exact_name_trailing",
     "name_lead_postal", "name_lead_street_trailing",
 })
+
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
@@ -65,6 +84,19 @@ _ADDRESS_STOPWORDS = {
     "passage", "square", "france", "paris",
     # Common Indian locality generics
     "nagar", "marg", "colony", "sector", "plot", "bengal", "delhi", "mumbai",
+    # French postal / generic address noise
+    "cedex", "bp", "boite", "cs",
+}
+
+_NAME_PREFIX_STOPWORDS = {
+    # English articles & conjunctions
+    "the", "a", "an", "and",
+    # French articles, prepositions & contractions
+    "le", "la", "les", "l", "d", "de", "du", "des", "et", "en", "au", "aux",
+    # French corporate prefixes
+    "sarl", "sas", "sasu", "sa", "eurl", "eirl", "sci", "snc", "scp", "ste", "societe", "ets", "etablissements", "cie", "compagnie", "gie",
+    # Indian honorifics / business prefixes
+    "ms", "m/s", "shree", "sri", "shri", "smt", "om",
 }
 
 _itemgetter_0 = operator.itemgetter(0)
@@ -90,6 +122,62 @@ def get_char_ngrams(s: str) -> List[str]:
         for i in range(L - 3):
             res.append(s[i:i+4])
     return res
+
+
+def load_blocking_dataframe(file_path: Path | str, cache_dir: Optional[Path] = None) -> pl.DataFrame:
+    """Load a normalized DataFrame via Polars, auto-detecting raw vs normalized and utilizing disk cache."""
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        header_line = f.readline()
+    header = [h.strip() for h in header_line.rstrip("\r\n").split("\t")]
+
+    target_path = file_path
+    if not ("norm_name" in header and "norm_address" in header):
+        # File is raw! Check if pre-normalized file already exists in cache locations:
+        target_path = None
+        candidates = []
+        if cache_dir:
+            candidates.append(cache_dir / f"{file_path.stem}_normalized.tsv")
+            candidates.append(cache_dir / f"{file_path.name}")
+        base_s0 = Path("dataset/stage0_normalized")
+        candidates.append(base_s0 / file_path.parent.name / f"{file_path.stem}_normalized.tsv")
+        candidates.append(base_s0 / f"{file_path.stem}_normalized.tsv")
+
+        for c_cand in candidates:
+            if c_cand.exists() and c_cand.stat().st_size > 0:
+                target_path = c_cand
+                print(f"[CACHE] Using pre-normalized file: {target_path}")
+                break
+
+        if target_path is None:
+            out_norm_dir = cache_dir or (Path("output") / "stage0_normalized")
+            out_norm_dir.mkdir(parents=True, exist_ok=True)
+            target_path = out_norm_dir / f"{file_path.stem}_normalized.tsv"
+            print(f"[NORM] Pre-normalizing raw TSV {file_path.name} -> {target_path}...")
+            from src.data_builder import normalize_tsv_file
+            normalize_tsv_file(file_path, target_path)
+
+    return pl.read_csv(
+        target_path,
+        separator="\t",
+        columns=[
+            "entity_id", "country_canonical", "norm_name", "norm_address",
+            "postal_code", "street_number", "trailing_segment", "is_address_missing"
+        ],
+        schema_overrides={
+            "entity_id": pl.String,
+            "country_canonical": pl.String,
+            "norm_name": pl.String,
+            "norm_address": pl.String,
+            "postal_code": pl.String,
+            "street_number": pl.String,
+            "trailing_segment": pl.String,
+            "is_address_missing": pl.Int32,
+        }
+    )
 
 
 class FastNormalizedBlocker:
@@ -120,6 +208,7 @@ class FastNormalizedBlocker:
         # Partitions by canonical country: country -> channel_index
         self.countries: Set[str] = set()
         self.c_exact_name: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
+        self.c_sorted_name_tokens: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
         self.c_first_2_tokens: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
         self.c_acronym: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
         self.c_name_postal: Dict[str, Dict[Tuple[str, str], List[int]]] = defaultdict(lambda: defaultdict(list))
@@ -147,29 +236,11 @@ class FastNormalizedBlocker:
         self.cand_token_lens: List[int] = []
         self.cand_addr_lens: List[int] = []
 
-    def index_normalized_file(self, file_path: Path | str) -> int:
+    def index_normalized_file(self, file_path: Path | str, cache_dir: Optional[Path] = None) -> int:
         """
         Fast ingestion and indexing using Polars zero-copy columnar reader.
         """
-        file_path = Path(file_path)
-        df = pl.read_csv(
-            file_path,
-            separator="\t",
-            columns=[
-                "entity_id", "country_canonical", "norm_name", "norm_address",
-                "postal_code", "street_number", "trailing_segment", "is_address_missing"
-            ],
-            schema_overrides={
-                "entity_id": pl.String,
-                "country_canonical": pl.String,
-                "norm_name": pl.String,
-                "norm_address": pl.String,
-                "postal_code": pl.String,
-                "street_number": pl.String,
-                "trailing_segment": pl.String,
-                "is_address_missing": pl.Int32,
-            }
-        )
+        df = load_blocking_dataframe(file_path, cache_dir=cache_dir)
 
         n_rows = df.height
         eids = df["entity_id"].to_list()
@@ -189,7 +260,13 @@ class FastNormalizedBlocker:
         max_tok_cnt = self.max_token_doc_count
         max_addr_tok_cnt = self.max_addr_token_doc_count
 
+        t0_file = time.perf_counter()
+        fname = Path(file_path).name
         for i in range(n_rows):
+            if (i + 1) % 500_000 == 0:
+                el = time.perf_counter() - t0_file
+                rate = (i + 1) / el if el > 0 else 0
+                print(f"  Indexed {i+1:,}/{n_rows:,} records from {fname} ({rate:,.0f} rec/s)...", flush=True)
             cid = start_id + i
             c_country = countries[i]
             self.countries.add(c_country)
@@ -218,19 +295,32 @@ class FastNormalizedBlocker:
             addr_len = max(1, len(addr_toks))
             self.cand_addr_lens.append(addr_len)
 
-            first_word = tokens[0] if tokens else ""
+            # Content tokens (stripping leading corporate / cross-lingual prefix stopwords)
+            content_tokens = [w for w in tokens if w not in _NAME_PREFIX_STOPWORDS]
+            if not content_tokens:
+                content_tokens = tokens
+
+            first_word = content_tokens[0] if content_tokens else ""
 
             # 1. Exact Name
             if n_name:
                 self.c_exact_name[c_country][n_name].append(cid)
 
-            # 2. First-2-Tokens & Acronym
-            if len(tokens) >= 2:
+            # 2. First-2-Tokens, Acronym & Sorted Tokens
+            if len(content_tokens) >= 2:
+                f2 = f"{content_tokens[0]} {content_tokens[1]}"
+                self.c_first_2_tokens[c_country][f2].append(cid)
+            elif len(tokens) >= 2:
                 f2 = f"{tokens[0]} {tokens[1]}"
                 self.c_first_2_tokens[c_country][f2].append(cid)
+
+            if len(tokens) >= 2:
+                sorted_toks = " ".join(sorted(set(tokens)))
+                self.c_sorted_name_tokens[c_country][sorted_toks].append(cid)
                 if len(tokens[0]) > 0 and len(tokens[1]) > 0:
                     acr = f"{tokens[0][0]}{tokens[1][0]}"
                     self.c_acronym[c_country][acr].append(cid)
+
 
             # 3. Composite Structural Keys
             if n_name and postal:
@@ -345,68 +435,98 @@ class FastNormalizedBlocker:
         # Country partition dispatch
         c_country = country if country in self.countries else ""
 
-        # Flat candidate hits: int_id -> [best_score, best_rank, hit_exact, blockers_list]
+        # Channel bit constants
+        B_EXACT_NAME = 1 << 0
+        B_SORTED_TOKENS = 1 << 1
+        B_FIRST_2_TOKENS = 1 << 2
+        B_NAME_POSTAL = 1 << 3
+        B_NAME_STREET = 1 << 4
+        B_NAME_TRAILING = 1 << 5
+        B_LEAD_POSTAL = 1 << 6
+        B_LEAD_STREET_TRAIL = 1 << 7
+        B_ADDR_STRUCTURAL = 1 << 8
+        B_ADDR_TOKENS = 1 << 9
+        B_TOKEN_INVERTED = 1 << 10
+        B_CHAR_NGRAM = 1 << 11
+        B_ACRONYM = 1 << 12
+
+        # Flat candidate hits: int_id -> [best_score, best_rank, b_mask]
         hits: Dict[int, List[Any]] = {}
 
-        def record_hit(cid: int, blocker: str, score: float, rank: int, exact: bool = False):
+        def record_hit(cid: int, b_bit: int, score: float, rank: int):
             entry = hits.get(cid)
             if entry is None:
-                hits[cid] = [score, rank, exact, [blocker]]
+                hits[cid] = [score, rank, b_bit]
             else:
-                entry[3].append(blocker)
+                entry[2] |= b_bit
                 if score > entry[0]:
                     entry[0] = score
                 if rank < entry[1]:
                     entry[1] = rank
-                if exact:
-                    entry[2] = True
 
         # Channel 1: Exact Name
         if norm_name:
             cands = self.c_exact_name[c_country].get(norm_name, [])
             for r, cid in enumerate(cands[:max_cand], 1):
-                record_hit(cid, "exact_name", 1.0, r, True)
+                record_hit(cid, B_EXACT_NAME, 1.0, r)
 
-        # Channel 1: First 2 tokens & Acronym
+        # Channel 1: First 2 tokens, Acronym & Sorted Tokens
         tokens = norm_name.split()
-        if len(tokens) >= 2:
+        content_tokens = [w for w in tokens if w not in _NAME_PREFIX_STOPWORDS]
+        if not content_tokens:
+            content_tokens = tokens
+
+        first_word = content_tokens[0] if content_tokens else ""
+
+        if len(content_tokens) >= 2:
+            f2 = f"{content_tokens[0]} {content_tokens[1]}"
+            cands = self.c_first_2_tokens[c_country].get(f2, [])
+            for r, cid in enumerate(cands[:max_cand], 1):
+                record_hit(cid, B_FIRST_2_TOKENS, 0.90, r)
+        elif len(tokens) >= 2:
             f2 = f"{tokens[0]} {tokens[1]}"
             cands = self.c_first_2_tokens[c_country].get(f2, [])
             for r, cid in enumerate(cands[:max_cand], 1):
-                record_hit(cid, "first_2_tokens", 0.90, r, True)
+                record_hit(cid, B_FIRST_2_TOKENS, 0.90, r)
 
+        if len(tokens) >= 2:
+            # Permutation-invariant sorted tokens
+            sorted_tok_str = " ".join(sorted(set(tokens)))
+            cands = self.c_sorted_name_tokens[c_country].get(sorted_tok_str, [])
+            for r, cid in enumerate(cands[:max_cand], 1):
+                record_hit(cid, B_SORTED_TOKENS, 0.98, r)
+
+            # Acronym match: capped at 10 to avoid noise, not marked exact
             acr = f"{tokens[0][0]}{tokens[1][0]}"
             cands = self.c_acronym[c_country].get(acr, [])
-            for r, cid in enumerate(cands[:max_cand], 1):
-                record_hit(cid, "acronym_match", 0.85, r, True)
-
-        first_word = tokens[0] if tokens else ""
+            for r, cid in enumerate(cands[:10], 1):
+                record_hit(cid, B_ACRONYM, 0.75, r)
 
         # Composite structural
         if norm_name and postal_code:
             cands = self.c_name_postal[c_country].get((norm_name, postal_code), [])
             for r, cid in enumerate(cands[:max_cand], 1):
-                record_hit(cid, "exact_name_postal", 1.0, r, True)
+                record_hit(cid, B_NAME_POSTAL, 1.0, r)
 
         if norm_name and street_number:
             cands = self.c_name_street[c_country].get((norm_name, street_number), [])
             for r, cid in enumerate(cands[:max_cand], 1):
-                record_hit(cid, "exact_name_street", 0.95, r, True)
+                record_hit(cid, B_NAME_STREET, 0.95, r)
 
         if norm_name and trailing_segment:
             cands = self.c_name_trailing[c_country].get((norm_name, trailing_segment), [])
             for r, cid in enumerate(cands[:max_cand], 1):
-                record_hit(cid, "exact_name_trailing", 0.95, r, True)
+                record_hit(cid, B_NAME_TRAILING, 0.95, r)
 
         if first_word and postal_code and len(first_word) >= 3:
             cands = self.c_lead_postal[c_country].get((first_word, postal_code), [])
             for r, cid in enumerate(cands[:max_cand], 1):
-                record_hit(cid, "name_lead_postal", 0.90, r, True)
+                record_hit(cid, B_LEAD_POSTAL, 0.90, r)
 
         if first_word and street_number and trailing_segment and len(first_word) >= 3:
             cands = self.c_lead_street_trail[c_country].get((first_word, street_number, trailing_segment), [])
             for r, cid in enumerate(cands[:max_cand], 1):
-                record_hit(cid, "name_lead_street_trailing", 0.90, r, True)
+                record_hit(cid, B_LEAD_STREET_TRAIL, 0.90, r)
 
         # -------------------------------------------------------------
         # Tier 1 (Fast & High-Precision): Address Structural & Address Tokens
@@ -415,7 +535,7 @@ class FastNormalizedBlocker:
         if not is_address_missing and postal_code and street_number:
             cands = self.c_addr_struct[c_country].get((postal_code, street_number), [])
             for r, cid in enumerate(cands[:max_cand], 1):
-                record_hit(cid, "address_structural", 0.85, r, False)
+                record_hit(cid, B_ADDR_STRUCTURAL, 0.85, r)
 
         # Channel 4b: Address Inverted Index (Tokens with Sub-Linear TF-IDF)
         if not is_address_missing and norm_address:
@@ -458,14 +578,16 @@ class FastNormalizedBlocker:
                                     if sim > 1.0:
                                         sim = 1.0
                                     if sim >= 0.20:
-                                        record_hit(cid, "address_tokens", sim, r, exact=(sim >= 0.75))
+                                        record_hit(cid, B_ADDR_TOKENS, sim, r)
+
 
         # -------------------------------------------------------------
         # Tiered Early-Exit Gate:
         # If high-confidence matches are already found, skip expensive fuzzy token & character n-gram channels
         # -------------------------------------------------------------
-        has_exact = any(h[2] for h in hits.values())
-        skip_fuzzy = (has_exact and len(hits) >= 10) or len(hits) >= max_cand
+        has_true_exact = any(bool(h[2] & EXACT_MASK) for h in hits.values())
+        skip_fuzzy = (has_true_exact and len(hits) >= 8) or len(hits) >= max_cand
+
 
         # -------------------------------------------------------------
         # Tier 2 (Fuzzy Fallback): Token & Character N-Gram Inverted Indexes
@@ -509,94 +631,84 @@ class FastNormalizedBlocker:
 
                                 scored_tok_cands.sort(key=_itemgetter_0, reverse=True)
                                 for r, (sim, cid) in enumerate(scored_tok_cands[:top_k], 1):
-                                    record_hit(cid, "token_inverted", sim, r, False)
+                                    record_hit(cid, B_TOKEN_INVERTED, sim, r)
 
-            # Channel 2: Character N-Grams
-            ngrams = get_char_ngrams(norm_name)
-            idf_table = self.c_ngram_idf.get(c_country)
-            if ngrams and idf_table:
-                ng_counts = Counter(ngrams)
-                s1_weights = {}
-                for g, cnt in ng_counts.items():
-                    idf = idf_table.get(g)
-                    if idf is not None:
-                        s1_weights[g] = (1.0 + _log(cnt)) * idf
+            # Channel 2: Character N-Grams (Gated: only when candidate count is still low < 8)
+            if len(hits) < 8 and norm_name and len(norm_name) >= 3:
+                ngrams = get_char_ngrams(norm_name)
+                idf_table = self.c_ngram_idf.get(c_country)
+                if ngrams and idf_table:
+                    ng_counts = Counter(ngrams)
+                    s1_weights = {}
+                    for g, cnt in ng_counts.items():
+                        idf = idf_table.get(g)
+                        if idf is not None:
+                            s1_weights[g] = (1.0 + _log(cnt)) * idf
 
-                if s1_weights:
-                    if len(s1_weights) > 15:
-                        top_items = heapq.nlargest(15, s1_weights.items(), key=_itemgetter_1)
-                        s1_weights = dict(top_items)
+                    if s1_weights:
+                        if len(s1_weights) > 15:
+                            top_items = heapq.nlargest(15, s1_weights.items(), key=_itemgetter_1)
+                            s1_weights = dict(top_items)
 
-                    cand_scores: Dict[int, float] = defaultdict(float)
-                    idx_ng = self.c_ngrams[c_country]
-                    for g, w in s1_weights.items():
-                        postings = idx_ng.get(g)
-                        if postings:
-                            for cid in postings:
-                                cand_scores[cid] += w
+                        cand_scores: Dict[int, float] = defaultdict(float)
+                        idx_ng = self.c_ngrams[c_country]
+                        for g, w in s1_weights.items():
+                            postings = idx_ng.get(g)
+                            if postings:
+                                for cid in postings:
+                                    cand_scores[cid] += w
 
-                    if cand_scores:
-                        s1_norm = _sqrt(sum(w * w for w in s1_weights.values()))
-                        if s1_norm > 0:
-                            top_cands = heapq.nlargest(top_k * 3, cand_scores.items(), key=_itemgetter_1)
-                            scored_cands = []
-                            cand_lens = self.cand_ngram_lens
-                            for cid, raw_score in top_cands:
-                                c_len = cand_lens[cid] if cid < len(cand_lens) else 25
-                                sim = raw_score / (s1_norm * _sqrt(c_len))
-                                if sim >= sim_floor:
-                                    scored_cands.append((min(1.0, sim), cid))
+                        if cand_scores:
+                            s1_norm = _sqrt(sum(w * w for w in s1_weights.values()))
+                            if s1_norm > 0:
+                                top_cands = heapq.nlargest(top_k * 3, cand_scores.items(), key=_itemgetter_1)
+                                scored_cands = []
+                                cand_lens = self.cand_ngram_lens
+                                for cid, raw_score in top_cands:
+                                    c_len = cand_lens[cid] if cid < len(cand_lens) else 25
+                                    sim = raw_score / (s1_norm * _sqrt(c_len))
+                                    if sim >= sim_floor:
+                                        scored_cands.append((min(1.0, sim), cid))
 
-                            scored_cands.sort(key=_itemgetter_0, reverse=True)
-                            for r, (sim, cid) in enumerate(scored_cands[:top_k], 1):
-                                record_hit(cid, "char_ngram", sim, r, False)
+                                scored_cands.sort(key=_itemgetter_0, reverse=True)
+                                for r, (sim, cid) in enumerate(scored_cands[:top_k], 1):
+                                    record_hit(cid, B_CHAR_NGRAM, sim, r)
 
         if not hits:
             return []
 
         # Strict Exact-Priority Sorting:
         # 1. Exact match (-1 vs 0) -> strict priority!
-        # 2. Number of distinct blockers (-b_cnt)
+        # 2. Number of distinct blockers (-b_cnt via POPCNT bit_count)
         # 3. Best score (-best_score)
         # 4. Best rank (best_rank)
         # 5. Candidate string ID (cid_str)
         id_strs = self.id_to_str
         id_srcs = self.id_to_source
         sortable = []
-        for cid, (best_score, best_rank, hit_exact, b_list) in hits.items():
-            if len(b_list) == 1:
-                b_cnt = 1
-                is_ex = hit_exact or (b_list[0] in EXACT_BLOCKERS)
-            else:
-                uniq_b = set(b_list)
-                b_cnt = len(uniq_b)
-                is_ex = hit_exact or bool(uniq_b & EXACT_BLOCKERS)
-
-            cid_str = id_strs[cid]
-            sort_key = (
-                -1 if is_ex else 0,
-                -b_cnt,
-                -best_score,
-                best_rank,
-                cid_str
-            )
-            sortable.append((sort_key, cid, b_list, best_score, best_rank))
+        for cid, (best_score, best_rank, b_mask) in hits.items():
+            is_ex = bool(b_mask & EXACT_MASK)
+            b_cnt = b_mask.bit_count()
+            sortable.append((
+                (-1 if is_ex else 0, -b_cnt, -best_score, best_rank, id_strs[cid]),
+                cid, b_mask, best_score, best_rank
+            ))
 
         sortable.sort(key=_itemgetter_0)
         top_selected = sortable[:max_cand]
 
         results = []
-        for sort_key, cid, b_list, best_score, best_rank in top_selected:
+        for sort_key, cid, b_mask, best_score, best_rank in top_selected:
             cid_str = id_strs[cid]
             c_src = id_srcs[cid]
-            uniq_b = sorted(set(b_list))
-            prov = ",".join(uniq_b)
+            prov = ",".join(name for i, name in enumerate(BLOCKER_NAMES) if (b_mask & (1 << i)))
             score = round(best_score, 4)
             results.append((
-                eid, cid_str, c_src, prov, len(uniq_b), best_rank, score, country
+                eid, cid_str, c_src, prov, b_mask.bit_count(), best_rank, score, country
             ))
 
         return results
+
 
 
 def run_fast_blocking(
@@ -620,11 +732,12 @@ def run_fast_blocking(
         similarity_floor=similarity_floor,
     )
 
+    stage0_cache_dir = output_dir / "stage0_normalized"
     # 1. Ingest candidates
     t0_idx = time.perf_counter()
     total_indexed = 0
     for c_path in candidate_sources:
-        n = blocker.index_normalized_file(c_path)
+        n = blocker.index_normalized_file(c_path, cache_dir=stage0_cache_dir)
         total_indexed += n
     blocker.build_idf_tables()
     idx_duration = time.perf_counter() - t0_idx
@@ -646,6 +759,14 @@ def run_fast_blocking(
     t0_query = time.perf_counter()
     pairs_tsv = output_dir / "candidate_pairs.tsv"
     prov_tsv = output_dir / "candidate_provenance.tsv"
+
+    total_expected_s1 = 0
+    for p in source1_paths:
+        try:
+            with open(p, "rb") as f:
+                total_expected_s1 += max(0, sum(1 for _ in f) - 1)
+        except Exception:
+            pass
 
     total_s1 = 0
     total_pairs = 0
@@ -677,24 +798,7 @@ def run_fast_blocking(
         ])
 
         for s1_path in source1_paths:
-            df = pl.read_csv(
-                s1_path,
-                separator="\t",
-                columns=[
-                    "entity_id", "country_canonical", "norm_name", "norm_address",
-                    "postal_code", "street_number", "trailing_segment", "is_address_missing"
-                ],
-                schema_overrides={
-                    "entity_id": pl.String,
-                    "country_canonical": pl.String,
-                    "norm_name": pl.String,
-                    "norm_address": pl.String,
-                    "postal_code": pl.String,
-                    "street_number": pl.String,
-                    "trailing_segment": pl.String,
-                    "is_address_missing": pl.Int32,
-                }
-            )
+            df = load_blocking_dataframe(s1_path, cache_dir=stage0_cache_dir)
 
             eids = df["entity_id"].to_list()
             countries = df["country_canonical"].fill_null("").to_list()
@@ -739,6 +843,13 @@ def run_fast_blocking(
                     out_buf_pairs.seek(0); out_buf_pairs.truncate(0)
                     out_buf_prov.seek(0); out_buf_prov.truncate(0)
 
+                if total_s1 % 10000 == 0:
+                    elapsed = time.perf_counter() - t0_query
+                    qps = total_s1 / elapsed if elapsed > 0 else 0
+                    rem = max(0, total_expected_s1 - total_s1)
+                    eta_m = (rem / qps) / 60 if qps > 0 else 0
+                    print(f"[{total_s1:,}/{total_expected_s1:,}] Throughput: {qps:,.1f} q/s | Elapsed: {elapsed:.1f}s | ETA: {eta_m:.1f} min | Pairs: {total_pairs:,}", flush=True)
+
                 # Recall audit
                 if eid in ground_truth:
                     true_cands = ground_truth[eid]
@@ -768,18 +879,25 @@ def run_fast_blocking(
     query_duration = time.perf_counter() - t0_query
 
     cands_arr = np.array(cands_per_s1) if cands_per_s1 else np.array([0])
+    mean_c = round(float(np.mean(cands_arr)), 2)
+    p90_c = int(np.percentile(cands_arr, 90))
     summary: Dict[str, Any] = {
         "engine": "FastNormalizedBlocker",
         "total_source1_entities": total_s1,
+        "s1_count": total_s1,
         "total_candidate_pairs": total_pairs,
+        "total_pairs": total_pairs,
         "singletons_with_zero_candidates": singletons,
+        "singleton_s1_count": singletons,
+        "mean_candidates_per_s1": mean_c,
+        "p90_candidates_per_s1": p90_c,
         "indexing_duration_s": round(idx_duration, 4),
         "query_duration_s": round(query_duration, 4),
         "throughput_queries_per_s": round(total_s1 / query_duration, 2) if query_duration > 0 else 0,
         "candidates_per_s1": {
-            "mean": round(float(np.mean(cands_arr)), 2),
+            "mean": mean_c,
             "median": int(np.median(cands_arr)),
-            "p90": int(np.percentile(cands_arr, 90)),
+            "p90": p90_c,
             "p95": int(np.percentile(cands_arr, 95)),
             "max": int(np.max(cands_arr)),
         }
@@ -820,12 +938,16 @@ def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="Fast Normalized Blocking Engine")
     parser.add_argument("--source1", type=Path, nargs="+", required=True)
-    parser.add_argument("--candidate-sources", type=Path, nargs="+", required=True)
+    parser.add_argument("--candidate-sources", "--candidates", dest="candidate_sources", type=Path, nargs="+", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--ground-truth", type=Path, default=None)
     parser.add_argument("--max-candidates", type=int, default=MAX_CANDIDATES)
     parser.add_argument("--top-k-sparse", type=int, default=TOP_K_SPARSE)
     parser.add_argument("--similarity-floor", type=float, default=SIMILARITY_FLOOR)
+    parser.add_argument("--num-workers", type=int, default=0, help="Compatibility flag")
+    parser.add_argument("--checkpoint-interval", type=int, default=10000, help="Compatibility flag")
+    parser.add_argument("--no-resume", action="store_true", help="Compatibility flag")
+    parser.add_argument("--no-cache-index", action="store_true", help="Compatibility flag")
     args = parser.parse_args()
 
     run_fast_blocking(

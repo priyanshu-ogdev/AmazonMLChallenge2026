@@ -130,11 +130,11 @@ class TestDecisionContracts(unittest.TestCase):
         self.assertEqual(row2_non["matched_entity_ids"], "S2-shared")
 
     def test_stage4_decision_self_match_prevention(self):
-        """Verify candidate pairs where candidate_entity_id == source1_entity_id are ignored."""
+        """Verify candidate pairs where candidate_entity_id == source1_entity_id or non-S2/S3 are ignored."""
         scored = pd.DataFrame({
-            "source1_entity_id": ["S1-1", "S1-1"],
-            "candidate_entity_id": ["S1-1", "S2-valid"],
-            "calibrated_score": [0.99, 0.85],
+            "source1_entity_id": ["S1-1", "S1-1", "S1-1"],
+            "candidate_entity_id": ["S1-1", "S1-2", "S2-valid"],
+            "calibrated_score": [0.99, 0.95, 0.85],
         })
         results = assemble_matching_results(scored, ["S1-1"], threshold=0.50, injective=True)
         self.assertEqual(results.iloc[0]["matched_entity_ids"], "S2-valid")
