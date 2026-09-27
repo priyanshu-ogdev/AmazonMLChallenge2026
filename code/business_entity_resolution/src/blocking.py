@@ -1237,7 +1237,7 @@ def _query_worker(
                 for c in candidates:
                     dw_buf.writerow(c)
                     
-            if (i + 1) % _IO_BATCH_SIZE == 0:
+            if (i + 1) % 100_000 == 0:
                 pf.write(out_buf_pairs.getvalue())
                 pvf.write(out_buf_prov.getvalue())
                 out_buf_pairs.seek(0)
