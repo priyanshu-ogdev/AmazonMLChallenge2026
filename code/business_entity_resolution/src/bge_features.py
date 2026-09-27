@@ -174,26 +174,27 @@ def build_bge_features(
         device=device,
     )
     embeddings = encoder.encode([records[entity_id] for entity_id in entity_ids])
-    embedding_by_id = dict(zip(entity_ids, embeddings))
-
-    rows = []
-    for source1_id, candidate_id in candidate_pairs:
-        similarity = float(np.dot(embedding_by_id[source1_id], embedding_by_id[candidate_id]))
-        rows.append(
-            {
-                "source1_entity_id": source1_id,
-                "candidate_entity_id": candidate_id,
-                "bge_cosine": similarity,
-                "bge_cosine_missing": int(
-                    source1_id in empty_text_ids or candidate_id in empty_text_ids
-                ),
-            }
-        )
-
-    result = pd.DataFrame(
-        rows,
-        columns=["source1_entity_id", "candidate_entity_id", "bge_cosine", "bge_cosine_missing"],
-    )
+    id_to_idx = {entity_id: i for i, entity_id in enumerate(entity_ids)}
+    
+    s1_ids = [pair[0] for pair in candidate_pairs]
+    cand_ids = [pair[1] for pair in candidate_pairs]
+    s1_indices = [id_to_idx[sid] for sid in s1_ids]
+    cand_indices = [id_to_idx[cid] for cid in cand_ids]
+    
+    # Vectorized cosine similarity (embeddings are already L2 normalized)
+    similarities = np.einsum("ij,ij->i", embeddings[s1_indices], embeddings[cand_indices])
+    
+    # Vectorized missing text flags
+    s1_missing = np.array([sid in empty_text_ids for sid in s1_ids], dtype=np.int8)
+    cand_missing = np.array([cid in empty_text_ids for cid in cand_ids], dtype=np.int8)
+    missing_flags = np.maximum(s1_missing, cand_missing)
+    
+    result = pd.DataFrame({
+        "source1_entity_id": s1_ids,
+        "candidate_entity_id": cand_ids,
+        "bge_cosine": similarities,
+        "bge_cosine_missing": missing_flags,
+    })
     output_file.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_file, sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
     metadata = {

@@ -156,83 +156,50 @@ def pair_feature_row(
     canon_right = right["canonical_country"]
     match_flag = country_match_flag(canon_left, canon_right)
 
-    row: Dict[str, object] = {
-        "source1_entity_id": left["entity_id"],
-        "candidate_entity_id": right["entity_id"],
-        # Raw country strings: DROP_CATEGORICAL in Stage 3 (not GBM inputs).
-        "source1_country": left["country"],
-        "candidate_country": right["country"],
-        # Canonical country strings: also dropped by Stage 3, used for
-        # fold stratification and per-country diagnostics only.
-        "source1_canonical_country": canon_left,
-        "candidate_canonical_country": canon_right,
-        "source_is_s3": int(str(right["entity_id"]).startswith("S3-")),
-        # country_equal uses canonicalized form: handles US/USA/us and
-        # France/FR correctly. Value is 0.0/1.0; None is stored as -1.0 to allow
-        # the GBM to learn a missing-country branch.
-        "country_equal": (
-            -1.0 if match_flag is None else (1.0 if match_flag else 0.0)
-        ),
-        "country_equal_missing": int(match_flag is None),
-        "left_country_missing": int(not left["country"]),
-        "right_country_missing": int(not right["country"]),
-        "name_both_missing": int(not name_left and not name_right),
-        "address_both_missing": int(not address_left and not address_right),
-        "name_exact": int(bool(name_left) and name_left == name_right),
-        "address_exact": int(bool(address_left) and address_left == address_right),
-        "name_jaccard": _jaccard(name_tokens_left, name_tokens_right),
-        "name_overlap": _overlap(name_tokens_left, name_tokens_right),
-        "name_edit_similarity": _safe_ratio(name_left, name_right),
-        "name_char_trigram_jaccard": _jaccard(
-            left["name_trigrams"], right["name_trigrams"]
-        ),
-        "address_jaccard": _jaccard(address_tokens_left, address_tokens_right),
-        "address_overlap": _overlap(address_tokens_left, address_tokens_right),
-        "address_edit_similarity": _safe_ratio(address_left, address_right),
-        "address_char_trigram_jaccard": _jaccard(
-            left["address_trigrams"], right["address_trigrams"]
-        ),
-        "name_number_overlap": _overlap(name_numbers_left, name_numbers_right),
-        "address_number_overlap": _overlap(
-            address_numbers_left, address_numbers_right
-        ),
-        "postal_equal": int(
-            bool(left["postal"])
-            and bool(right["postal"])
-            and left["postal"] == right["postal"]
-        ),
-        "postal_missing_either": int(not left["postal"] or not right["postal"]),
-        "name_length_abs_diff": abs(len(name_left) - len(name_right)),
-        "address_length_abs_diff": abs(len(address_left) - len(address_right)),
-        "same_name_different_address": int(
-            bool(name_left)
-            and name_left == name_right
-            and bool(address_left)
-            and bool(address_right)
-            and address_left != address_right
-        ),
-        "same_address_different_name": int(
-            bool(address_left)
-            and address_left == address_right
-            and bool(name_left)
-            and bool(name_right)
-            and name_left != name_right
-        ),
-        # candidate_rank is monotonic-decreasing (-1 constraint). Missing values
-        # use 999.0 (worse than any real rank) to prevent the constraint from treating
-        # missing ranks as superior to rank 0.
-        "candidate_rank": 999.0 if left_rank is None else float(left_rank),
-        "candidate_rank_missing": int(left_rank is None),
-        "rank_margin_from_best": 999.0 if left_rank is None else max(0.0, float(left_rank) - 1.0),
-        "best_blocker_score": -1.0 if best_score is None else float(best_score),
-        "best_blocker_score_missing": int(best_score is None),
-        "best_blocker_score_diff": 0.0 if score_margin_to_best is None else float(score_margin_to_best),
-        "best_blocker_score_diff_missing": int(score_margin_to_best is None),
-        "blocker_count": 0 if blocker_count is None else int(blocker_count),
-        "candidate_count_for_s1": 1 if candidate_count is None else int(candidate_count),
-        "has_blocker_provenance": int(bool(provenance)),
-        "blocker_provenance": provenance or "",
-    }
+    row = (
+        left["entity_id"],
+        right["entity_id"],
+        left["country"],
+        right["country"],
+        canon_left,
+        canon_right,
+        int(str(right["entity_id"]).startswith("S3-")),
+        -1.0 if match_flag is None else (1.0 if match_flag else 0.0),
+        int(match_flag is None),
+        int(not left["country"]),
+        int(not right["country"]),
+        int(not name_left and not name_right),
+        int(not address_left and not address_right),
+        int(bool(name_left) and name_left == name_right),
+        int(bool(address_left) and address_left == address_right),
+        _jaccard(name_tokens_left, name_tokens_right),
+        _overlap(name_tokens_left, name_tokens_right),
+        _safe_ratio(name_left, name_right),
+        _jaccard(left["name_trigrams"], right["name_trigrams"]),
+        _jaccard(address_tokens_left, address_tokens_right),
+        _overlap(address_tokens_left, address_tokens_right),
+        _safe_ratio(address_left, address_right),
+        _jaccard(left["address_trigrams"], right["address_trigrams"]),
+        _overlap(name_numbers_left, name_numbers_right),
+        _overlap(address_numbers_left, address_numbers_right),
+        int(bool(left["postal"]) and bool(right["postal"]) and left["postal"] == right["postal"]),
+        int(not left["postal"] or not right["postal"]),
+        abs(len(name_left) - len(name_right)),
+        abs(len(address_left) - len(address_right)),
+        int(bool(name_left) and name_left == name_right and bool(address_left) and bool(address_right) and address_left != address_right),
+        int(bool(address_left) and address_left == address_right and bool(name_left) and bool(name_right) and name_left != name_right),
+        999.0 if left_rank is None else float(left_rank),
+        int(left_rank is None),
+        999.0 if left_rank is None else max(0.0, float(left_rank) - 1.0),
+        -1.0 if best_score is None else float(best_score),
+        int(best_score is None),
+        0.0 if score_margin_to_best is None else float(score_margin_to_best),
+        int(score_margin_to_best is None),
+        0 if blocker_count is None else int(blocker_count),
+        1 if candidate_count is None else int(candidate_count),
+        int(bool(provenance)),
+        provenance or "",
+    )
     return row
 
 
@@ -295,13 +262,13 @@ def _feature_worker(
     normalized: Optional[Dict[str, Dict[str, object]]],
     provenance: Optional[Dict[Tuple[str, str], Tuple[str, Optional[float], Optional[float], Optional[int]]]],
     s1_max_score: Optional[Dict[str, float]],
-) -> List[Dict[str, object]]:
+) -> List[Tuple[Any, ...]]:
     global _shared_normalized, _shared_provenance, _shared_s1_max_score
     normalized = normalized if normalized is not None else _shared_normalized
     provenance = provenance if provenance is not None else _shared_provenance
     s1_max_score = s1_max_score if s1_max_score is not None else _shared_s1_max_score
 
-    worker_rows: List[Dict[str, object]] = []
+    worker_rows: List[Tuple[Any, ...]] = []
     for s1_id, cand_ids in chunk_items:
         cand_count = len(cand_ids)
         max_s = s1_max_score.get(s1_id)
@@ -439,7 +406,7 @@ def build_pair_features(
     else:
         chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
 
-    rows: List[Dict[str, object]] = []
+    rows: List[Tuple[Any, ...]] = []
     if num_workers <= 1 or not chunks:
         rows = _feature_worker(items, normalized, provenance, s1_max_score)
     else:
@@ -451,10 +418,15 @@ def build_pair_features(
         try:
             import multiprocessing
             ctx = multiprocessing.get_context("fork")
+            ExecutorClass = ProcessPoolExecutor
+            kwargs = {"mp_context": ctx}
         except (ValueError, ImportError):
-            ctx = None
+            from concurrent.futures import ThreadPoolExecutor
+            ExecutorClass = ThreadPoolExecutor
+            kwargs = {}
+            print("[INFO] Windows/spawn environment detected. Using ThreadPoolExecutor to share RAM safely.", flush=True)
 
-        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as pool:
+        with ExecutorClass(max_workers=num_workers, **kwargs) as pool:
             futures = [
                 pool.submit(_feature_worker, chunk, None, None, None)
                 for chunk in chunks
