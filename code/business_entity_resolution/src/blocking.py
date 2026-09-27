@@ -713,15 +713,11 @@ class MultiChannelBlocker:
                     top_items = heapq.nlargest(15, s1_weights.items(), key=lambda kv: kv[1])
                     s1_weights = dict(top_items)
 
-                # Accumulate candidate scores (one dict lookup per posting)
-                cand_scores: Dict[str, float] = {}
+                # Accumulate candidate scores (faster aggregation via defaultdict)
+                cand_scores: Dict[str, float] = defaultdict(float)
                 for gram, w_s1 in s1_weights.items():
                     for cid in _hits(index_ngrams, gram):
-                        prev = cand_scores.get(cid, 0.0)
-                        if prev == 0.0:
-                            cand_scores[cid] = w_s1
-                        else:
-                            cand_scores[cid] = prev + w_s1
+                        cand_scores[cid] += w_s1
 
                 if cand_scores:
                     s1_norm = _sqrt(sum(w * w for w in s1_weights.values()))
@@ -763,14 +759,10 @@ class MultiChannelBlocker:
                     top_t = heapq.nlargest(10, s1_token_weights.items(), key=lambda kv: kv[1])
                     s1_token_weights = dict(top_t)
 
-                token_scores: Dict[str, float] = {}
+                token_scores: Dict[str, float] = defaultdict(float)
                 for tok, w_s1 in s1_token_weights.items():
                     for cid in _hits(index_tokens, tok):
-                        prev = token_scores.get(cid, 0.0)
-                        if prev == 0.0:
-                            token_scores[cid] = w_s1
-                        else:
-                            token_scores[cid] = prev + w_s1
+                        token_scores[cid] += w_s1
 
                 s1_norm = _sqrt(sum(w * w for w in s1_token_weights.values()))
                 if token_scores and s1_norm > 0.0:
@@ -814,52 +806,66 @@ class MultiChannelBlocker:
         if not hit_best_score:
             return []
 
-        ranked_candidates = []
-        s1_entity_id  = s1.entity_id
-        s1_country    = s1.canonical_country or "global"
-        for cid in hit_best_score:
+        # 1. Build only cheap sort keys for ALL candidates
+        cheap_candidates = []
+        for cid, best_score in hit_best_score.items():
             blockers_list = hit_blockers[cid]
-            # Build sorted unique set only once (avoid set() then sorted() separately)
             if len(blockers_list) == 1:
-                uniq_sorted = blockers_list
                 blocker_cnt = 1
-                is_exact    = hit_exact[cid] or (blockers_list[0] in _EXACT_B)
+                is_exact = hit_exact[cid] or (blockers_list[0] in _EXACT_B)
             else:
-                uniq_set    = set(blockers_list)
-                uniq_sorted = sorted(uniq_set)
-                blocker_cnt = len(uniq_set)
-                is_exact    = hit_exact[cid] or bool(uniq_set & _EXACT_B)
-
-            best_score      = hit_best_score[cid]
-            best_rank       = hit_best_rank[cid]
-            provenance_str  = ",".join(uniq_sorted)
-            # Source prefix: "S2-123" -> "S2", extracted without function call
-            dash = cid.index("-")
-            cand_source = cid[:dash]
-
+                blocker_cnt = len(set(blockers_list))
+                is_exact = hit_exact[cid] or bool(set(blockers_list) & _EXACT_B)
+            
+            best_rank = hit_best_rank[cid]
+            
+            # Using -best_score is sufficient for sorting, no need to call round() thousands of times here
             sort_key = (
                 -blocker_cnt,
                 -1 if is_exact else 0,
-                -round(best_score, 4),
+                -best_score,
                 best_rank,
-                cid,
+                cid
             )
-            ranked_candidates.append((
-                sort_key,
-                CandidateHit((
-                    s1_entity_id,           # 0: source1_entity_id
-                    cid,                    # 1: candidate_entity_id
-                    cand_source,            # 2: candidate_source
-                    provenance_str,         # 3: blocker_provenance
-                    blocker_cnt,            # 4: blocker_count
-                    best_rank,              # 5: best_blocker_rank
-                    round(best_score, 4),   # 6: best_blocker_score
-                    s1_country,             # 7: country_partition
-                )),
-            ))
+            cheap_candidates.append( (sort_key, cid, blockers_list) )
 
-        ranked_candidates.sort(key=lambda item: item[0])
-        return [item[1] for item in ranked_candidates[:max_candidates]]
+        # 2. Sort to find the top candidates (we only need the top max_candidates)
+        cheap_candidates.sort(key=lambda item: item[0])
+        top_cheap = cheap_candidates[:max_candidates]
+
+        # 3. Build the expensive final objects ONLY for the top K candidates
+        s1_entity_id  = s1.entity_id
+        s1_country    = s1.canonical_country or "global"
+        final_candidates = []
+        
+        for sort_key, cid, blockers_list in top_cheap:
+            if len(blockers_list) == 1:
+                uniq_sorted = blockers_list
+                blocker_cnt = 1
+            else:
+                uniq_sorted = sorted(set(blockers_list))
+                blocker_cnt = len(uniq_sorted)
+                
+            provenance_str = ",".join(uniq_sorted)
+            dash = cid.index("-")
+            cand_source = cid[:dash]
+            best_score = hit_best_score[cid]
+            best_rank = hit_best_rank[cid]
+            
+            final_candidates.append(
+                CandidateHit((
+                    s1_entity_id,
+                    cid,
+                    cand_source,
+                    provenance_str,
+                    blocker_cnt,
+                    best_rank,
+                    round(best_score, 4),
+                    s1_country,
+                ))
+            )
+            
+        return final_candidates
 
     # ------------------------------------------------------------------
     # Phase 2: Index Serialization Cache
