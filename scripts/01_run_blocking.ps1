@@ -70,6 +70,7 @@ $python = Get-PythonExecutable -ExplicitPath $PythonPath
 if (-not $OutputDir) {
     $OutputDir = Join-Path $DEFAULT_OUT "phase1_blocking_$Split"
 }
+$OutputDir = Resolve-FullPath $OutputDir
 Ensure-Directory $OutputDir
 
 # ------------------------------------------------------------------------------
@@ -151,6 +152,12 @@ if ($RunStage0) {
         }
     }
 }
+
+$s1File = Resolve-FullPath $s1File
+$s2File = Resolve-FullPath $s2File
+$s3File = Resolve-FullPath $s3File
+if ($gtFile) { $gtFile = Resolve-FullPath $gtFile }
+if ($DenseEmbeddings) { $DenseEmbeddings = Resolve-FullPath $DenseEmbeddings }
 
 Write-Info "Source 1: $s1File"
 Write-Info "Source 2: $s2File"

@@ -69,9 +69,11 @@ $python = Get-PythonExecutable -ExplicitPath $PythonPath
 if (-not $DataDir) {
     $DataDir = Join-Path $DEFAULT_OUT "phase2_prepared_data"
 }
+$DataDir = Resolve-FullPath $DataDir
 if (-not $OutputDir) {
     $OutputDir = Join-Path $DEFAULT_OUT "phase2_models"
 }
+$OutputDir = Resolve-FullPath $OutputDir
 Ensure-Directory $OutputDir
 
 $gateModelDir   = Join-Path $OutputDir "bge-m3-lora-gate"

@@ -126,12 +126,14 @@ if ($allFound) {
 
 # 5. Run Module Architecture & Interface Validator
 Write-Step "0.5" "Running Module Interface & Syntax Validation..."
-Invoke-PythonScript "code\business_entity_resolution\validate_modules.py" @() "validate_modules.py" -PythonExe $python
+$valScript = Join-Path $CODE_DIR "validate_modules.py"
+Invoke-PythonScript $valScript @() "validate_modules.py" -PythonExe $python
 
 # 6. Run Unit Test Suite
 if (-not $SkipTests) {
     Write-Step "0.6" "Executing Unit Test Discovery Suite..."
-    Invoke-PythonModule "unittest" @("discover", "-s", "tests") "Unit Tests" -PythonExe $python
+    $testDir = Join-Path $CODE_DIR "tests"
+    Invoke-PythonModule "unittest" @("discover", "-s", $testDir, "-t", $CODE_DIR) "Unit Tests" -PythonExe $python
 }
 
 Write-Header "PHASE 0 COMPLETE: ENVIRONMENT IS READY"

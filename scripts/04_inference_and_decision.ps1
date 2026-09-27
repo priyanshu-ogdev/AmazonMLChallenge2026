@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Phase 4: Test Candidate Scoring & Stage 4 Submission Assembly.
 .DESCRIPTION
@@ -54,6 +54,7 @@ $python = Get-PythonExecutable -ExplicitPath $PythonPath
 if (-not $OutputDir) {
     $OutputDir = Join-Path $DEFAULT_OUT "phase4_submission"
 }
+$OutputDir = Resolve-FullPath $OutputDir
 Ensure-Directory $OutputDir
 
 if (-not $ArtifactDir) {
@@ -68,6 +69,7 @@ if (-not $ArtifactDir) {
         throw "ArtifactDir not specified and not found at $autoArt. Run Phase 3 first."
     }
 }
+$ArtifactDir = Resolve-FullPath $ArtifactDir
 
 if (-not $TestFeatures) {
     $autoFeat = Join-Path $DEFAULT_OUT "phase2_features_test\pair_features.tsv"
@@ -81,6 +83,7 @@ if (-not $TestFeatures) {
         throw "TestFeatures not specified and not found at $autoFeat. Run Phase 2c on test split first."
     }
 }
+$TestFeatures = Resolve-FullPath $TestFeatures
 
 $testFeatParent = Split-Path -Parent $TestFeatures
 if (-not $testFeatParent) { $testFeatParent = "." }
@@ -89,16 +92,19 @@ if (-not $TestBgeFeatures) {
     $autoBge = Join-Path $testFeatParent "bge_pair_features.tsv"
     if (Test-Path $autoBge) { $TestBgeFeatures = $autoBge; Write-Info "Auto-detected Test BGE Features: $TestBgeFeatures" }
 }
+if ($TestBgeFeatures) { $TestBgeFeatures = Resolve-FullPath $TestBgeFeatures }
 
 if (-not $TestQwenFeatures) {
     $autoQwen = Join-Path $testFeatParent "qwen_pair_features.tsv"
     if (Test-Path $autoQwen) { $TestQwenFeatures = $autoQwen; Write-Info "Auto-detected Test Qwen Features: $TestQwenFeatures" }
 }
+if ($TestQwenFeatures) { $TestQwenFeatures = Resolve-FullPath $TestQwenFeatures }
 
 if (-not $TestQwenMatcherFeatures) {
     $autoMatcher = Join-Path $testFeatParent "qwen_matcher_features.tsv"
     if (Test-Path $autoMatcher) { $TestQwenMatcherFeatures = $autoMatcher; Write-Info "Auto-detected Test Qwen Matcher Features: $TestQwenMatcherFeatures" }
 }
+if ($TestQwenMatcherFeatures) { $TestQwenMatcherFeatures = Resolve-FullPath $TestQwenMatcherFeatures }
 
 if (-not $TestCandidateFile) {
     $autoCand = Join-Path $DEFAULT_OUT "phase1_blocking_test\candidate_pairs.tsv"
@@ -110,6 +116,7 @@ if (-not $TestCandidateFile) {
         Write-Info "DryRun: Using planned Test Candidates: $TestCandidateFile"
     }
 }
+if ($TestCandidateFile) { $TestCandidateFile = Resolve-FullPath $TestCandidateFile }
 
 # Resolve test source paths -- always passed so scoring.py can load TF-IDF features
 $s1TestFile = Join-Path $DATASET_DIR "test\test_source1.tsv"
@@ -124,6 +131,9 @@ if ((Test-Path $s1Norm) -and (Test-Path $s2Norm) -and (Test-Path $s3Norm)) {
     $s1TestFile = $s1Norm; $s2TestFile = $s2Norm; $s3TestFile = $s3Norm
     Write-Info "Using Stage 0 normalized test source files."
 }
+$s1TestFile = Resolve-FullPath $s1TestFile
+$s2TestFile = Resolve-FullPath $s2TestFile
+$s3TestFile = Resolve-FullPath $s3TestFile
 
 $scoredCandidatesOut = Join-Path $OutputDir "scored_candidates.tsv"
 $matchingResultsOut  = Join-Path $OutputDir "matching_results.tsv"

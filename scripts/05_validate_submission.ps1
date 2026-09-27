@@ -42,9 +42,11 @@ $python = Get-PythonExecutable -ExplicitPath $PythonPath
 if (-not $SubmissionDir) {
     $SubmissionDir = Join-Path $DEFAULT_OUT "phase4_submission"
 }
+$SubmissionDir = Resolve-FullPath $SubmissionDir
 if (-not $TestDir) {
     $TestDir = Join-Path $DATASET_DIR "test"
 }
+$TestDir = Resolve-FullPath $TestDir
 
 $matchingFile  = Join-Path $SubmissionDir "matching_results.tsv"
 $candidateFile = Join-Path $SubmissionDir "candidate_pairs.tsv"

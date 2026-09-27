@@ -60,14 +60,17 @@ $python = Get-PythonExecutable -ExplicitPath $PythonPath
 if (-not $DatasetDir) {
     $DatasetDir = $DATASET_DIR
 }
+$DatasetDir = Resolve-FullPath $DatasetDir
 if (-not $OutputDir) {
     $OutputDir = Join-Path $DEFAULT_OUT "phase2_qwen_matcher"
 }
+$OutputDir = Resolve-FullPath $OutputDir
 Ensure-Directory $OutputDir
 
 if (-not $BlockingCandidates) {
     $BlockingCandidates = Join-Path $DEFAULT_OUT "phase1_blocking_train\candidate_pairs.tsv"
 }
+$BlockingCandidates = Resolve-FullPath $BlockingCandidates
 
 $gtFile = Join-Path $DatasetDir "train_ground_truth.tsv"
 $s1File = Join-Path $DatasetDir "train_source1.tsv"

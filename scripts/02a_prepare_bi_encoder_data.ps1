@@ -53,7 +53,12 @@ $python = Get-PythonExecutable -ExplicitPath $PythonPath
 if (-not $OutputDir) {
     $OutputDir = Join-Path $DEFAULT_OUT "phase2_prepared_data"
 }
+$OutputDir = Resolve-FullPath $OutputDir
 Ensure-Directory $OutputDir
+
+if ($BlockingCandidates) {
+    $BlockingCandidates = Resolve-FullPath $BlockingCandidates
+}
 
 Write-Step "2a.1" "Configuring Dataset Parameters..."
 Write-Info "Sample Per Country:     $SamplePerCountry (US + India balanced)"

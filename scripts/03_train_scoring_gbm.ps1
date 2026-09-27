@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Phase 3: Stage 3 Grouped-OOF Gradient Boosted Decision Tree (GBM) Training & Calibration.
 .DESCRIPTION
@@ -73,6 +73,7 @@ Initialize-Gpu -PythonExe $python
 if (-not $OutputDir) {
     $OutputDir = Join-Path $DEFAULT_OUT "phase3_gbm"
 }
+$OutputDir = Resolve-FullPath $OutputDir
 Ensure-Directory $OutputDir
 
 # Auto-locate features from Phase 2c if not specified
@@ -88,6 +89,7 @@ if (-not $FeaturesFile) {
         throw "FeaturesFile not specified and not found at $autoFeat. Run Phase 2c first."
     }
 }
+$FeaturesFile = Resolve-FullPath $FeaturesFile
 
 $featParent = Split-Path -Parent $FeaturesFile
 if (-not $featParent) { $featParent = "." }
@@ -96,20 +98,24 @@ if (-not $BgeFeatures) {
     $autoBge = Join-Path $featParent "bge_pair_features.tsv"
     if (Test-Path $autoBge) { $BgeFeatures = $autoBge; Write-Info "Auto-detected BGE Features: $BgeFeatures" }
 }
+if ($BgeFeatures) { $BgeFeatures = Resolve-FullPath $BgeFeatures }
 
 if (-not $QwenFeatures) {
     $autoQwen = Join-Path $featParent "qwen_pair_features.tsv"
     if (Test-Path $autoQwen) { $QwenFeatures = $autoQwen; Write-Info "Auto-detected Qwen Features: $QwenFeatures" }
 }
+if ($QwenFeatures) { $QwenFeatures = Resolve-FullPath $QwenFeatures }
 
 if (-not $QwenMatcherFeatures) {
     $autoMatcher = Join-Path $featParent "qwen_matcher_features.tsv"
     if (Test-Path $autoMatcher) { $QwenMatcherFeatures = $autoMatcher; Write-Info "Auto-detected Qwen Matcher Features: $QwenMatcherFeatures" }
 }
+if ($QwenMatcherFeatures) { $QwenMatcherFeatures = Resolve-FullPath $QwenMatcherFeatures }
 
 if (-not $GroundTruthFile) {
     $GroundTruthFile = Join-Path $DATASET_DIR "train\train_ground_truth.tsv"
 }
+$GroundTruthFile = Resolve-FullPath $GroundTruthFile
 
 # Always resolve source paths -- needed by scoring.py when TF-IDF vectorizer is saved
 $s1Train = Join-Path $DATASET_DIR "train\train_source1.tsv"
@@ -124,6 +130,9 @@ if ((Test-Path $s1Norm) -and (Test-Path $s2Norm) -and (Test-Path $s3Norm)) {
     $s1Train = $s1Norm; $s2Train = $s2Norm; $s3Train = $s3Norm
     Write-Info "Using Stage 0 normalized source files for TF-IDF."
 }
+$s1Train = Resolve-FullPath $s1Train
+$s2Train = Resolve-FullPath $s2Train
+$s3Train = Resolve-FullPath $s3Train
 
 Write-Step "3.1" "Configuring Stage 3 Training Parameters..."
 Write-Info "Booster:                $Booster (eta=$Eta)"

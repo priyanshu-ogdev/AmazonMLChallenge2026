@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Phase 2c: Pair Feature Extraction with GPU/CPU Parallelism.
 .DESCRIPTION
@@ -78,6 +78,7 @@ Initialize-Gpu -PythonExe $python
 if (-not $OutputDir) {
     $OutputDir = Join-Path $DEFAULT_OUT "phase2_features_$Split"
 }
+$OutputDir = Resolve-FullPath $OutputDir
 Ensure-Directory $OutputDir
 
 # Auto-locate candidate pairs if not specified
@@ -93,6 +94,7 @@ if (-not $CandidateFile) {
         throw "CandidateFile not specified and not found at $autoCand. Run Phase 1 first."
     }
 }
+$CandidateFile = Resolve-FullPath $CandidateFile
 
 $candParent = Split-Path -Parent $CandidateFile
 if (-not $candParent) { $candParent = "." }
@@ -103,6 +105,9 @@ if (-not $ProvenanceFile) {
         $ProvenanceFile = $autoProv
         Write-Info "Auto-detected Candidate Provenance: $ProvenanceFile"
     }
+}
+if ($ProvenanceFile) {
+    $ProvenanceFile = Resolve-FullPath $ProvenanceFile
 }
 
 # Resolve Source TSVs -- prefer Stage 0 normalized files when present
@@ -129,6 +134,9 @@ foreach ($s0s1 in $stage0Candidates) {
         break
     }
 }
+$s1File = Resolve-FullPath $s1File
+$s2File = Resolve-FullPath $s2File
+$s3File = Resolve-FullPath $s3File
 
 # Resolve batch sizes -- GPU vs CPU defaults
 if ($BgeBatchSize -le 0)  { $BgeBatchSize  = if ($script:_GpuAvailable) { 128 } else { 32  } }
@@ -177,7 +185,7 @@ if (-not $DryRun) {
         param($PyExe, $CodeDir, $ProjRoot, $Args)
         $env:PYTHONPATH       = "$CodeDir;$ProjRoot"
         $env:PYTHONUNBUFFERED = "1"
-        Set-Location $CodeDir
+        Set-Location $ProjRoot
         & $PyExe -u @Args 2>&1
         exit $LASTEXITCODE
     } -ArgumentList $jobPython, $jobCodeDir, $jobProjRoot, $jobArgs
