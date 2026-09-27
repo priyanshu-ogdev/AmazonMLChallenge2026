@@ -117,6 +117,8 @@ def write_matching_results(
     if threshold is not None:
         effective_threshold = float(threshold)
     elif metadata_file is not None:
+        with open(metadata_file, encoding="utf-8") as handle:
+            metadata = json.load(handle)
         if injective and "threshold_injective" in metadata:
             effective_threshold = float(metadata["threshold_injective"])
         elif not injective and "threshold_independent" in metadata:

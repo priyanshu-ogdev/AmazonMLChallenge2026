@@ -442,6 +442,19 @@ def _canonicalize_legal_suffixes(name: str) -> str:
     For short names (<=3 tokens), all tokens are eligible.
     Also unifies 'p ltd' / 'p limited' (from 'P. Ltd.') -> 'private limited'.
     """
+    # Multi-word trailing legal forms canonicalization (French corporate forms)
+    for phrase, canon in (
+        ("societe par actions simplifiee", "sas"),
+        ("societe a responsabilite limitee", "sarl"),
+        ("entreprise unipersonnelle a responsabilite limitee", "eurl"),
+        ("societe anonyme", "sa"),
+    ):
+        if name.endswith(" " + phrase):
+            name = name[: -len(phrase)] + canon
+            break
+        elif name == phrase:
+            return canon
+
     tokens = name.split()
     if not tokens:
         return ""
@@ -692,7 +705,10 @@ def source_from_entity_id(entity_id: str) -> str:
 
 _DIGIT_RUN_RE = re.compile(r"\b\d{4,10}(?:-\d{3,4})?\b")
 _TRAILING_SEGMENT_RE = re.compile(r",\s*([^,]+)$")
-_STREET_NUM_RE = re.compile(r"^\s*(?:#+\s*)?(\d{1,6})\b")
+_STREET_NUM_RE = re.compile(
+    r"^\s*(?:#+\s*|(?:plot|shop|flat|door|h\.?\s*no|kh\.?\s*no|sy\.?\s*no|bldg|building|ward|gali|road|no)\s*(?:no\.?)?\s*[-:]?\s*)?(\d{1,6})\b",
+    re.IGNORECASE,
+)
 
 
 def extract_structural_fields(address: str) -> Dict[str, object]:

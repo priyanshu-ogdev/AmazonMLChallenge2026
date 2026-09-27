@@ -922,7 +922,10 @@ class TestStage3Scoring(unittest.TestCase):
 
         # Feed directly into prepare_matrix
         matrix, cols = prepare_matrix(feat_df)
-        self.assertEqual(len(cols), 35)
+        self.assertEqual(len(cols), 38)
+        self.assertIn("name_token_sort_ratio", cols)
+        self.assertIn("name_fuzz_ratio", cols)
+        self.assertIn("address_token_set_ratio", cols)
 
         # Assert ID and categorical columns are excluded
         excluded_expected = {

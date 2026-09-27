@@ -1,0 +1,54 @@
+{
+  "s1_count": 1000,
+  "total_source1_entities": 1000,
+  "total_candidate_pairs": 22247,
+  "singletons_with_zero_candidates": 0,
+  "singleton_s1_count": 0,
+  "candidates_per_s1": {
+    "mean": 22.25,
+    "median": 19,
+    "p90": 40,
+    "p95": 51,
+    "max": 99
+  },
+  "mean_candidates_per_s1": 22.25,
+  "median_candidates_per_s1": 19,
+  "p90_candidates_per_s1": 40,
+  "p95_candidates_per_s1": 51,
+  "max_candidates_per_s1": 99,
+  "channel_contributions": {
+    "acronym_match": 9883,
+    "address_tokens": 11810,
+    "exact_name": 766,
+    "exact_name_street": 314,
+    "first_2_tokens": 2079,
+    "char_ngram": 1408,
+    "token_inverted": 3360
+  },
+  "configuration": {
+    "top_k_sparse": 50,
+    "top_k_dense": 50,
+    "max_candidates_per_entity": 100,
+    "similarity_floor": 0.3
+  },
+  "recall_audit": {
+    "total_ground_truth_pairs": 3517,
+    "recovered_ground_truth_pairs": 3484,
+    "pair_recall": 0.9906,
+    "entity_full_recall": 0.9683,
+    "any_hit_rate": 1.0,
+    "recall_by_country": {
+      "us": 0.9961,
+      "india": 0.9827
+    },
+    "recall_by_channel": {
+      "acronym_match": 0.6801,
+      "address_tokens": 0.9443,
+      "exact_name": 0.2172,
+      "exact_name_street": 0.0893,
+      "first_2_tokens": 0.5599,
+      "char_ngram": 0.1868,
+      "token_inverted": 0.1749
+    }
+  }
+}

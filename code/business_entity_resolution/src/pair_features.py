@@ -16,7 +16,14 @@ import csv
 import math
 import os
 import re
-import psutil
+try:
+    import psutil
+except ImportError:
+    psutil = None
+try:
+    from rapidfuzz import fuzz as _rf_fuzz
+except ImportError:
+    _rf_fuzz = None
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -44,6 +51,36 @@ def _numeric_tokens(value: str) -> Set[str]:
     return set(_NUMBER_RE.findall(value or ""))
 
 
+def _token_sort_ratio(left: str, right: str) -> float:
+    if not left and not right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+    if _rf_fuzz is not None:
+        return float(_rf_fuzz.token_sort_ratio(left, right)) / 100.0
+    return _safe_ratio(left, right)
+
+
+def _token_set_ratio(left: str, right: str) -> float:
+    if not left and not right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+    if _rf_fuzz is not None:
+        return float(_rf_fuzz.token_set_ratio(left, right)) / 100.0
+    return _safe_ratio(left, right)
+
+
+def _fuzz_ratio(left: str, right: str) -> float:
+    if not left and not right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+    if _rf_fuzz is not None:
+        return float(_rf_fuzz.ratio(left, right)) / 100.0
+    return _safe_ratio(left, right)
+
+
 class PairFeatureRow(tuple):
     """Zero-overhead tuple representing a pair feature row with key/index dual access."""
     __slots__ = ()
@@ -67,10 +104,13 @@ class PairFeatureRow(tuple):
         "name_overlap",
         "name_edit_similarity",
         "name_char_trigram_jaccard",
+        "name_token_sort_ratio",
+        "name_fuzz_ratio",
         "address_jaccard",
         "address_overlap",
         "address_edit_similarity",
         "address_char_trigram_jaccard",
+        "address_token_set_ratio",
         "name_number_overlap",
         "address_number_overlap",
         "postal_equal",
@@ -92,8 +132,8 @@ class PairFeatureRow(tuple):
         "blocker_provenance",
     )
     _FIELD_MAP = {name: i for i, name in enumerate(_FIELDS)}
-    _FIELD_MAP["candidate_count"] = 39
-    _FIELD_MAP["has_provenance"] = 40
+    _FIELD_MAP["candidate_count"] = _FIELD_MAP["candidate_count_for_s1"]
+    _FIELD_MAP["has_provenance"] = _FIELD_MAP["has_blocker_provenance"]
 
     def __getitem__(self, item):
         if isinstance(item, str):
@@ -240,10 +280,13 @@ def pair_feature_row(
         _overlap(name_tokens_left, name_tokens_right),
         _safe_ratio(name_left, name_right),
         _jaccard(left["name_trigrams"], right["name_trigrams"]),
+        _token_sort_ratio(name_left, name_right),
+        _fuzz_ratio(name_left, name_right),
         _jaccard(address_tokens_left, address_tokens_right),
         _overlap(address_tokens_left, address_tokens_right),
         _safe_ratio(address_left, address_right),
         _jaccard(left["address_trigrams"], right["address_trigrams"]),
+        _token_set_ratio(address_left, address_right),
         _overlap(name_numbers_left, name_numbers_right),
         _overlap(address_numbers_left, address_numbers_right),
         int(bool(left["postal"]) and bool(right["postal"]) and left["postal"] == right["postal"]),
@@ -458,7 +501,7 @@ def build_pair_features(
         
         # Critical Fix for Linux/Mac: 'fork' duplicates reference-counted dictionaries.
         # The dictionaries take ~10GB. Dirtied pages take ~3-4GB per worker.
-        total_ram = psutil.virtual_memory().total
+        total_ram = psutil.virtual_memory().total if psutil is not None else 32 * 1024**3
         if total_ram < (28 * 1024**3):
             print("[WARNING] Low RAM detected (< 28GB). Disabling ProcessPoolExecutor to prevent OOM crash.", flush=True)
             num_workers = 1
@@ -500,53 +543,7 @@ def build_pair_features(
             for fut in as_completed(futures):
                 rows.extend(fut.result())
 
-    feature_columns = [
-        "source1_entity_id",
-        "candidate_entity_id",
-        # Raw country strings (Stage 3 drops these as DROP_CATEGORICAL)
-        "source1_country",
-        "candidate_country",
-        # Canonical country strings (Stage 3 drops these; used for diagnostics)
-        "source1_canonical_country",
-        "candidate_canonical_country",
-        "source_is_s3",
-        # country_equal: -1=missing, 0=mismatch, 1=match (canonical)
-        "country_equal",
-        "country_equal_missing",
-        "left_country_missing",
-        "right_country_missing",
-        "name_both_missing",
-        "address_both_missing",
-        "name_exact",
-        "address_exact",
-        "name_jaccard",
-        "name_overlap",
-        "name_edit_similarity",
-        "name_char_trigram_jaccard",
-        "address_jaccard",
-        "address_overlap",
-        "address_edit_similarity",
-        "address_char_trigram_jaccard",
-        "name_number_overlap",
-        "address_number_overlap",
-        "postal_equal",
-        "postal_missing_either",
-        "name_length_abs_diff",
-        "address_length_abs_diff",
-        "same_name_different_address",
-        "same_address_different_name",
-        "candidate_rank",
-        "candidate_rank_missing",
-        "rank_margin_from_best",
-        "best_blocker_score",
-        "best_blocker_score_missing",
-        "best_blocker_score_diff",
-        "best_blocker_score_diff_missing",
-        "blocker_count",
-        "candidate_count_for_s1",
-        "has_blocker_provenance",
-        "blocker_provenance",
-    ]
+    feature_columns = list(PairFeatureRow._FIELDS)
     result = pd.DataFrame(rows, columns=feature_columns)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_file, sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")

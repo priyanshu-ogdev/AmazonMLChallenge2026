@@ -75,7 +75,7 @@ from src.normalize import (
 # Configuration defaults matching docs/04_stage1_blocking.md
 TOP_K_DENSE = 50
 TOP_K_SPARSE_OR_CHAR = 50
-MAX_CANDIDATES_PER_ENTITY = 100
+MAX_CANDIDATES_PER_ENTITY = 25
 SIMILARITY_FLOOR = 0.30
 MAX_TOKEN_DOC_FREQ = 0.02
 MAX_TOKEN_DOC_COUNT = 2500
@@ -88,7 +88,7 @@ MIN_TOKEN_LEN = 3
 INDEX_CACHE_VERSION = 5
 
 # Worker I/O batch size: flush StringIO buffer every N entities (reduces CSV writer overhead)
-_IO_BATCH_SIZE = 500
+_IO_BATCH_SIZE = 5000
 
 
 class CandidateHit(tuple):
@@ -770,98 +770,14 @@ class MultiChannelBlocker:
                 _rh(cid, "name_lead_street_trailing", 0.90, rank, True)
 
         # -------------------------------------------------------------
-        # Channel 2: Character 3-Gram Sub-Linear TF-IDF Retrieval
-        # -------------------------------------------------------------
-        s1_gram_counts = s1.ngram_counts
-        if s1_gram_counts and ngram_idf_table:
-            s1_weights: Dict[str, float] = {}
-            for gram, count in s1_gram_counts.items():
-                idf = ngram_idf_table.get(gram)
-                if idf is None:
-                    continue
-                s1_weights[gram] = (1.0 + _log(count)) * idf
-
-            if s1_weights:
-                if len(s1_weights) > 15:
-                    s1_weights = dict(heapq.nlargest(15, s1_weights.items(), key=_itemgetter_1))
-
-                cand_scores: Dict[str, float] = defaultdict(float)
-                for gram, w_s1 in s1_weights.items():
-                    for cid in _hits(index_ngrams, gram):
-                        cand_scores[cid] += w_s1
-
-                if cand_scores:
-                    s1_norm = _sqrt(sum(w * w for w in s1_weights.values()))
-                    if s1_norm > 0:
-                        sim_floor = similarity_floor
-                        cand_len_get = candidate_ngram_lens.get
-                        top_k_check = top_k_sparse * 3
-                        if len(cand_scores) > top_k_check:
-                            top_cands = heapq.nlargest(top_k_check, cand_scores.items(), key=_itemgetter_1)
-                        else:
-                            top_cands = cand_scores.items()
-
-                        scored_cands = []
-                        for cid, raw_score in top_cands:
-                            cand_len = cand_len_get(cid, 25)
-                            sim = raw_score / (s1_norm * _sqrt(cand_len if cand_len > 0 else 1))
-                            if sim >= sim_floor:
-                                scored_cands.append((-min(1.0, sim), cid))
-
-                        scored_cands.sort()
-                        for rank, (neg_sim, cid) in enumerate(scored_cands[:top_k_sparse], 1):
-                            _rh(cid, "char_ngram", -neg_sim, rank, False)
-
-        # -------------------------------------------------------------
-        # Channel 3: Token Inverted Index with Sub-Linear TF-IDF
-        # -------------------------------------------------------------
-        if s1.tokens and token_idf_table:
-            s1_token_counts = s1.token_counts
-            s1_token_weights: Dict[str, float] = {}
-            for tok, count in s1_token_counts.items():
-                idf = token_idf_table.get(tok)
-                if idf is None:
-                    continue
-                s1_token_weights[tok] = (1.0 + _log(count)) * idf
-
-            if s1_token_weights:
-                if len(s1_token_weights) > 10:
-                    s1_token_weights = dict(heapq.nlargest(10, s1_token_weights.items(), key=_itemgetter_1))
-
-                token_scores: Dict[str, float] = defaultdict(float)
-                for tok, w_s1 in s1_token_weights.items():
-                    for cid in _hits(index_tokens, tok):
-                        token_scores[cid] += w_s1
-
-                s1_norm = _sqrt(sum(w * w for w in s1_token_weights.values()))
-                if token_scores and s1_norm > 0.0:
-                    cand_tok_len_get = candidate_token_lens.get
-                    top_k_check = top_k_sparse * 3
-                    if len(token_scores) > top_k_check:
-                        top_tok_cands = heapq.nlargest(top_k_check, token_scores.items(), key=_itemgetter_1)
-                    else:
-                        top_tok_cands = token_scores.items()
-
-                    scored_tok_cands = []
-                    for cid, raw_score in top_tok_cands:
-                        cand_len = cand_tok_len_get(cid, 3)
-                        sim = raw_score / (s1_norm * _sqrt(cand_len if cand_len > 0 else 1))
-                        scored_tok_cands.append((-min(1.0, sim), cid))
-                    
-                    scored_tok_cands.sort()
-                    for rank, (neg_sim, cid) in enumerate(scored_tok_cands[:top_k_sparse], 1):
-                        _rh(cid, "token_inverted", -neg_sim, rank, False)
-
+        # Tier 1 (Fast & High-Precision): Address Structural & Address Tokens
         # -------------------------------------------------------------
         # Channel 4: Address Structural Key (postal + street number)
-        # -------------------------------------------------------------
         if not s1.is_address_missing and s1.postal_code and s1.street_number:
             for rank, cid in enumerate(_hits(index_addr_struct, (s1.postal_code, s1.street_number)), 1):
                 _rh(cid, "address_structural", 0.85, rank, False)
 
-        # -------------------------------------------------------------
         # Channel 4b: Address Inverted Index (Tokens with Sub-Linear TF-IDF)
-        # -------------------------------------------------------------
         if not s1.is_address_missing and s1.address_tokens and addr_token_idf_table:
             s1_addr_counts = s1.address_token_counts
             s1_addr_weights: Dict[str, float] = {}
@@ -894,6 +810,96 @@ class MultiChannelBlocker:
                             sim = 1.0
                         if sim >= 0.20:
                             _rh(cid, "address_tokens", sim, rank, exact=(sim >= 0.75))
+
+        # -------------------------------------------------------------
+        # Tiered Early-Exit Gate:
+        # If high-confidence matches are already found, skip expensive fuzzy token & character n-gram channels
+        # -------------------------------------------------------------
+        has_exact = any(h[2] for h in hits.values())
+        skip_fuzzy = (has_exact and len(hits) >= 10) or len(hits) >= max_candidates
+
+        # -------------------------------------------------------------
+        # Tier 2 (Fuzzy Fallback): Token & Character N-Gram Inverted Indexes
+        # -------------------------------------------------------------
+        if not skip_fuzzy:
+            # Channel 3: Token Inverted Index with Sub-Linear TF-IDF
+            if s1.tokens and token_idf_table:
+                s1_token_counts = s1.token_counts
+                s1_token_weights: Dict[str, float] = {}
+                for tok, count in s1_token_counts.items():
+                    idf = token_idf_table.get(tok)
+                    if idf is None:
+                        continue
+                    s1_token_weights[tok] = (1.0 + _log(count)) * idf
+
+                if s1_token_weights:
+                    if len(s1_token_weights) > 10:
+                        s1_token_weights = dict(heapq.nlargest(10, s1_token_weights.items(), key=_itemgetter_1))
+
+                    token_scores: Dict[str, float] = defaultdict(float)
+                    for tok, w_s1 in s1_token_weights.items():
+                        for cid in _hits(index_tokens, tok):
+                            token_scores[cid] += w_s1
+
+                    s1_norm = _sqrt(sum(w * w for w in s1_token_weights.values()))
+                    if token_scores and s1_norm > 0.0:
+                        cand_tok_len_get = candidate_token_lens.get
+                        top_k_check = top_k_sparse * 3
+                        if len(token_scores) > top_k_check:
+                            top_tok_cands = heapq.nlargest(top_k_check, token_scores.items(), key=_itemgetter_1)
+                        else:
+                            top_tok_cands = token_scores.items()
+
+                        scored_tok_cands = []
+                        for cid, raw_score in top_tok_cands:
+                            cand_len = cand_tok_len_get(cid, 3)
+                            sim = raw_score / (s1_norm * _sqrt(cand_len if cand_len > 0 else 1))
+                            scored_tok_cands.append((-min(1.0, sim), cid))
+                        
+                        scored_tok_cands.sort()
+                        for rank, (neg_sim, cid) in enumerate(scored_tok_cands[:top_k_sparse], 1):
+                            _rh(cid, "token_inverted", -neg_sim, rank, False)
+
+            # Channel 2: Character 3-Gram Sub-Linear TF-IDF Retrieval
+            s1_gram_counts = s1.ngram_counts
+            if s1_gram_counts and ngram_idf_table:
+                s1_weights: Dict[str, float] = {}
+                for gram, count in s1_gram_counts.items():
+                    idf = ngram_idf_table.get(gram)
+                    if idf is None:
+                        continue
+                    s1_weights[gram] = (1.0 + _log(count)) * idf
+
+                if s1_weights:
+                    if len(s1_weights) > 15:
+                        s1_weights = dict(heapq.nlargest(15, s1_weights.items(), key=_itemgetter_1))
+
+                    cand_scores: Dict[str, float] = defaultdict(float)
+                    for gram, w_s1 in s1_weights.items():
+                        for cid in _hits(index_ngrams, gram):
+                            cand_scores[cid] += w_s1
+
+                    if cand_scores:
+                        s1_norm = _sqrt(sum(w * w for w in s1_weights.values()))
+                        if s1_norm > 0:
+                            sim_floor = similarity_floor
+                            cand_len_get = candidate_ngram_lens.get
+                            top_k_check = top_k_sparse * 3
+                            if len(cand_scores) > top_k_check:
+                                top_cands = heapq.nlargest(top_k_check, cand_scores.items(), key=_itemgetter_1)
+                            else:
+                                top_cands = cand_scores.items()
+
+                            scored_cands = []
+                            for cid, raw_score in top_cands:
+                                cand_len = cand_len_get(cid, 25)
+                                sim = raw_score / (s1_norm * _sqrt(cand_len if cand_len > 0 else 1))
+                                if sim >= sim_floor:
+                                    scored_cands.append((-min(1.0, sim), cid))
+
+                            scored_cands.sort()
+                            for rank, (neg_sim, cid) in enumerate(scored_cands[:top_k_sparse], 1):
+                                _rh(cid, "char_ngram", -neg_sim, rank, False)
 
         # -------------------------------------------------------------
         # Channel 5: Dense Retrieval Hook (if provided)

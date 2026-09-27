@@ -1,0 +1,16 @@
+{
+  "engine": "FastNormalizedBlocker",
+  "total_source1_entities": 1000,
+  "total_candidate_pairs": 26541,
+  "singletons_with_zero_candidates": 2,
+  "indexing_duration_s": 0.0709,
+  "query_duration_s": 0.1484,
+  "throughput_queries_per_s": 6737.9,
+  "candidates_per_s1": {
+    "mean": 26.54,
+    "median": 20,
+    "p90": 53,
+    "p95": 56,
+    "max": 87
+  }
+}

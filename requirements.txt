@@ -13,4 +13,3 @@ tqdm>=4.65.0
 rapidfuzz>=3.0.0
 polars>=1.0.0
 psutil>=5.9.0
-

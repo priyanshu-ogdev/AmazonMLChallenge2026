@@ -73,19 +73,26 @@ def _default_batch(default_gpu: int, default_cpu: int) -> int:
     return default_gpu if _cuda_available() else default_cpu
 
 
-def run_blocking(source1, source2, output_dir, index_cache_dir):
+def run_blocking(source1, source2, output_dir, use_fast=False):
     """Stage 1: Multi-channel blocking."""
-    from src.blocking import run_blocking as _blocking
     t0 = time.time()
     logger.info("=" * 70)
-    logger.info("[STAGE 1] Blocking -- CPU+RAM, all cores.")
+    logger.info("[STAGE 1] Blocking -- CPU+RAM, all cores (engine=%s).", "FastNormalizedBlocker" if use_fast else "MultiChannelBlocker")
     logger.info("=" * 70)
-    _blocking(
-        source1_paths=source1,
-        source2_paths=source2,
-        output_dir=output_dir,
-        index_cache_dir=index_cache_dir,
-    )
+    if use_fast:
+        from src.fast_blocking import run_fast_blocking as _fast_blocking
+        _fast_blocking(
+            source1_paths=source1,
+            candidate_sources=source2,
+            output_dir=output_dir,
+        )
+    else:
+        from src.blocking import run_blocking as _blocking
+        _blocking(
+            source1_paths=source1,
+            candidate_sources=source2,
+            output_dir=output_dir,
+        )
     logger.info("[STAGE 1] Done in %.1f s.", time.time() - t0)
 
 
@@ -258,6 +265,7 @@ def main() -> None:
     parser.add_argument("--country-mask-rate", type=float, default=0.15)
     parser.add_argument("--use-monotone-constraints", action="store_true")
     parser.add_argument("--compare-dart", action="store_true")
+    parser.add_argument("--fast-blocking", action="store_true", help="Use vectorized Polars FastNormalizedBlocker")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -308,7 +316,7 @@ def main() -> None:
             sys.exit(1)
     else:
         run_blocking(source1=source1, source2=candidate_sources,
-                     output_dir=output_dir, index_cache_dir=index_cache_dir)
+                     output_dir=output_dir, use_fast=args.fast_blocking)
 
     # Stage 2a - BGE
     bge_file = output_dir / "bge_features.tsv"

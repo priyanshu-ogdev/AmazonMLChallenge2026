@@ -1,6 +1,12 @@
 import sys
 import os
 
+if sys.stdout.encoding.lower() != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 # Add src to python path
 sys.path.append(os.path.abspath('code/business_entity_resolution'))
 from src.scoring import compute_entity_f05, macro_f05
@@ -16,7 +22,7 @@ print(f"Our Codebase Output F_0.5: {f05:.3f}")
 print("Competition Spec F_0.5:    0.714")
 
 if abs(f05 - 0.714) < 0.001:
-    print("\n✅ VERIFIED: Codebase scoring logic perfectly matches the competition formula!")
+    print("\n[PASS] VERIFIED: Codebase scoring logic perfectly matches the competition formula!")
 
 print("\n--- SINGLETON EDGE CASE ---")
 print("Model predicts: [] (0 predictions)")
@@ -26,4 +32,4 @@ print(f"Our Codebase Output F_0.5: {f05_singleton:.1f}")
 print("Competition Spec F_0.5:    1.0")
 
 if f05_singleton == 1.0:
-    print("\n✅ VERIFIED: Singleton correctly rewarded with 1.0 credit per spec rules.")
+    print("\n[PASS] VERIFIED: Singleton correctly rewarded with 1.0 credit per spec rules.")

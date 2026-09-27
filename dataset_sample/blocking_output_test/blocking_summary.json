@@ -1,0 +1,32 @@
+{
+  "s1_count": 1000,
+  "total_source1_entities": 1000,
+  "total_candidate_pairs": 28508,
+  "singletons_with_zero_candidates": 1,
+  "singleton_s1_count": 1,
+  "candidates_per_s1": {
+    "mean": 28.51,
+    "median": 22,
+    "p90": 59,
+    "p95": 66,
+    "max": 95
+  },
+  "mean_candidates_per_s1": 28.51,
+  "median_candidates_per_s1": 22,
+  "p90_candidates_per_s1": 59,
+  "p95_candidates_per_s1": 66,
+  "max_candidates_per_s1": 95,
+  "channel_contributions": {
+    "token_inverted": 7575,
+    "acronym_match": 4023,
+    "char_ngram": 3121,
+    "address_tokens": 17261,
+    "first_2_tokens": 110
+  },
+  "configuration": {
+    "top_k_sparse": 50,
+    "top_k_dense": 50,
+    "max_candidates_per_entity": 100,
+    "similarity_floor": 0.3
+  }
+}
