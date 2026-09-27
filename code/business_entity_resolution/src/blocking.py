@@ -58,6 +58,7 @@ from typing import (
 
 from src.normalize import (
     KNOWN_CANONICAL_COUNTRIES,
+    LEGAL_SUFFIX_MAP,
     canonicalize_country,
     extract_postal_code,
     extract_structural_fields,
@@ -144,7 +145,7 @@ _KNOWN_ACRONYMS = {
 _ACRONYM_SKIP = {
     "in", "at", "of", "on", "to", "by", "or", "an", "as", "is", "it",
     "de", "la", "le", "du", "et", "en", "st", "rd", "and", "the", "for",
-}
+} | set(LEGAL_SUFFIX_MAP.keys()) | set(LEGAL_SUFFIX_MAP.values())
 
 
 def _tokenize(text: str) -> List[str]:
@@ -357,8 +358,9 @@ class MultiChannelBlocker:
 
         # Total indexed candidate records
         self.num_candidates = 0
-        # Compact mapping of candidate entity ID -> ngram count / length for cosine normalization
+        # Compact mapping of candidate entity ID -> ngram/token count for cosine normalization
         self.candidate_ngram_lens: Dict[str, int] = {}
+        self.candidate_token_lens: Dict[str, int] = {}
         # Backwards-compatibility alias
         self.candidate_records = self.candidate_ngram_lens
 
@@ -405,6 +407,7 @@ class MultiChannelBlocker:
         cid = sys.intern(record.entity_id)
         country = record.canonical_country
         self.candidate_ngram_lens[cid] = sum(record.ngram_counts.values()) if record.ngram_counts else max(1, len(record.norm_name) - 2)
+        self.candidate_token_lens[cid] = sum(record.token_counts.values()) if record.token_counts else max(1, len(record.tokens))
         self.num_candidates += 1
         self.country_partitions[country].add(cid)
 
@@ -586,6 +589,7 @@ class MultiChannelBlocker:
         ngram_idf_table          = self.ngram_idf_table
         token_idf_table          = self.token_idf_table
         candidate_ngram_lens     = self.candidate_ngram_lens
+        candidate_token_lens     = self.candidate_token_lens
         top_k_sparse             = self.top_k_sparse
         similarity_floor         = self.similarity_floor
         max_candidates           = self.max_candidates_per_entity
@@ -768,16 +772,22 @@ class MultiChannelBlocker:
                         else:
                             token_scores[cid] = prev + w_s1
 
-                total_s1_weight = sum(s1_token_weights.values())
-                if token_scores and total_s1_weight > 0.0:
-                    # nlargest instead of full sort
-                    top_tok_cands = heapq.nlargest(top_k_sparse, token_scores.items(), key=lambda kv: kv[1])
-                    inv_total = 1.0 / total_s1_weight
-                    for rank, (cid, score_sum) in enumerate(top_tok_cands, 1):
-                        normalized_score = score_sum * inv_total
-                        if normalized_score > 1.0:
-                            normalized_score = 1.0
-                        _rh(cid, "token_inverted", normalized_score, rank, False)
+                s1_norm = _sqrt(sum(w * w for w in s1_token_weights.values()))
+                if token_scores and s1_norm > 0.0:
+                    cand_tok_len_get = candidate_token_lens.get
+                    # nlargest instead of full sort (3x to allow post-normalization filtering)
+                    top_tok_cands = heapq.nlargest(top_k_sparse * 3, token_scores.items(), key=lambda kv: kv[1])
+                    scored_tok_cands = []
+                    for cid, raw_score in top_tok_cands:
+                        cand_len = cand_tok_len_get(cid, 3)
+                        sim = raw_score / (s1_norm * _sqrt(cand_len if cand_len > 0 else 1))
+                        if sim > 1.0:
+                            sim = 1.0
+                        scored_tok_cands.append((sim, cid))
+                    
+                    scored_tok_cands.sort(key=lambda x: -x[0])
+                    for rank, (sim, cid) in enumerate(scored_tok_cands[:top_k_sparse], 1):
+                        _rh(cid, "token_inverted", sim, rank, False)
 
         # -------------------------------------------------------------
         # Channel 4: Address Structural Key (postal + street number)
