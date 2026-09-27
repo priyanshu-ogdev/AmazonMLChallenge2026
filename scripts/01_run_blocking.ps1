@@ -43,7 +43,7 @@ param(
     [float]$SimilarityFloor = 0.3,
     [string]$DenseEmbeddings = "",
     [string]$OutputDir = "",
-    [int]$NumWorkers = 1,
+    [int]$NumWorkers = 4,
     [switch]$NoResume = $false,
     [switch]$NoCacheIndex = $false,
     [int]$CheckpointInterval = 10000,

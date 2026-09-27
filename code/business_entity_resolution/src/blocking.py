@@ -1207,12 +1207,9 @@ def run_blocking(
         try:
             import psutil
             total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
-            # With 'fork' context and CoW, the 14GB index is shared.
+            # With 'fork' context (Linux) or ThreadPoolExecutor (Windows), memory is shared.
             # We only need ~14GB base + ~0.5GB overhead per worker.
             min_needed_gb = 14.0 + (num_workers * 0.5)
-            if total_ram_gb < min_needed_gb and os.name != 'posix':
-                # On Windows, spawn requires full memory copies
-                min_needed_gb = num_workers * 14.0
             
             if total_ram_gb < min_needed_gb:
                 print(
@@ -1253,10 +1250,15 @@ def run_blocking(
             
             try:
                 ctx = multiprocessing.get_context("fork")
+                ExecutorClass = concurrent.futures.ProcessPoolExecutor
+                kwargs = {"mp_context": ctx}
             except ValueError:
                 ctx = None
+                ExecutorClass = concurrent.futures.ThreadPoolExecutor
+                kwargs = {}
+                print("[INFO] Windows/spawn environment detected. Using ThreadPoolExecutor to share RAM safely.", flush=True)
 
-            with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as pool:
+            with ExecutorClass(max_workers=num_workers, **kwargs) as pool:
                 for i, chunk in enumerate(chunks):
                     pp  = str(tmp_dir / f"pairs_{i}.tsv")
                     pvp = str(tmp_dir / f"prov_{i}.tsv")
