@@ -821,7 +821,17 @@ def extract_postal_code(address: str, country: Optional[str] = None) -> Optional
             return None
         last_match = matches[-1]
         # Guard: if the only 5-digit number is the leading street number (e.g. '12045 Main St')
-        if last_match.start() == 0 or re.match(r"^\s*(?:#+\s*)?" + re.escape(last_match.group(1)) + r"\b\s*[a-zA-Z]", addr_str):
+        is_leading = False
+        if last_match.start() == 0:
+            is_leading = True
+        else:
+            prefix = addr_str[:last_match.start()].strip(" \t\n\r#")
+            if not prefix:
+                suffix = addr_str[last_match.end():].lstrip()
+                if suffix and suffix[0].isalpha():
+                    is_leading = True
+
+        if is_leading:
             if len(matches) == 1:
                 rest = addr_str[last_match.end():].strip()
                 if rest:
