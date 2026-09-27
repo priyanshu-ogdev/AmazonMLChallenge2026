@@ -147,6 +147,9 @@ _SAVED_STDERR_FD=""
 _CURRENT_LOG_FILE=""
 
 initialize_logging() {
+    if [ "${DISABLE_LOGGING:-false}" = "true" ]; then
+        return 0
+    fi
     local script_name="${1:-pipeline}"
     local log_dir="${2:-$LOG_DIR}"
 
