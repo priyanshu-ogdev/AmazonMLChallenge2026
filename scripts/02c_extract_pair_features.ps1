@@ -175,22 +175,19 @@ if ($ProvenanceFile -and (Test-Path $ProvenanceFile)) {
 
 $pairJob = $null
 if (-not $DryRun) {
-    # Capture variables needed inside Start-Job (no closure over parent scope)
-    $jobPython   = $python
-    $jobCodeDir  = $CODE_DIR
-    $jobProjRoot = $PROJECT_ROOT
-    $jobArgs     = $pairArgs
-
-    $pairJob = Start-Job -Name "PairFeatures_$Split" -ScriptBlock {
-        param($PyExe, $CodeDir, $ProjRoot, $Args)
-        $env:PYTHONPATH       = "$CodeDir;$ProjRoot"
-        $env:PYTHONUNBUFFERED = "1"
-        Set-Location $ProjRoot
-        & $PyExe -u @Args 2>&1
-        exit $LASTEXITCODE
-    } -ArgumentList $jobPython, $jobCodeDir, $jobProjRoot, $jobArgs
-
-    Write-Success "Background pair-features job started (Job ID: $($pairJob.Id))."
+    # Run Stage 2c synchronously to prevent memory competition with BGE-M3
+    $env:PYTHONPATH = "$CODE_DIR;$PROJECT_ROOT"
+    $env:PYTHONUNBUFFERED = "1"
+    Push-Location $PROJECT_ROOT
+    try {
+        & $python -u @pairArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Stage 2c pair features failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+    }
+    Write-Success "Pair-features job completed successfully."
 } else {
     Write-Host "  [DRY RUN] Would launch: $python $($pairArgs -join ' ')" -ForegroundColor Magenta
 }
@@ -263,34 +260,8 @@ if ($IncludeQwenMatcher) {
 }
 
 # ==============================================================================
-# STEP 5 -- Synchronize: wait for background CPU pair-features job
+# STEP 5 -- (Skipped: Stage 2c now runs synchronously at Step 1)
 # ==============================================================================
-if ($pairJob) {
-    Write-Step "2c.5" "Waiting for background pair-features job (CPU) to complete..."
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-
-    # Stream job output as it becomes available, in a polling loop
-    while ($pairJob.State -eq "Running") {
-        $partial = Receive-Job -Job $pairJob -Keep 2>$null
-        if ($partial) { $partial | ForEach-Object { Write-Host "  [pair_features] $_" -ForegroundColor DarkGray } }
-        Start-Sleep -Milliseconds 2000
-    }
-
-    # Final drain
-    $output = Receive-Job -Job $pairJob 2>&1
-    if ($output) { $output | ForEach-Object { Write-Host "  [pair_features] $_" -ForegroundColor DarkGray } }
-
-    $sw.Stop()
-    $elapsed = [Math]::Round($sw.Elapsed.TotalSeconds, 2)
-
-    if ($pairJob.State -eq "Failed") {
-        Remove-Job -Job $pairJob -Force
-        throw "Stage 2c pair_features background job FAILED after $($elapsed)s. Check output above."
-    }
-
-    Remove-Job -Job $pairJob -Force
-    Write-Success "Pair-features job completed in $($elapsed)s (overlap savings applied)."
-}
 
 # ==============================================================================
 # STEP 6 -- Artifact Verification (fast .NET line counter)

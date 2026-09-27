@@ -221,7 +221,7 @@ def _char_trigrams(value: str) -> Set[str]:
     return {padded[i : i + 3] for i in range(max(0, len(padded) - 2))}
 
 
-def _record_features(record: Dict[str, str]) -> Dict[str, object]:
+def _record_features(record: Dict[str, str]) -> Tuple[str, str, str, str, str, str]:
     if "norm_name" in record and record["norm_name"] is not None:
         name = record["norm_name"]
     else:
@@ -236,25 +236,15 @@ def _record_features(record: Dict[str, str]) -> Dict[str, object]:
     canonical_country = record.get("canonical_country") or canonicalize_country(raw_country)
     raw_addr = record.get("raw_address") or record.get("business_address", "")
     postal = record.get("postal_code") or extract_postal_code(raw_addr, country=canonical_country)
-    return {
-        "entity_id": record["entity_id"],
-        "country": raw_country,
-        "canonical_country": canonical_country,
-        "name": name,
-        "address": address,
-        "name_tokens": _tokens(name),
-        "address_tokens": _tokens(address),
-        "name_numbers": _numeric_tokens(name),
-        "address_numbers": _numeric_tokens(address),
-        "postal": postal,
-        "name_trigrams": _char_trigrams(name),
-        "address_trigrams": _char_trigrams(address),
-    }
+    
+    return (record["entity_id"], raw_country, canonical_country, name, address, postal)
 
 
 def pair_feature_row(
-    left: Dict[str, object],
-    right: Dict[str, object],
+    left_id: str,
+    left: Tuple[str, str, str, str, str, str],
+    right_id: str,
+    right: Tuple[str, str, str, str, str, str],
     provenance: Optional[str] = None,
     left_rank: Optional[float] = None,
     best_score: Optional[float] = None,
@@ -263,24 +253,25 @@ def pair_feature_row(
     score_margin_to_best: Optional[float] = None,
 ) -> Dict[str, object]:
     """Return one label-free feature row for a candidate pair."""
-    name_left = left["name"]
-    name_right = right["name"]
-    address_left = left["address"]
-    address_right = right["address"]
-    name_tokens_left = left["name_tokens"]
-    name_tokens_right = right["name_tokens"]
-    address_tokens_left = left["address_tokens"]
-    address_tokens_right = right["address_tokens"]
-    name_numbers_left = left["name_numbers"]
-    name_numbers_right = right["name_numbers"]
-    address_numbers_left = left["address_numbers"]
-    address_numbers_right = right["address_numbers"]
+    _, country_left, canon_left, name_left, address_left, postal_left = left
+    _, country_right, canon_right, name_right, address_right, postal_right = right
+
+    name_tokens_left = _tokens(name_left)
+    name_tokens_right = _tokens(name_right)
+    address_tokens_left = _tokens(address_left)
+    address_tokens_right = _tokens(address_right)
+    name_numbers_left = _numeric_tokens(name_left)
+    name_numbers_right = _numeric_tokens(name_right)
+    address_numbers_left = _numeric_tokens(address_left)
+    address_numbers_right = _numeric_tokens(address_right)
+    name_tri_left = _char_trigrams(name_left)
+    name_tri_right = _char_trigrams(name_right)
+    addr_tri_left = _char_trigrams(address_left)
+    addr_tri_right = _char_trigrams(address_right)
 
     # Use canonical country for the match flag so aliases (US/USA/us) and
     # France (France/FR) are correctly unified. country_match_flag() returns
     # None when either side is empty, so the GBM can use a missing branch.
-    canon_left = left["canonical_country"]
-    canon_right = right["canonical_country"]
     match_flag = country_match_flag(canon_left, canon_right)
 
     # Exact string short-circuits (bypasses Levenshtein and token ratios on identical strings)
@@ -304,7 +295,7 @@ def pair_feature_row(
         name_exact = 0
         name_tok_jaccard, name_tok_overlap = _fast_jaccard_overlap(name_tokens_left, name_tokens_right)
         name_ratio = _safe_ratio(name_left, name_right)
-        name_tri_jaccard, _ = _fast_jaccard_overlap(left["name_trigrams"], right["name_trigrams"])
+        name_tri_jaccard, _ = _fast_jaccard_overlap(name_tri_left, name_tri_right)
         name_sort_ratio = _token_sort_ratio(name_left, name_right)
         name_f_ratio = _fuzz_ratio(name_left, name_right)
 
@@ -326,24 +317,24 @@ def pair_feature_row(
         addr_exact = 0
         addr_tok_jaccard, addr_tok_overlap = _fast_jaccard_overlap(address_tokens_left, address_tokens_right)
         addr_ratio = _safe_ratio(address_left, address_right)
-        addr_tri_jaccard, _ = _fast_jaccard_overlap(left["address_trigrams"], right["address_trigrams"])
+        addr_tri_jaccard, _ = _fast_jaccard_overlap(addr_tri_left, addr_tri_right)
         addr_set_ratio = _token_set_ratio(address_left, address_right)
 
     _, name_num_overlap = _fast_jaccard_overlap(name_numbers_left, name_numbers_right)
     _, addr_num_overlap = _fast_jaccard_overlap(address_numbers_left, address_numbers_right)
 
     row = (
-        left["entity_id"],
-        right["entity_id"],
-        left["country"],
-        right["country"],
+        left_id,
+        right_id,
+        country_left,
+        country_right,
         canon_left,
         canon_right,
-        int(str(right["entity_id"]).startswith("S3-")),
+        int(str(right_id).startswith("S3-")),
         -1.0 if match_flag is None else (1.0 if match_flag else 0.0),
         int(match_flag is None),
-        int(not left["country"]),
-        int(not right["country"]),
+        int(not country_left),
+        int(not country_right),
         int(not name_left and not name_right),
         int(not address_left and not address_right),
         name_exact,
@@ -361,8 +352,8 @@ def pair_feature_row(
         addr_set_ratio,
         name_num_overlap,
         addr_num_overlap,
-        int(bool(left["postal"]) and bool(right["postal"]) and left["postal"] == right["postal"]),
-        int(not left["postal"] or not right["postal"]),
+        int(bool(postal_left) and bool(postal_right) and postal_left == postal_right),
+        int(not postal_left or not postal_right),
         abs(len(name_left) - len(name_right)),
         abs(len(address_left) - len(address_right)),
         int(bool(name_left) and name_left == name_right and bool(address_left) and bool(address_right) and address_left != address_right),
@@ -443,7 +434,7 @@ def load_records(paths: Iterable[Path], needed_ids: Optional[Set[str]] = None) -
 
 
 def _spawn_initializer(
-    normalized: Dict[str, Dict[str, object]],
+    normalized: Dict[str, Tuple[str, str, str, str, str, str]],
 ) -> None:
     """Initializer for spawn-based ProcessPoolExecutor workers."""
     global _shared_normalized
@@ -452,7 +443,7 @@ def _spawn_initializer(
 
 def _feature_worker(
     chunk_items: List[Tuple[str, List[str], Dict[str, Tuple], Optional[float]]],
-    normalized: Optional[Dict[str, Dict[str, object]]] = None,
+    normalized: Optional[Dict[str, Tuple[str, str, str, str, str, str]]] = None,
 ) -> List[Tuple[Any, ...]]:
     global _shared_normalized
     norm_dict = normalized if normalized is not None else _shared_normalized
@@ -469,7 +460,9 @@ def _feature_worker(
             margin = (max_s - score) if (max_s is not None and score is not None) else None
             worker_rows.append(
                 pair_feature_row(
+                    s1_id,
                     s1_norm,
+                    candidate_id,
                     cand_norm,
                     provenance=blocker,
                     left_rank=rank,
@@ -482,6 +475,86 @@ def _feature_worker(
     return worker_rows
 
 
+def stream_provenance_grouped(prov_file, max_cands):
+    with open(prov_file, "r", encoding="utf-8") as f:
+        header = f.readline()
+        col_map = {c: i for i, c in enumerate(header.rstrip("\\r\\n").split("\\t"))}
+        s1_idx = col_map.get("source1_entity_id", 0)
+        cid_idx = col_map.get("candidate_entity_id", 1)
+        prov_idx = col_map.get("blocker_provenance", 3)
+        rank_idx = col_map.get("best_blocker_rank", col_map.get("candidate_rank", 5))
+        score_idx = col_map.get("best_blocker_score", 6)
+        count_idx = col_map.get("blocker_count", 4)
+        
+        cur_s1 = None
+        cur_dict = {}
+        for line in f:
+            parts = line.rstrip("\\r\\n").split("\\t")
+            if len(parts) <= max(s1_idx, cid_idx): continue
+            s1 = parts[s1_idx]
+            if s1 != cur_s1:
+                if cur_s1 is not None and cur_dict:
+                    yield cur_s1, cur_dict
+                cur_s1 = s1
+                cur_dict = {}
+            if len(cur_dict) < max_cands:
+                cid = parts[cid_idx]
+                prov = parts[prov_idx] if 0 <= prov_idx < len(parts) else ""
+                r = parts[rank_idx] if 0 <= rank_idx < len(parts) else ""
+                s = parts[score_idx] if 0 <= score_idx < len(parts) else ""
+                c = parts[count_idx] if 0 <= count_idx < len(parts) else ""
+                cur_dict[cid] = (prov, float(r) if r else None, float(s) if s else None, int(c) if c else None)
+        if cur_s1 is not None and cur_dict:
+            yield cur_s1, cur_dict
+
+def generate_feature_chunks(candidate_file, provenance_file, max_cands, chunk_size=5000):
+    prov_iter = stream_provenance_grouped(provenance_file, max_cands) if provenance_file and Path(provenance_file).exists() else None
+    prov_buffer = {}
+    
+    def get_prov(target_s1):
+        if not prov_iter: return {}
+        if target_s1 in prov_buffer:
+            return prov_buffer.pop(target_s1)
+        
+        reads = 0
+        try:
+            while reads < 20000:
+                s1, pdict = next(prov_iter)
+                reads += 1
+                if s1 == target_s1:
+                    return pdict
+                prov_buffer[s1] = pdict
+                if len(prov_buffer) > 50000:
+                    # buffer getting too large, pop arbitrary to avoid memory leak
+                    prov_buffer.pop(next(iter(prov_buffer)))
+        except StopIteration:
+            pass
+        return {}
+
+    with open(candidate_file, "r", encoding="utf-8") as cf:
+        cf.readline() # header
+        chunk = []
+        for line in cf:
+            parts = line.rstrip("\\r\\n").split("\\t")
+            s1 = parts[0]
+            if not s1: continue
+            cand_str = parts[1] if len(parts) > 1 else ""
+            cands = [c.strip() for c in cand_str.split(",") if c.strip()][:max_cands]
+            if not cands: continue
+            
+            s1_prov = get_prov(s1)
+            
+            max_s = None
+            valid_scores = [s1_prov[c][2] for c in cands if c in s1_prov and s1_prov[c][2] is not None]
+            if valid_scores: max_s = max(valid_scores)
+            
+            chunk.append((s1, cands, s1_prov, max_s))
+            if len(chunk) >= chunk_size:
+                yield chunk
+                chunk = []
+        if chunk:
+            yield chunk
+
 def build_pair_features(
     records: Dict[str, Dict[str, str]],
     candidate_file: Path,
@@ -490,130 +563,12 @@ def build_pair_features(
     max_candidates_per_entity: int = 15,
 ) -> pd.DataFrame:
     """Build features for every candidate pair, failing on invalid references."""
-    candidates = pd.read_csv(candidate_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
-    required = {"source1_entity_id", "candidate_entity_ids"}
-    missing = required - set(candidates.columns)
-    if missing:
-        raise ValueError(f"{candidate_file} is missing required columns: {sorted(missing)}")
-
-    active_ids: Set[str] = set()
-    pairs_by_s1: Dict[str, List[str]] = {}
-
-    s1_vals = candidates["source1_entity_id"].values
-    cand_vals = candidates["candidate_entity_ids"].values
-
-    for i in range(len(s1_vals)):
-        source1_id = s1_vals[i].strip()
-        if not source1_id:
-            continue
-        if source1_id not in records:
-            raise ValueError(f"Unknown source1 entity ID: {source1_id}")
-        active_ids.add(source1_id)
-        
-        seen_cand = set()
-        cands_for_s1 = []
-        raw_cands = [v.strip() for v in cand_vals[i].split(",") if v.strip()]
-        for candidate_id in raw_cands[:max_candidates_per_entity]:
-            if candidate_id not in seen_cand:
-                seen_cand.add(candidate_id)
-                if candidate_id not in records:
-                    raise ValueError(f"Unknown candidate entity ID: {candidate_id}")
-                active_ids.add(candidate_id)
-                cands_for_s1.append(candidate_id)
-        if cands_for_s1:
-            pairs_by_s1[source1_id] = cands_for_s1
-
-    del candidates
-
-    # Fast streaming provenance parser (no pandas 6.7GB read, only loads top cands per S1)
-    prov_by_s1: Dict[str, Dict[str, Tuple[str, Optional[float], Optional[float], Optional[int]]]] = {}
-    if provenance_file and Path(provenance_file).exists():
-        print(f"[STAGE 2c] Streaming provenance from {provenance_file} (capping top {max_candidates_per_entity} per S1)...", flush=True)
-        with open(provenance_file, "r", encoding="utf-8") as f_prov:
-            header_line = f_prov.readline()
-            header = header_line.strip().split("\t")
-            col_map = {col: idx for idx, col in enumerate(header)}
-            s1_idx = col_map.get("source1_entity_id", 0)
-            cid_idx = col_map.get("candidate_entity_id", 1)
-            prov_idx = col_map.get("blocker_provenance", 3)
-            rank_idx = col_map.get("best_blocker_rank", col_map.get("candidate_rank", 5))
-            score_idx = col_map.get("best_blocker_score", 6)
-            count_idx = col_map.get("blocker_count", 4)
-
-            cur_s1 = None
-            cur_s1_prefix = ""
-            cur_dict = {}
-            for line in f_prov:
-                if cur_s1 is not None and len(cur_dict) >= max_candidates_per_entity:
-                    if line.startswith(cur_s1_prefix):
-                        continue
-                parts = line.rstrip("\r\n").split("\t")
-                if len(parts) <= max(s1_idx, cid_idx):
-                    continue
-                s1 = parts[s1_idx]
-                if s1 != cur_s1:
-                    if cur_s1 is not None and cur_dict:
-                        prov_by_s1[cur_s1] = cur_dict
-                    cur_s1 = s1
-                    cur_s1_prefix = s1 + "\t"
-                    cur_dict = {}
-                if len(cur_dict) < max_candidates_per_entity:
-                    cid = parts[cid_idx]
-                    prov = parts[prov_idx] if 0 <= prov_idx < len(parts) else ""
-                    r = parts[rank_idx] if 0 <= rank_idx < len(parts) else ""
-                    s = parts[score_idx] if 0 <= score_idx < len(parts) else ""
-                    c = parts[count_idx] if 0 <= count_idx < len(parts) else ""
-                    cur_dict[cid] = (
-                        prov,
-                        float(r) if r else None,
-                        float(s) if s else None,
-                        int(c) if c else None,
-                    )
-            if cur_s1 is not None and cur_dict:
-                prov_by_s1[cur_s1] = cur_dict
-
     # Compute features only for active entities and free raw records memory immediately
     normalized = {}
-    for entity_id in active_ids:
-        rec = records.pop(entity_id, None)
-        if rec is not None:
-            normalized[entity_id] = _record_features(rec)
+    for entity_id, rec in records.items():
+        normalized[entity_id] = _record_features(rec)
     records.clear()
-    del records
-    import gc
-    gc.collect()
-
-    # Pre-calculate max score per S1 entity for relative margin computation
-    s1_max_score: Dict[str, float] = {}
-    for s1_id, cand_ids in pairs_by_s1.items():
-        s1_prov = prov_by_s1.get(s1_id, {})
-        valid_scores = [
-            s1_prov[cid][2] for cid in cand_ids
-            if cid in s1_prov and s1_prov[cid][2] is not None
-        ]
-        if valid_scores:
-            s1_max_score[s1_id] = max(valid_scores)
-
-    # Package tasks with per-S1 provenance slice (zero global dict pickling overhead)
-    chunk_size = 5000
-    s1_keys = list(pairs_by_s1.keys())
-    chunks = []
-    for i in range(0, len(s1_keys), chunk_size):
-        chunk_s1_keys = s1_keys[i:i + chunk_size]
-        chunk_payload = [
-            (
-                s1,
-                pairs_by_s1[s1],
-                prov_by_s1.get(s1, {}),
-                s1_max_score.get(s1),
-            )
-            for s1 in chunk_s1_keys
-        ]
-        chunks.append(chunk_payload)
-
-    del pairs_by_s1
-    del prov_by_s1
-    del s1_max_score
+    
     import gc
     gc.collect()
 
@@ -621,8 +576,7 @@ def build_pair_features(
     import sys as _sys
     _platform = _sys.platform
 
-    # On Windows, ProcessPoolExecutor(spawn) pickles the multi-GB dictionary to every worker,
-    # blowing past 25 GB RAM and triggering Windows pagefile OOM.
+    # On Windows, ProcessPoolExecutor(spawn) pickles the multi-GB dictionary to every worker.
     # RapidFuzz releases the GIL in C++, so ThreadPoolExecutor achieves full multi-core throughput
     # with ZERO memory duplication (RAM < 2.5 GB).
     if _platform == "win32":
@@ -642,22 +596,32 @@ def build_pair_features(
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_file, "w", encoding="utf-8", newline="") as out_f:
-        writer = csv.writer(out_f, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
+        writer = csv.writer(out_f, delimiter="\\t", quoting=csv.QUOTE_NONE, escapechar="\\\\")
         writer.writerow(feature_columns)
 
-        if num_workers <= 1 or not chunks:
-            for chunk in chunks:
+        chunk_gen = generate_feature_chunks(candidate_file, provenance_file, max_candidates_per_entity)
+        
+        if num_workers <= 1:
+            for chunk in chunk_gen:
                 chunk_rows = _feature_worker(chunk, normalized)
                 writer.writerows(chunk_rows)
         else:
+            import concurrent.futures
             with ExecutorClass(max_workers=num_workers, **pool_kwargs) as pool:
-                futures = [
-                    pool.submit(_feature_worker, chunk, normalized)
-                    for chunk in chunks
-                ]
-                for fut in as_completed(futures):
-                    chunk_rows = fut.result()
-                    writer.writerows(chunk_rows)
+                active_futures = set()
+                for chunk in chunk_gen:
+                    fut = pool.submit(_feature_worker, chunk, normalized)
+                    active_futures.add(fut)
+                    
+                    while len(active_futures) >= num_workers * 2:
+                        done, active_futures = concurrent.futures.wait(
+                            active_futures, return_when=concurrent.futures.FIRST_COMPLETED
+                        )
+                        for f in done:
+                            writer.writerows(f.result())
+                            
+                for f in concurrent.futures.as_completed(active_futures):
+                    writer.writerows(f.result())
 
     del normalized
     gc.collect()
@@ -693,8 +657,19 @@ def main() -> None:
     source1_paths = list(args.source1) if isinstance(args.source1, list) else [args.source1]
     all_input_paths = source1_paths + candidate_sources
 
+    # Ensure CLI execution only loads entities that appear in candidate_pairs.tsv
+    import pandas as pd
+    cands_df = pd.read_csv(args.candidate_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
+    needed_ids = set(cands_df["source1_entity_id"].values)
+    for c_str in cands_df["candidate_entity_ids"].values:
+        if c_str:
+            for c in c_str.split(","):
+                if c.strip():
+                    needed_ids.add(c.strip())
+    del cands_df
+    
     build_pair_features(
-        load_records(all_input_paths),
+        load_records(all_input_paths, needed_ids=needed_ids),
         args.candidate_file,
         output_path,
         args.provenance_file,
