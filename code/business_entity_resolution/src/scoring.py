@@ -72,6 +72,16 @@ DEFAULT_PARAMS = {
     "nthread": _CPU_COUNT,
 }
 
+# Auto-detect GPU for XGBoost acceleration
+try:
+    import torch
+    if torch.cuda.is_available():
+        DEFAULT_PARAMS["tree_method"] = "hist"
+        DEFAULT_PARAMS["device"] = "cuda"
+        print("[GPU] CUDA detected! Enabled hardware acceleration for GBM layer.", flush=True)
+except ImportError:
+    pass
+
 
 def build_monotonic_constraints(columns: Sequence[str]) -> Tuple[int, ...]:
     """
@@ -874,7 +884,13 @@ def train_oof(
 
     # Bug 7 fix: when running folds in parallel, divide nthread evenly so that
     # total CPU usage stays bounded at _CPU_COUNT cores.
-    _pfolds = max(1, min(parallel_folds, n_splits))
+    # CRITICAL GPU FIX: If CUDA is enabled, force sequential fold training to prevent VRAM OOM!
+    if base.get("device") == "cuda" or base.get("tree_method") == "gpu_hist":
+        _pfolds = 1
+        logger.info("[GPU] CUDA enabled! Forcing sequential fold training (parallel_folds=1) to prevent VRAM OOM.")
+    else:
+        _pfolds = max(1, min(parallel_folds, n_splits))
+
     if _pfolds > 1 and "nthread" in base:
         base["nthread"] = max(1, base["nthread"] // _pfolds)
         logger.info(
@@ -1164,21 +1180,32 @@ def run_training(
         })
 
         # Bug 6 fix: run both diagnostics concurrently (XGBoost releases GIL).
-        # Each diagnostic trains its own XGB models independently.
-        logger.info("Running DART vs GBDT diagnostic in parallel (2 threads).")
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            f_gbt = pool.submit(
-                evaluate_held_out_country_diagnostic,
+        # CRITICAL GPU FIX: serialize if device=cuda to prevent GPU OOM.
+        if params.get("device") == "cuda" or params.get("tree_method") == "gpu_hist":
+            logger.info("[GPU] CUDA enabled! Running DART vs GBDT sequentially to prevent VRAM OOM.")
+            gbtree_diag = evaluate_held_out_country_diagnostic(
                 labeled, final_columns, gbtree_params,
                 country_mask_rate, use_monotone_constraints,
             )
-            f_drt = pool.submit(
-                evaluate_held_out_country_diagnostic,
+            dart_diag = evaluate_held_out_country_diagnostic(
                 labeled, final_columns, dart_params,
                 country_mask_rate, use_monotone_constraints,
             )
-            gbtree_diag = f_gbt.result()
-            dart_diag = f_drt.result()
+        else:
+            logger.info("Running DART vs GBDT diagnostic in parallel (2 threads).")
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_gbt = pool.submit(
+                    evaluate_held_out_country_diagnostic,
+                    labeled, final_columns, gbtree_params,
+                    country_mask_rate, use_monotone_constraints,
+                )
+                f_drt = pool.submit(
+                    evaluate_held_out_country_diagnostic,
+                    labeled, final_columns, dart_params,
+                    country_mask_rate, use_monotone_constraints,
+                )
+                gbtree_diag = f_gbt.result()
+                dart_diag = f_drt.result()
 
         gbtree_ap = float(gbtree_diag.get("mean_held_out_country_ap", 0.0))
         dart_ap = float(dart_diag.get("mean_held_out_country_ap", 0.0))
