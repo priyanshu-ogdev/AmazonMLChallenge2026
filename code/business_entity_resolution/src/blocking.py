@@ -202,7 +202,7 @@ class BlockingRecord:
         first_word = tokens[0] if tokens else None
 
         # Content words for first-2-tokens and acronym extraction (preserving 2-letter tokens like 'GE')
-        raw_words = [w.lower() for w in _WORD_RE.findall(n_name or "")]
+        raw_words = (w.group().lower() for w in _WORD_RE.finditer(n_name or ""))
         content_words = [w for w in raw_words if w not in ("the", "a", "an", "and", "&")]
 
         # First-2-Tokens Key
@@ -571,7 +571,7 @@ class MultiChannelBlocker:
                     top_grams = sorted(s1_weights.keys(), key=lambda g: s1_weights[g], reverse=True)[:15]
                     s1_weights = {g: s1_weights[g] for g in top_grams}
 
-                cand_scores: Counter[str] = Counter()
+                cand_scores: Dict[str, float] = defaultdict(float)
                 for gram, w_s1 in s1_weights.items():
                     for cid in self._query_partitioned_index(_index_ngrams, gram, country):
                         cand_scores[cid] += w_s1
@@ -579,7 +579,9 @@ class MultiChannelBlocker:
                 s1_norm = math.sqrt(sum(w * w for w in s1_weights.values()))
                 if cand_scores and s1_norm > 0:
                     scored_cands = []
-                    for cid, raw_score in cand_scores.most_common(self.top_k_sparse * 3):
+                    # most_common equivalent for defaultdict
+                    top_cands = sorted(cand_scores.items(), key=lambda x: x[1], reverse=True)[: self.top_k_sparse * 3]
+                    for cid, raw_score in top_cands:
                         cand_len = self.candidate_ngram_lens.get(cid, 25)
                         norm_factor = s1_norm * math.sqrt(max(1, cand_len))
                         sim = min(1.0, raw_score / norm_factor)
@@ -594,7 +596,7 @@ class MultiChannelBlocker:
         # Channel 3: Token Inverted Index with Sub-Linear TF-IDF
         # -------------------------------------------------------------
         if s1.tokens:
-            token_scores: Counter[str] = Counter()
+            token_scores: Dict[str, float] = defaultdict(float)
             s1_token_counts = s1.token_counts
             max_allowed_freq = max(10, int(self.num_candidates * self.max_token_doc_freq))
             max_allowed_count = min(self.max_token_doc_count, max_allowed_freq)
@@ -619,7 +621,7 @@ class MultiChannelBlocker:
 
                 total_s1_weight = sum(s1_token_weights.values())
                 if token_scores and total_s1_weight > 0.0:
-                    top_tokens = token_scores.most_common(self.top_k_sparse)
+                    top_tokens = sorted(token_scores.items(), key=lambda x: x[1], reverse=True)[: self.top_k_sparse]
                     for rank, (cid, score_sum) in enumerate(top_tokens, 1):
                         normalized_score = min(1.0, score_sum / total_s1_weight)
                         _rh(cid, "token_inverted", normalized_score, rank, False)
