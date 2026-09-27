@@ -13,46 +13,46 @@
 
 ```mermaid
 flowchart TD
-    subgraph S0["Stage 0: Ingestion & Country-Agnostic Normalization"]
+    subgraph S0 [Stage 0: Ingestion and Normalization]
         R0["Raw Feeds (S1, S2, S3)"] --> N0["Unicode NFKC + Legal Suffix Canonicalization + Multilingual Address Expansions"]
-        N0 --> D0["Normalized Records & Missing Address Sentinels [NO_ADDRESS]"]
+        N0 --> D0["Normalized Records and Missing Address Sentinels NO_ADDRESS"]
     end
 
-    subgraph S1["Stage 1: Multi-Channel Candidate Generation (FastNormalizedBlocker)"]
-        D0 --> B1["Channel 1: Exact, Sorted Tokens, First-2-Tokens, Acronym & Composite Keys"]
+    subgraph S1 [Stage 1: Multi-Channel Candidate Generation]
+        D0 --> B1["Channel 1: Exact, Sorted Tokens, First-2-Tokens, Acronym and Composite Keys"]
         D0 --> B2["Channel 2: Character 3/4-Gram Sub-Linear TF-IDF Inverted Index"]
         D0 --> B3["Channel 3: Token Inverted Index with Sub-Linear TF-IDF"]
-        D0 --> B4["Channel 4: Postal Code & Structural Address Key Matching"]
+        D0 --> B4["Channel 4: Postal Code and Structural Address Key Matching"]
         D0 --> B4b["Channel 4b: Address Inverted Index with Multilingual Stopwords"]
         B1 & B2 & B3 & B4 & B4b --> U1["Bitmask-Accelerated Union + Exact Priority Sorting"]
-        U1 --> G1{"Recall Audit Gate (>= 98.0% Recall)"}
-        G1 --> CP_TSV["candidate_pairs.tsv (<= 50 Candidates / Entity)"]
+        U1 --> G1{"Recall Audit Gate Min 98 Percent Recall"}
+        G1 --> CP_TSV["candidate_pairs.tsv Max 50 Candidates per Entity"]
     end
 
-    subgraph S2["Stage 2: Representation & Feature Engineering"]
-        CP_TSV --> F1["Stage 2a: BGE-M3 rsLoRA Dense Cosine (TF32, Batch 256, Seq 128)"]
-        CP_TSV --> F2["Stage 2b: Auxiliary Qwen3-Embedding-0.6B Cosine (Symmetric)"]
-        CP_TSV --> F3["Stage 2c: 35 Deterministic Lexical, Phonetic & RapidFuzz Features"]
-        F1 & F2 & F3 --> M2["Grouped Feature Matrix (Grouped by S1 entity_id)"]
+    subgraph S2 [Stage 2: Representation and Feature Engineering]
+        CP_TSV --> F1["Stage 2a: BGE-M3 rsLoRA Dense Cosine TF32, Batch 256, Seq 128"]
+        CP_TSV --> F2["Stage 2b: Auxiliary Qwen3-Embedding Cosine Symmetric"]
+        CP_TSV --> F3["Stage 2c: 35 Deterministic Lexical, Phonetic and RapidFuzz Features"]
+        F1 & F2 & F3 --> M2["Grouped Feature Matrix Grouped by S1 entity_id"]
     end
 
-    subgraph S3["Stage 3: Supervised Scoring & Probability Calibration"]
-        M2 --> G3["GPU-Accelerated XGBoost (tree_method='hist', max_bin=256, Monotonic Constraints)"]
-        G3 --> REG["Regularization: 15% In-Place Country Masking + scale_pos_weight=0.5"]
-        REG --> CALIB["Cross-Fitted Isotonic / Sigmoid Probability Calibration"]
-        CALIB --> P3["Calibrated Probabilities P(Match) in [0, 1]"]
+    subgraph S3 [Stage 3: Supervised Scoring and Probability Calibration]
+        M2 --> G3["GPU-Accelerated XGBoost tree_method=hist, max_bin=256, Monotonic Constraints"]
+        G3 --> REG["Regularization: 15 Percent In-Place Country Masking + scale_pos_weight=0.5"]
+        REG --> CALIB["Cross-Fitted Isotonic or Sigmoid Probability Calibration"]
+        CALIB --> P3["Calibrated Probabilities P Match in 0, 1"]
     end
 
-    subgraph S4["Stage 4: Precision Decision & Injective Assignment"]
-        P3 --> ICT["Invariant Claim Theorem: O(N) Single-Pass Claim Filtering"]
-        ICT --> SWEEP["Monotonic Descending Macro-F0.5 Sweep -> Optimal tau* (~0.75 - 0.82)"]
-        SWEEP --> INJ["Greedy 1-to-N Injective Bipartite Assignment (Mutual Exclusivity)"]
-        INJ --> S4_OUT["Singleton Protection (Universal S1 Anchor Manifest)"]
+    subgraph S4 [Stage 4: Precision Decision and Injective Assignment]
+        P3 --> ICT["Invariant Claim Theorem: O N Single-Pass Claim Filtering"]
+        ICT --> SWEEP["Monotonic Descending Macro-F0.5 Sweep Optimal tau approx 0.75 - 0.82"]
+        SWEEP --> INJ["Greedy 1-to-N Injective Bipartite Assignment Mutual Exclusivity"]
+        INJ --> S4_OUT["Singleton Protection Universal S1 Anchor Manifest"]
         S4_OUT --> O4["Official Submission: matching_results.tsv"]
     end
 
-    subgraph S5["Stage 5: Verification & Packaging"]
-        O4 & CP_TSV --> VAL["Zero-Defect Submission Validator (Strict Prefix & Format Verification)"]
+    subgraph S5 [Stage 5: Verification and Packaging]
+        O4 & CP_TSV --> VAL["Zero-Defect Submission Validator Strict Prefix and Format Verification"]
     end
 ```
 
