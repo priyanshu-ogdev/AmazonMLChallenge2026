@@ -14,6 +14,7 @@ PROVENANCE_FILE=""
 SPLIT="train"
 BGE_MODEL="BAAI/bge-m3"
 SKIP_BGE=false
+SKIP_LEXICAL=false
 INCLUDE_QWEN=false
 QWEN_MODEL="Qwen/Qwen3-Embedding-0.6B"
 INCLUDE_QWEN_MATCHER=false
@@ -51,8 +52,8 @@ while [[ $# -gt 0 ]]; do
         --provenance-file|-ProvenanceFile) PROVENANCE_FILE="$2"; shift 2 ;;
         --split|-Split) SPLIT="$2"; shift 2 ;;
         --bge-model|-BgeModel) BGE_MODEL="$2"; shift 2 ;;
-SKIP_BGE=false
         --skip-bge) SKIP_BGE=true; shift 1 ;;
+        --skip-lexical) SKIP_LEXICAL=true; shift 1 ;;
         --include-qwen|-IncludeQwen) INCLUDE_QWEN=true; shift 1 ;;
         --qwen-model|-QwenModel) QWEN_MODEL="$2"; shift 2 ;;
         --include-qwen-matcher|-IncludeQwenMatcher) INCLUDE_QWEN_MATCHER=true; shift 1 ;;
@@ -135,18 +136,22 @@ bge_features_out="${OUTPUT_DIR}/bge_pair_features.tsv"
 qwen_features_out="${OUTPUT_DIR}/qwen_pair_features.tsv"
 qwen_matcher_features_out="${OUTPUT_DIR}/qwen_matcher_features.tsv"
 
-write_step "2c.1" "Extracting Stage 2c Deterministic Pair Features..."
-pair_args=(
-    "--source1" "$s1_file"
-    "--source2" "$s2_file"
-    "--source3" "$s3_file"
-    "--candidate-file" "$CANDIDATE_FILE"
-    "--output-file" "$pair_features_out"
-)
-if [ -n "$PROVENANCE_FILE" ] && [ -f "$PROVENANCE_FILE" ]; then
-    pair_args+=("--provenance-file" "$PROVENANCE_FILE")
+if [ "$SKIP_LEXICAL" = false ]; then
+    write_step "2c.1" "Extracting Stage 2c Deterministic Pair Features..."
+    pair_args=(
+        "--source1" "$s1_file"
+        "--source2" "$s2_file"
+        "--source3" "$s3_file"
+        "--candidate-file" "$CANDIDATE_FILE"
+        "--output-file" "$pair_features_out"
+    )
+    if [ -n "$PROVENANCE_FILE" ] && [ -f "$PROVENANCE_FILE" ]; then
+        pair_args+=("--provenance-file" "$PROVENANCE_FILE")
+    fi
+    invoke_python_module "src.pair_features" "Deterministic Pair Features" "$DRY_RUN" "$python" "${pair_args[@]}"
+else
+    write_info "Skipping Stage 2c Lexical Features (--skip-lexical specified)"
 fi
-invoke_python_module "src.pair_features" "Deterministic Pair Features" "$DRY_RUN" "$python" "${pair_args[@]}"
 
 if [ "$SKIP_BGE" = false ]; then
     write_step "2c.2" "Extracting Stage 2a BGE-M3 Cosine Similarity Features..."
