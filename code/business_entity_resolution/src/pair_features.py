@@ -386,19 +386,32 @@ def build_pair_features(
     items = list(pairs_by_s1.items())
     num_workers = max(1, os.cpu_count() or 4)
     
-    # Critical Fix for Colab/Kaggle / Low-RAM GPU Instances
-    # Python's 'fork' duplicates reference-counted dictionaries, causing OOM.
-    # The dictionaries take ~10GB. Dirtied pages take ~3-4GB per worker.
-    total_ram = psutil.virtual_memory().total
-    if total_ram < (28 * 1024**3):
-        print("[WARNING] Low RAM detected (< 28GB). Disabling ProcessPoolExecutor to prevent OOM crash.", flush=True)
-        num_workers = 1
-    elif total_ram < (45 * 1024**3):
-        print("[INFO] 30GB+ RAM detected. Scaling to NUM_WORKERS=2 to maximize RAM usage safely.", flush=True)
-        num_workers = min(num_workers, 2)
-    else:
-        # Limit workers for pair features since each process duplicates the lookup dictionaries
-        num_workers = min(num_workers, 14)
+    try:
+        import multiprocessing
+        ctx = multiprocessing.get_context("fork")
+        ExecutorClass = ProcessPoolExecutor
+        kwargs = {"mp_context": ctx}
+        
+        # Critical Fix for Linux/Mac: 'fork' duplicates reference-counted dictionaries.
+        # The dictionaries take ~10GB. Dirtied pages take ~3-4GB per worker.
+        total_ram = psutil.virtual_memory().total
+        if total_ram < (28 * 1024**3):
+            print("[WARNING] Low RAM detected (< 28GB). Disabling ProcessPoolExecutor to prevent OOM crash.", flush=True)
+            num_workers = 1
+        elif total_ram < (45 * 1024**3):
+            print("[INFO] 30GB+ RAM detected. Scaling to NUM_WORKERS=2 to maximize RAM usage safely.", flush=True)
+            num_workers = min(num_workers, 2)
+        else:
+            num_workers = min(num_workers, 14)
+            
+    except (ValueError, ImportError):
+        from concurrent.futures import ThreadPoolExecutor
+        ExecutorClass = ThreadPoolExecutor
+        kwargs = {}
+        # Windows/spawn environment: ThreadPoolExecutor shares RAM cleanly.
+        # We can safely use all cores to maximize speed.
+        num_workers = min(num_workers, 16)
+        print(f"[INFO] Windows/spawn environment detected. Using ThreadPoolExecutor with {num_workers} workers.", flush=True)
 
     chunk_size = math.ceil(len(items) / num_workers) if num_workers > 0 else 0
     if chunk_size == 0:
@@ -415,17 +428,6 @@ def build_pair_features(
         _shared_provenance = provenance
         _shared_s1_max_score = s1_max_score
         
-        try:
-            import multiprocessing
-            ctx = multiprocessing.get_context("fork")
-            ExecutorClass = ProcessPoolExecutor
-            kwargs = {"mp_context": ctx}
-        except (ValueError, ImportError):
-            from concurrent.futures import ThreadPoolExecutor
-            ExecutorClass = ThreadPoolExecutor
-            kwargs = {}
-            print("[INFO] Windows/spawn environment detected. Using ThreadPoolExecutor to share RAM safely.", flush=True)
-
         with ExecutorClass(max_workers=num_workers, **kwargs) as pool:
             futures = [
                 pool.submit(_feature_worker, chunk, None, None, None)
