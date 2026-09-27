@@ -661,35 +661,35 @@ class MultiChannelBlocker:
         # Channel 1: Exact Name, First-2-Tokens, Acronym & Composite Keys
         # -------------------------------------------------------------
         if s1.norm_name:
-            for rank, cid in enumerate(_hits(index_exact_name, s1.norm_name), 1):
+            for rank, cid in enumerate(itertools.islice(_hits(index_exact_name, s1.norm_name), max_candidates), 1):
                 _rh(cid, "exact_name", 1.0, rank, True)
 
         if s1.first_2_tokens:
-            for rank, cid in enumerate(_hits(index_first_2_tokens, s1.first_2_tokens), 1):
+            for rank, cid in enumerate(itertools.islice(_hits(index_first_2_tokens, s1.first_2_tokens), max_candidates), 1):
                 _rh(cid, "first_2_tokens", 0.90, rank, True)
 
         for acr in s1.acronyms:
-            for rank, cid in enumerate(_hits(index_acronym, acr), 1):
+            for rank, cid in enumerate(itertools.islice(_hits(index_acronym, acr), max_candidates), 1):
                 _rh(cid, "acronym_match", 0.85, rank, True)
 
         if s1.norm_name and s1.postal_code:
-            for rank, cid in enumerate(_hits(index_name_postal, (s1.norm_name, s1.postal_code)), 1):
+            for rank, cid in enumerate(itertools.islice(_hits(index_name_postal, (s1.norm_name, s1.postal_code)), max_candidates), 1):
                 _rh(cid, "exact_name_postal", 1.0, rank, True)
 
         if s1.norm_name and s1.street_number:
-            for rank, cid in enumerate(_hits(index_name_street, (s1.norm_name, s1.street_number)), 1):
+            for rank, cid in enumerate(itertools.islice(_hits(index_name_street, (s1.norm_name, s1.street_number)), max_candidates), 1):
                 _rh(cid, "exact_name_street", 0.95, rank, True)
 
         if s1.norm_name and s1.trailing_segment:
-            for rank, cid in enumerate(_hits(index_name_trailing, (s1.norm_name, s1.trailing_segment)), 1):
+            for rank, cid in enumerate(itertools.islice(_hits(index_name_trailing, (s1.norm_name, s1.trailing_segment)), max_candidates), 1):
                 _rh(cid, "exact_name_trailing", 0.95, rank, True)
 
         if s1.first_word and s1.postal_code and len(s1.first_word) >= 3:
-            for rank, cid in enumerate(_hits(index_lead_postal, (s1.first_word, s1.postal_code)), 1):
+            for rank, cid in enumerate(itertools.islice(_hits(index_lead_postal, (s1.first_word, s1.postal_code)), max_candidates), 1):
                 _rh(cid, "name_lead_postal", 0.90, rank, True)
 
         if s1.first_word and s1.street_number and s1.trailing_segment:
-            for rank, cid in enumerate(_hits(index_lead_street_trail, (s1.first_word, s1.street_number, s1.trailing_segment)), 1):
+            for rank, cid in enumerate(itertools.islice(_hits(index_lead_street_trail, (s1.first_word, s1.street_number, s1.trailing_segment)), max_candidates), 1):
                 _rh(cid, "name_lead_street_trailing", 0.90, rank, True)
 
         # -------------------------------------------------------------
