@@ -1,11 +1,11 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 4: Test Candidate Scoring & Stage 4 Submission Assembly.
 .DESCRIPTION
     Scores test candidate pairs using the trained Stage 3 model and leak-safe calibrator,
     then executes the Stage 4 deterministic decision policy:
     1. Scores candidates -> scored_candidates.tsv
-    2. Applies optimal macro-F0.5 threshold
+    2. Applies optimal macro-F0.5 threshold (injective preferred)
     3. Emits exactly one row per test S1 entity in matching_results.tsv
     4. Preserves empty match strings for singletons (guaranteeing 1.0 macro-F0.5 credit)
     5. Packages candidate_pairs.tsv alongside matching_results.tsv for final submission
@@ -49,7 +49,6 @@ Write-Header "PHASE 4: TEST CANDIDATE SCORING & STAGE 4 DECISION ASSEMBLY"
 
 $_log = Initialize-Logging -ScriptName "04_inference_and_decision"
 
-
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
 if (-not $OutputDir) {
@@ -88,26 +87,17 @@ if (-not $testFeatParent) { $testFeatParent = "." }
 
 if (-not $TestBgeFeatures) {
     $autoBge = Join-Path $testFeatParent "bge_pair_features.tsv"
-    if (Test-Path $autoBge) {
-        $TestBgeFeatures = $autoBge
-        Write-Info "Auto-detected Test BGE Features: $TestBgeFeatures"
-    }
+    if (Test-Path $autoBge) { $TestBgeFeatures = $autoBge; Write-Info "Auto-detected Test BGE Features: $TestBgeFeatures" }
 }
 
 if (-not $TestQwenFeatures) {
     $autoQwen = Join-Path $testFeatParent "qwen_pair_features.tsv"
-    if (Test-Path $autoQwen) {
-        $TestQwenFeatures = $autoQwen
-        Write-Info "Auto-detected Test Qwen Features: $TestQwenFeatures"
-    }
+    if (Test-Path $autoQwen) { $TestQwenFeatures = $autoQwen; Write-Info "Auto-detected Test Qwen Features: $TestQwenFeatures" }
 }
 
 if (-not $TestQwenMatcherFeatures) {
     $autoMatcher = Join-Path $testFeatParent "qwen_matcher_features.tsv"
-    if (Test-Path $autoMatcher) {
-        $TestQwenMatcherFeatures = $autoMatcher
-        Write-Info "Auto-detected Test Qwen Matcher Features: $TestQwenMatcherFeatures"
-    }
+    if (Test-Path $autoMatcher) { $TestQwenMatcherFeatures = $autoMatcher; Write-Info "Auto-detected Test Qwen Matcher Features: $TestQwenMatcherFeatures" }
 }
 
 if (-not $TestCandidateFile) {
@@ -121,30 +111,43 @@ if (-not $TestCandidateFile) {
     }
 }
 
+# Resolve test source paths — always passed so scoring.py can load TF-IDF features
+$s1TestFile = Join-Path $DATASET_DIR "test\test_source1.tsv"
+$s2TestFile = Join-Path $DATASET_DIR "test\test_source2.tsv"
+$s3TestFile = Join-Path $DATASET_DIR "test\test_source3.tsv"
+# Prefer Stage 0 normalized
+$normBase = Join-Path $DEFAULT_OUT "phase2_features_test"
+$s1Norm = Join-Path $normBase "stage0_normalized\test_source1_normalized.tsv"
+$s2Norm = Join-Path $normBase "stage0_normalized\test_source2_normalized.tsv"
+$s3Norm = Join-Path $normBase "stage0_normalized\test_source3_normalized.tsv"
+if ((Test-Path $s1Norm) -and (Test-Path $s2Norm) -and (Test-Path $s3Norm)) {
+    $s1TestFile = $s1Norm; $s2TestFile = $s2Norm; $s3TestFile = $s3Norm
+    Write-Info "Using Stage 0 normalized test source files."
+}
+
 $scoredCandidatesOut = Join-Path $OutputDir "scored_candidates.tsv"
 $matchingResultsOut  = Join-Path $OutputDir "matching_results.tsv"
 $metaFile            = Join-Path $ArtifactDir "stage3_metadata.json"
-$s1TestFile          = Join-Path $DATASET_DIR "test\test_source1.tsv"
 
 # ------------------------------------------------------------------------------
 # 1. Score Candidates
 # ------------------------------------------------------------------------------
 Write-Step "4.1" "Applying Stage 3 GBM & Calibration to Test Candidates..."
-if ($TestBgeFeatures -and (Test-Path $TestBgeFeatures)) {
-    Write-Info "BGE Features:           $TestBgeFeatures"
-}
-if ($TestQwenFeatures -and (Test-Path $TestQwenFeatures)) {
-    Write-Info "Qwen Features:          $TestQwenFeatures"
-}
-if ($TestQwenMatcherFeatures -and (Test-Path $TestQwenMatcherFeatures)) {
-    Write-Info "Qwen Matcher Features:  $TestQwenMatcherFeatures"
-}
+if ($TestBgeFeatures -and (Test-Path $TestBgeFeatures))               { Write-Info "BGE Features:           $TestBgeFeatures" }
+if ($TestQwenFeatures -and (Test-Path $TestQwenFeatures))             { Write-Info "Qwen Features:          $TestQwenFeatures" }
+if ($TestQwenMatcherFeatures -and (Test-Path $TestQwenMatcherFeatures)) { Write-Info "Qwen Matcher Features:  $TestQwenMatcherFeatures" }
+
 $scoreArgs = @(
     "--mode", "score",
     "--features", $TestFeatures,
     "--artifact-dir", $ArtifactDir,
-    "--output-file", $scoredCandidatesOut
+    "--output-file", $scoredCandidatesOut,
+    # Always pass source paths — scoring.py uses these to recompute TF-IDF cosine
+    # when a saved tfidf_vectorizer.joblib is present in the artifact dir.
+    "--source1", $s1TestFile,
+    "--candidate-sources", $s2TestFile, $s3TestFile
 )
+
 if ($TestBgeFeatures -and ($DryRun -or (Test-Path $TestBgeFeatures))) {
     $scoreArgs += @("--bge-features", $TestBgeFeatures)
 }
@@ -153,17 +156,6 @@ if ($TestQwenFeatures -and ($DryRun -or (Test-Path $TestQwenFeatures))) {
 }
 if ($TestQwenMatcherFeatures -and ($DryRun -or (Test-Path $TestQwenMatcherFeatures))) {
     $scoreArgs += @("--qwen-matcher-features", $TestQwenMatcherFeatures)
-}
-
-# Pass test source files if TF-IDF vectorizer was fitted in Stage 3
-$tfidfPath = Join-Path $ArtifactDir "tfidf_vectorizer.joblib"
-if (Test-Path $tfidfPath) {
-    $s2TestFile = Join-Path $DATASET_DIR "test\test_source2.tsv"
-    $s3TestFile = Join-Path $DATASET_DIR "test\test_source3.tsv"
-    $scoreArgs += @(
-        "--source1", $s1TestFile,
-        "--candidate-sources", $s2TestFile, $s3TestFile
-    )
 }
 
 Invoke-PythonModule "src.scoring" $scoreArgs "Score Test Candidates" -DryRun $DryRun -PythonExe $python
@@ -178,9 +170,7 @@ $decisionArgs = @(
     "--metadata", $metaFile,
     "--output", $matchingResultsOut
 )
-if (-not $Injective) {
-    $decisionArgs += "--no-injective"
-}
+if (-not $Injective) { $decisionArgs += "--no-injective" }
 
 Invoke-PythonModule "src.decision" $decisionArgs "Assemble Matching Results" -DryRun $DryRun -PythonExe $python
 
@@ -194,13 +184,16 @@ if ($TestCandidateFile -and (Test-Path $TestCandidateFile)) {
     Write-Success "Copied candidate pairs -> $destCand"
 }
 
+# ------------------------------------------------------------------------------
+# 4. Audit Output (fast line counter)
+# ------------------------------------------------------------------------------
 if (-not $DryRun) {
     Write-Step "4.4" "Auditing Output Completeness..."
     if (Test-Path $matchingResultsOut) {
-        $mCount = (Get-Content $matchingResultsOut | Measure-Object -Line).Lines - 1
-        $s1Expected = (Get-Content $s1TestFile | Measure-Object -Line).Lines - 1
-        Write-Info "Emitted S1 Rows:     $mCount / $s1Expected expected"
+        $mCount     = Get-FastLineCount $matchingResultsOut
+        $s1Expected = Get-FastLineCount $s1TestFile
 
+        Write-Info "Emitted S1 Rows: $mCount / $s1Expected expected"
         if ($mCount -eq $s1Expected) {
             Write-Success "Exact 1-to-1 coverage of Test Source 1 entities confirmed."
         } else {

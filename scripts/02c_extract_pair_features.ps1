@@ -1,11 +1,20 @@
-<#
+﻿<#
 .SYNOPSIS
-    Phase 2c: Representation & Deterministic Pair Feature Extraction.
+    Phase 2c: Pair Feature Extraction with GPU/CPU Parallelism.
 .DESCRIPTION
-    Extracts multi-modal signals for every candidate pair generated in Phase 1:
-    - Stage 2c: Deterministic lexical, address, phonetic, postal, conflict, rank & provenance features (src.pair_features)
-    - Stage 2a-i: Dense BGE-M3 cosine similarity features (src.bge_features)
-    - Stage 2a-ii: Optional Qwen3-Embedding-0.6B cosine similarity features (src.qwen_features)
+    Extracts multi-modal signals for every candidate pair generated in Phase 1.
+    Execution order is designed for maximum hardware utilization:
+
+      [CPU background]  Stage 2c deterministic pair features   (all CPU cores, ThreadPoolExecutor)
+      [GPU foreground]  Stage 2a-i   BGE-M3 cosine features    (GPU, sequential)
+                        [VRAM flush]
+      [GPU foreground]  Stage 2a-ii  Qwen cosine features      (GPU, sequential, if enabled)
+                        [VRAM flush]
+      [SYNC]            Wait for CPU pair-features job to finish
+
+    This means GPU is 100% busy while CPU runs in parallel — total wall time is
+    max(CPU_time, GPU_time) instead of their sum.
+
 .PARAMETER CandidateFile
     Path to candidate_pairs.tsv generated in Phase 1.
 .PARAMETER ProvenanceFile
@@ -13,11 +22,15 @@
 .PARAMETER Split
     Dataset split: "train" or "test" (default: "train").
 .PARAMETER BgeModel
-    BGE-M3 model path or HuggingFace ID (default: "BAAI/bge-m3" or merged fine-tuned model).
+    BGE-M3 model path or HuggingFace ID (default: "BAAI/bge-m3").
+.PARAMETER BgeBatchSize
+    BGE-M3 encoding batch size (default: 128 for GPU, 32 for CPU).
 .PARAMETER IncludeQwen
-    Extract auxiliary Qwen3-Embedding-0.6B features (requires GPU or PyTorch).
+    Extract auxiliary Qwen3-Embedding-0.6B features (default: true).
 .PARAMETER QwenModel
     Qwen embedding model path or HuggingFace ID (default: "Qwen/Qwen3-Embedding-0.6B").
+.PARAMETER QwenBatchSize
+    Qwen encoding batch size (default: 64 for GPU, 16 for CPU).
 .PARAMETER IncludeQwenMatcher
     Extract Stage 2b Qwen3-0.6B generative-matcher probabilities (stretch goal).
 .PARAMETER QwenMatcherAdapter
@@ -25,7 +38,7 @@
 .PARAMETER QwenMatcherModel
     Base model name for generative matcher (default: "Qwen/Qwen3-0.6B").
 .PARAMETER OutputDir
-    Output directory for feature TSVs (default: output\phase2_features_<split>).
+    Output directory for feature TSVs.
 .PARAMETER DryRun
     Display execution commands without executing them.
 #>
@@ -36,8 +49,10 @@ param(
     [ValidateSet("train", "test")]
     [string]$Split = "train",
     [string]$BgeModel = "BAAI/bge-m3",
+    [int]$BgeBatchSize = 0,
     [switch]$IncludeQwen,
     [string]$QwenModel = "Qwen/Qwen3-Embedding-0.6B",
+    [int]$QwenBatchSize = 0,
     [switch]$IncludeQwenMatcher = $false,
     [string]$QwenMatcherAdapter = "",
     [string]$QwenMatcherModel = "Qwen/Qwen3-0.6B",
@@ -55,8 +70,10 @@ Write-Header "PHASE 2c: PAIR FEATURES EXTRACTION ($($Split.ToUpper()))"
 
 $_log = Initialize-Logging -ScriptName "02c_extract_pair_features_$Split"
 
-
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
+
+# Probe GPU once — populates $script:_GpuAvailable, $script:_GpuDevice, etc.
+Initialize-Gpu -PythonExe $python
 
 if (-not $OutputDir) {
     $OutputDir = Join-Path $DEFAULT_OUT "phase2_features_$Split"
@@ -88,41 +105,56 @@ if (-not $ProvenanceFile) {
     }
 }
 
-# Resolve Source TSVs
+# Resolve Source TSVs — prefer Stage 0 normalized files when present
 $s1File = Join-Path $DATASET_DIR "$Split\${Split}_source1.tsv"
 $s2File = Join-Path $DATASET_DIR "$Split\${Split}_source2.tsv"
 $s3File = Join-Path $DATASET_DIR "$Split\${Split}_source3.tsv"
 
-# Check if pre-normalized Stage 0 TSVs are available in candidate parent or standard output
 $stage0Candidates = @(
-    (Join-Path $candParent "stage0_normalized"),
-    (Join-Path $candParent "stage0_normalized\$Split"),
-    (Join-Path $DEFAULT_OUT "phase1_blocking_$Split\stage0_normalized"),
-    (Join-Path $DEFAULT_OUT "phase1_blocking_$Split\stage0_normalized\$Split")
+    (Join-Path $candParent "stage0_normalized\${Split}_source1_normalized.tsv"),
+    (Join-Path $candParent "stage0_normalized\$Split\${Split}_source1_normalized.tsv"),
+    (Join-Path $DEFAULT_OUT "phase1_blocking_$Split\stage0_normalized\${Split}_source1_normalized.tsv"),
+    (Join-Path $DEFAULT_OUT "phase1_blocking_$Split\stage0_normalized\$Split\${Split}_source1_normalized.tsv")
 )
-foreach ($st0 in $stage0Candidates) {
-    $candS1 = Join-Path $st0 "${Split}_source1_normalized.tsv"
-    $candS2 = Join-Path $st0 "${Split}_source2_normalized.tsv"
-    $candS3 = Join-Path $st0 "${Split}_source3_normalized.tsv"
+foreach ($s0s1 in $stage0Candidates) {
+    $s0dir   = Split-Path -Parent $s0s1
+    $candS1  = $s0s1
+    $candS2  = Join-Path $s0dir "${Split}_source2_normalized.tsv"
+    $candS3  = Join-Path $s0dir "${Split}_source3_normalized.tsv"
     if ((Test-Path $candS1) -and (Test-Path $candS2) -and (Test-Path $candS3)) {
         $s1File = $candS1
         $s2File = $candS2
         $s3File = $candS3
-        Write-Info "Using Stage 0 normalized files for pair features: $st0"
+        Write-Info "Using Stage 0 normalized files: $s0dir"
         break
     }
 }
+
+# Resolve batch sizes — GPU vs CPU defaults
+if ($BgeBatchSize -le 0)  { $BgeBatchSize  = if ($script:_GpuAvailable) { 128 } else { 32  } }
+if ($QwenBatchSize -le 0) { $QwenBatchSize = if ($script:_GpuAvailable) { 64  } else { 16  } }
 
 $pairFeaturesOut        = Join-Path $OutputDir "pair_features.tsv"
 $bgeFeaturesOut         = Join-Path $OutputDir "bge_pair_features.tsv"
 $qwenFeaturesOut        = Join-Path $OutputDir "qwen_pair_features.tsv"
 $qwenMatcherFeaturesOut = Join-Path $OutputDir "qwen_matcher_features.tsv"
 
-# ------------------------------------------------------------------------------
-# 1. Deterministic Pair Features (Stage 2c)
-# ------------------------------------------------------------------------------
-Write-Step "2c.1" "Extracting Stage 2c Deterministic Pair Features..."
-$pairArgs = @(
+Write-Host ""
+Write-Host "  Execution Strategy:" -ForegroundColor Cyan
+Write-Host "  - [CPU background] Stage 2c pair features  (all cores, ThreadPoolExecutor)" -ForegroundColor White
+Write-Host "  - [GPU foreground] BGE-M3 encoding         (device=$($script:_GpuDevice), batch=$BgeBatchSize)" -ForegroundColor White
+if ($IncludeQwen) {
+    Write-Host "  - [GPU foreground] Qwen encoding           (device=$($script:_GpuDevice), batch=$QwenBatchSize)" -ForegroundColor White
+}
+Write-Host "  - [SYNC]           Wait for CPU job" -ForegroundColor White
+Write-Host ""
+
+# ==============================================================================
+# STEP 1 — Launch Stage 2c (CPU) as a background job immediately
+# ==============================================================================
+Write-Step "2c.1" "Launching Stage 2c Deterministic Pair Features in background (CPU all-cores)..."
+
+$pairArgs = @("-m", "src.pair_features",
     "--source1", $s1File,
     "--source2", $s2File,
     "--source3", $s3File,
@@ -133,42 +165,78 @@ if ($ProvenanceFile -and (Test-Path $ProvenanceFile)) {
     $pairArgs += @("--provenance-file", $ProvenanceFile)
 }
 
-Invoke-PythonModule "src.pair_features" $pairArgs "Deterministic Pair Features" -DryRun $DryRun -PythonExe $python
+$pairJob = $null
+if (-not $DryRun) {
+    # Capture variables needed inside Start-Job (no closure over parent scope)
+    $jobPython   = $python
+    $jobCodeDir  = $CODE_DIR
+    $jobProjRoot = $PROJECT_ROOT
+    $jobArgs     = $pairArgs
 
-# ------------------------------------------------------------------------------
-# 2. BGE-M3 Dense Cosine Features (Stage 2a)
-# ------------------------------------------------------------------------------
-Write-Step "2c.2" "Extracting Stage 2a BGE-M3 Cosine Similarity Features..."
+    $pairJob = Start-Job -Name "PairFeatures_$Split" -ScriptBlock {
+        param($PyExe, $CodeDir, $ProjRoot, $Args)
+        $env:PYTHONPATH       = "$CodeDir;$ProjRoot"
+        $env:PYTHONUNBUFFERED = "1"
+        Set-Location $CodeDir
+        & $PyExe -u @Args 2>&1
+        exit $LASTEXITCODE
+    } -ArgumentList $jobPython, $jobCodeDir, $jobProjRoot, $jobArgs
+
+    Write-Success "Background pair-features job started (Job ID: $($pairJob.Id))."
+} else {
+    Write-Host "  [DRY RUN] Would launch: $python $($pairArgs -join ' ')" -ForegroundColor Magenta
+}
+
+# ==============================================================================
+# STEP 2 — BGE-M3 Dense Features (GPU, sequential foreground)
+# ==============================================================================
+Write-Step "2c.2" "Extracting Stage 2a-i BGE-M3 Cosine Similarity Features (GPU foreground)..."
+Write-Info "Model:      $BgeModel"
+Write-Info "Device:     $($script:_GpuDevice)"
+Write-Info "Batch size: $BgeBatchSize"
+
 $bgeArgs = @(
     "--source1", $s1File,
     "--candidate-sources", $s2File, $s3File,
     "--candidate-file", $CandidateFile,
     "--output", $bgeFeaturesOut,
-    "--model-name", $BgeModel
+    "--model-name", $BgeModel,
+    "--batch-size", $BgeBatchSize.ToString(),
+    "--device", $script:_GpuDevice
 )
 
 Invoke-PythonModule "src.bge_features" $bgeArgs "BGE-M3 Dense Features" -DryRun $DryRun -PythonExe $python
 
-# ------------------------------------------------------------------------------
-# 3. Optional Qwen3 Embedding Features (Stage 2a-ii)
-# ------------------------------------------------------------------------------
+# Flush VRAM before loading Qwen
+Release-GpuMemory -Tag "BGE-M3" -PythonExe $python
+
+# ==============================================================================
+# STEP 3 — Qwen3 Embedding Features (GPU, sequential foreground)
+# ==============================================================================
 if ($IncludeQwen) {
-    Write-Step "2c.3" "Extracting Stage 2a-ii Qwen3-Embedding Cosine Features..."
+    Write-Step "2c.3" "Extracting Stage 2a-ii Qwen3-Embedding Cosine Features (GPU foreground)..."
+    Write-Info "Model:      $QwenModel"
+    Write-Info "Device:     $($script:_GpuDevice)"
+    Write-Info "Batch size: $QwenBatchSize"
+
     $qwenArgs = @(
         "--source1", $s1File,
-        "--source2", $s2File,
-        "--source3", $s3File,
+        "--candidate-sources", $s2File, $s3File,
         "--candidate-file", $CandidateFile,
         "--output-file", $qwenFeaturesOut,
-        "--model-name", $QwenModel
+        "--model-name", $QwenModel,
+        "--batch-size", $QwenBatchSize.ToString(),
+        "--device", $script:_GpuDevice
     )
 
     Invoke-PythonModule "src.qwen_features" $qwenArgs "Qwen3 Auxiliary Features" -DryRun $DryRun -PythonExe $python
+
+    Release-GpuMemory -Tag "Qwen" -PythonExe $python
 }
 
-# ------------------------------------------------------------------------------
-# 4. Optional Qwen3 Generative Matcher Features (Stage 2b Stretch)
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# STEP 4 — Qwen Generative Matcher (GPU, sequential, stretch goal)
+# ==============================================================================
 if ($IncludeQwenMatcher) {
     if (-not $QwenMatcherAdapter) {
         throw "IncludeQwenMatcher was specified, but QwenMatcherAdapter path was not provided."
@@ -182,29 +250,74 @@ if ($IncludeQwenMatcher) {
         "--adapter-path", $QwenMatcherAdapter,
         "--base-model-name", $QwenMatcherModel
     )
-
     Invoke-PythonModule "src.qwen_matcher_features" $matcherArgs "Qwen3 Generative Matcher Features" -DryRun $DryRun -PythonExe $python
+    Release-GpuMemory -Tag "QwenMatcher" -PythonExe $python
 }
 
+# ==============================================================================
+# STEP 5 — Synchronize: wait for background CPU pair-features job
+# ==============================================================================
+if ($pairJob) {
+    Write-Step "2c.5" "Waiting for background pair-features job (CPU) to complete..."
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    # Stream job output as it becomes available, in a polling loop
+    while ($pairJob.State -eq "Running") {
+        $partial = Receive-Job -Job $pairJob -Keep 2>$null
+        if ($partial) { $partial | ForEach-Object { Write-Host "  [pair_features] $_" -ForegroundColor DarkGray } }
+        Start-Sleep -Milliseconds 2000
+    }
+
+    # Final drain
+    $output = Receive-Job -Job $pairJob 2>&1
+    if ($output) { $output | ForEach-Object { Write-Host "  [pair_features] $_" -ForegroundColor DarkGray } }
+
+    $sw.Stop()
+    $elapsed = [Math]::Round($sw.Elapsed.TotalSeconds, 2)
+
+    if ($pairJob.State -eq "Failed") {
+        Remove-Job -Job $pairJob -Force
+        throw "Stage 2c pair_features background job FAILED after $($elapsed)s. Check output above."
+    }
+
+    Remove-Job -Job $pairJob -Force
+    Write-Success "Pair-features job completed in $($elapsed)s (overlap savings applied)."
+}
+
+# ==============================================================================
+# STEP 6 — Artifact Verification (fast .NET line counter)
+# ==============================================================================
 if (-not $DryRun) {
-    Write-Step "2c.5" "Verifying Feature Extraction Artifacts..."
+    Write-Step "2c.6" "Verifying Feature Extraction Artifacts..."
+
     if (Test-Path $pairFeaturesOut) {
-        $pLines = (Get-Content $pairFeaturesOut | Measure-Object -Line).Lines - 1
+        $pLines = Get-FastLineCount $pairFeaturesOut
         Write-Success "Deterministic features: $pLines pairs -> $pairFeaturesOut"
+    } else {
+        Write-ErrorMessage "pair_features.tsv not found at $pairFeaturesOut!"
     }
+
     if (Test-Path $bgeFeaturesOut) {
-        $bLines = (Get-Content $bgeFeaturesOut | Measure-Object -Line).Lines - 1
+        $bLines = Get-FastLineCount $bgeFeaturesOut
         Write-Success "BGE features:           $bLines pairs -> $bgeFeaturesOut"
+    } else {
+        Write-ErrorMessage "bge_pair_features.tsv not found at $bgeFeaturesOut!"
     }
-    if ($IncludeQwen -and (Test-Path $qwenFeaturesOut)) {
-        $qLines = (Get-Content $qwenFeaturesOut | Measure-Object -Line).Lines - 1
-        Write-Success "Qwen features:          $qLines pairs -> $qwenFeaturesOut"
+
+    if ($IncludeQwen) {
+        if (Test-Path $qwenFeaturesOut) {
+            $qLines = Get-FastLineCount $qwenFeaturesOut
+            Write-Success "Qwen features:          $qLines pairs -> $qwenFeaturesOut"
+        } else {
+            Write-ErrorMessage "qwen_pair_features.tsv not found at $qwenFeaturesOut!"
+        }
     }
+
     if ($IncludeQwenMatcher -and (Test-Path $qwenMatcherFeaturesOut)) {
-        $mLines = (Get-Content $qwenMatcherFeaturesOut | Measure-Object -Line).Lines - 1
+        $mLines = Get-FastLineCount $qwenMatcherFeaturesOut
         Write-Success "Qwen Matcher features:  $mLines pairs -> $qwenMatcherFeaturesOut"
     }
 }
 
-Write-Header "PHASE 2c COMPLETE"
+Write-Header "PHASE 2c COMPLETE ($($Split.ToUpper()))"
 Close-Logging

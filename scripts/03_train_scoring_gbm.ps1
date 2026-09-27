@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 3: Stage 3 Grouped-OOF Gradient Boosted Decision Tree (GBM) Training & Calibration.
 .DESCRIPTION
@@ -10,6 +10,8 @@
     - Fits out-of-fold leak-safe Platt or Isotonic calibration
     - Optimizes competition macro-F0.5 threshold with ground-truth match accounting
     - Emits gbm.json, stage3_metadata.json, and fold diagnostics
+    - GPU acceleration: if CUDA is available, XGBoost uses device=cuda (hist backend).
+      Folds run SEQUENTIALLY on GPU to avoid VRAM OOM.
 .PARAMETER FeaturesFile
     Path to pair_features.tsv from Phase 2c.
 .PARAMETER GroundTruthFile
@@ -63,8 +65,10 @@ Write-Header "PHASE 3: STAGE 3 GROUPED-OOF GBM TRAINING & CALIBRATION"
 
 $_log = Initialize-Logging -ScriptName "03_train_scoring_gbm"
 
-
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
+
+# Probe GPU — informs the user whether XGBoost will use CUDA or CPU
+Initialize-Gpu -PythonExe $python
 
 if (-not $OutputDir) {
     $OutputDir = Join-Path $DEFAULT_OUT "phase3_gbm"
@@ -90,45 +94,45 @@ if (-not $featParent) { $featParent = "." }
 
 if (-not $BgeFeatures) {
     $autoBge = Join-Path $featParent "bge_pair_features.tsv"
-    if (Test-Path $autoBge) {
-        $BgeFeatures = $autoBge
-        Write-Info "Auto-detected BGE Features: $BgeFeatures"
-    }
+    if (Test-Path $autoBge) { $BgeFeatures = $autoBge; Write-Info "Auto-detected BGE Features: $BgeFeatures" }
 }
 
 if (-not $QwenFeatures) {
     $autoQwen = Join-Path $featParent "qwen_pair_features.tsv"
-    if (Test-Path $autoQwen) {
-        $QwenFeatures = $autoQwen
-        Write-Info "Auto-detected Qwen Features: $QwenFeatures"
-    }
+    if (Test-Path $autoQwen) { $QwenFeatures = $autoQwen; Write-Info "Auto-detected Qwen Features: $QwenFeatures" }
 }
 
 if (-not $QwenMatcherFeatures) {
     $autoMatcher = Join-Path $featParent "qwen_matcher_features.tsv"
-    if (Test-Path $autoMatcher) {
-        $QwenMatcherFeatures = $autoMatcher
-        Write-Info "Auto-detected Qwen Matcher Features: $QwenMatcherFeatures"
-    }
+    if (Test-Path $autoMatcher) { $QwenMatcherFeatures = $autoMatcher; Write-Info "Auto-detected Qwen Matcher Features: $QwenMatcherFeatures" }
 }
 
 if (-not $GroundTruthFile) {
     $GroundTruthFile = Join-Path $DATASET_DIR "train\train_ground_truth.tsv"
 }
 
+# Always resolve source paths — needed by scoring.py when TF-IDF vectorizer is saved
+$s1Train = Join-Path $DATASET_DIR "train\train_source1.tsv"
+$s2Train = Join-Path $DATASET_DIR "train\train_source2.tsv"
+$s3Train = Join-Path $DATASET_DIR "train\train_source3.tsv"
+# Prefer Stage 0 normalized if available
+$normBase = Join-Path $DEFAULT_OUT "phase2_features_train"
+$s1Norm = Join-Path $normBase "stage0_normalized\train_source1_normalized.tsv"
+$s2Norm = Join-Path $normBase "stage0_normalized\train_source2_normalized.tsv"
+$s3Norm = Join-Path $normBase "stage0_normalized\train_source3_normalized.tsv"
+if ((Test-Path $s1Norm) -and (Test-Path $s2Norm) -and (Test-Path $s3Norm)) {
+    $s1Train = $s1Norm; $s2Train = $s2Norm; $s3Train = $s3Norm
+    Write-Info "Using Stage 0 normalized source files for TF-IDF."
+}
+
 Write-Step "3.1" "Configuring Stage 3 Training Parameters..."
 Write-Info "Booster:                $Booster (eta=$Eta)"
 Write-Info "Country Masking Rate:   $CountryMaskRate"
 Write-Info "Monotonic Constraints:  $UseMonotoneConstraints"
-if ($BgeFeatures -and (Test-Path $BgeFeatures)) {
-    Write-Info "BGE Features:           $BgeFeatures"
-}
-if ($QwenFeatures -and (Test-Path $QwenFeatures)) {
-    Write-Info "Qwen Features:          $QwenFeatures"
-}
-if ($QwenMatcherFeatures -and (Test-Path $QwenMatcherFeatures)) {
-    Write-Info "Qwen Matcher Features:  $QwenMatcherFeatures"
-}
+Write-Info "GPU Device:             $($script:_GpuDevice) (XGBoost will auto-detect)"
+if ($BgeFeatures -and (Test-Path $BgeFeatures))         { Write-Info "BGE Features:           $BgeFeatures" }
+if ($QwenFeatures -and (Test-Path $QwenFeatures))       { Write-Info "Qwen Features:          $QwenFeatures" }
+if ($QwenMatcherFeatures -and (Test-Path $QwenMatcherFeatures)) { Write-Info "Qwen Matcher Features:  $QwenMatcherFeatures" }
 Write-Info "Fold-Safe TF-IDF:       $IncludeTFIDF"
 Write-Info "Output Artifacts Dir:   $OutputDir"
 
@@ -139,7 +143,11 @@ $trainArgs = @(
     "--output-dir", $OutputDir,
     "--booster", $Booster,
     "--eta", $Eta.ToString(),
-    "--country-mask-rate", $CountryMaskRate.ToString()
+    "--country-mask-rate", $CountryMaskRate.ToString(),
+    # Always pass source paths — scoring.py uses these when a TF-IDF vectorizer was saved,
+    # and they are safely ignored when no vectorizer is present.
+    "--source1", $s1Train,
+    "--candidate-sources", $s2Train, $s3Train
 )
 
 if ($BgeFeatures -and ($DryRun -or (Test-Path $BgeFeatures))) {
@@ -151,21 +159,8 @@ if ($QwenFeatures -and ($DryRun -or (Test-Path $QwenFeatures))) {
 if ($QwenMatcherFeatures -and ($DryRun -or (Test-Path $QwenMatcherFeatures))) {
     $trainArgs += @("--qwen-matcher-features", $QwenMatcherFeatures)
 }
-if ($UseMonotoneConstraints) {
-    $trainArgs += "--use-monotone-constraints"
-}
-if ($CompareDART) {
-    $trainArgs += "--compare-dart"
-}
-if ($IncludeTFIDF) {
-    $s1Train = Join-Path $DATASET_DIR "train\train_source1.tsv"
-    $s2Train = Join-Path $DATASET_DIR "train\train_source2.tsv"
-    $s3Train = Join-Path $DATASET_DIR "train\train_source3.tsv"
-    $trainArgs += @(
-        "--source1", $s1Train,
-        "--candidate-sources", $s2Train, $s3Train
-    )
-}
+if ($UseMonotoneConstraints) { $trainArgs += "--use-monotone-constraints" }
+if ($CompareDART)            { $trainArgs += "--compare-dart" }
 
 Write-Step "3.2" "Training Grouped-OOF XGBoost Scorer..."
 Invoke-PythonModule "src.scoring" $trainArgs "Stage 3 GBM Training" -DryRun $DryRun -PythonExe $python
@@ -181,17 +176,22 @@ if (-not $DryRun) {
         Write-Host "  ========================================================" -ForegroundColor Cyan
         Write-Host "  STAGE 3 SCORING & CALIBRATION RESULTS" -ForegroundColor White
         Write-Host "  ========================================================" -ForegroundColor Cyan
-        Write-Host "  Optimal Macro F0.5:   $([Math]::Round($meta.macro_f05, 4))" -ForegroundColor Green
-        Write-Host "  Decision Threshold:  $([Math]::Round($meta.threshold, 4))" -ForegroundColor Green
-        Write-Host "  OOF Average Precision: $([Math]::Round($meta.average_precision, 4))" -ForegroundColor Green
-        $calMethod = if ($meta.calibrator_parameters.method) { $meta.calibrator_parameters.method } elseif ($meta.calibrator_parameters.name) { $meta.calibrator_parameters.name } else { $meta.calibrator }
+        Write-Host "  Optimal Macro F0.5:     $([Math]::Round($meta.macro_f05, 4))"           -ForegroundColor Green
+        Write-Host "  Decision Threshold:     $([Math]::Round($meta.threshold, 4))"            -ForegroundColor Green
+        Write-Host "  Injective Threshold:    $([Math]::Round($meta.threshold_injective, 4))"  -ForegroundColor Green
+        Write-Host "  Injective F0.5:         $([Math]::Round($meta.macro_f05_injective, 4))"  -ForegroundColor Green
+        Write-Host "  Injective Lift:         +$([Math]::Round($meta.injective_lift, 4))"      -ForegroundColor Cyan
+        Write-Host "  OOF Average Precision:  $([Math]::Round($meta.average_precision, 4))"   -ForegroundColor Green
+        $calMethod    = if ($meta.calibrator_parameters.method) { $meta.calibrator_parameters.method } `
+                        elseif ($meta.calibrator_parameters.name) { $meta.calibrator_parameters.name } `
+                        else { $meta.calibrator }
         $loadedBooster = if ($meta.booster) { $meta.booster } else { $meta.params.booster }
-        Write-Host "  Calibrator Method:    $calMethod" -ForegroundColor White
-        Write-Host "  Model Booster:        $loadedBooster" -ForegroundColor White
-        Write-Host "  Final Estimators:     $($meta.final_n_estimators)" -ForegroundColor White
+        Write-Host "  Calibrator Method:      $calMethod"     -ForegroundColor White
+        Write-Host "  Model Booster:          $loadedBooster" -ForegroundColor White
+        Write-Host "  Final Estimators:       $($meta.final_n_estimators)" -ForegroundColor White
         Write-Host ""
         Write-Host "  Top 5 Predictive Features (Gain):" -ForegroundColor Yellow
-        $gainObj = if ($meta.feature_importance.gain) { $meta.feature_importance.gain } else { $meta.feature_importance }
+        $gainObj  = if ($meta.feature_importance.gain) { $meta.feature_importance.gain } else { $meta.feature_importance }
         $topFeats = $gainObj.PSObject.Properties | Sort-Object { [double]$_.Value } -Descending | Select-Object -First 5
         foreach ($f in $topFeats) {
             Write-Host "    - $($f.Name): $([Math]::Round([double]$f.Value, 4))" -ForegroundColor Gray
@@ -201,7 +201,7 @@ if (-not $DryRun) {
             Write-Host ""
             Write-Host "  DART vs GBDT Cross-Country Diagnostic:" -ForegroundColor Yellow
             Write-Host "    - GBDT Mean AP:       $([Math]::Round([double]$cmp.gbtree_mean_held_out_country_ap, 4))" -ForegroundColor Gray
-            Write-Host "    - DART Mean AP:       $([Math]::Round([double]$cmp.dart_mean_held_out_country_ap, 4))" -ForegroundColor Gray
+            Write-Host "    - DART Mean AP:       $([Math]::Round([double]$cmp.dart_mean_held_out_country_ap, 4))"  -ForegroundColor Gray
             Write-Host "    - Winning Booster:    $($cmp.winning_booster) (delta: $([Math]::Round([double]$cmp.delta_ap, 4)))" -ForegroundColor Green
         }
         Write-Success "Phase 3 model artifacts saved -> $OutputDir"

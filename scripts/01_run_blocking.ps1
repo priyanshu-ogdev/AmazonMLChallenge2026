@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Phase 1: Stage 0 Normalization & Stage 1 Multi-Channel Candidate Generation (Blocking).
 .DESCRIPTION
@@ -21,8 +21,12 @@
 .PARAMETER OutputDir
     Output directory for candidate pairs and blocking summary.
 .PARAMETER NumWorkers
-    Number of parallel ProcessPoolExecutor workers for the query phase (default: 4).
-    Set to 1 to run single-threaded. Use 6 if index pkl is < 4 GB.
+    Number of parallel ThreadPoolExecutor workers for the query phase.
+    Default: 0 = auto-select based on available RAM:
+      < 28 GB  -> 1 worker (Kaggle / low-RAM)
+      28-44 GB -> 2 workers
+      >= 45 GB -> 4 workers
+    All workers share the same in-process index (no RAM duplication on Windows).
 .PARAMETER NoResume
     If set, overwrite existing output and re-run all S1 entities (disables checkpoint resume).
 .PARAMETER NoCacheIndex
@@ -43,7 +47,7 @@ param(
     [float]$SimilarityFloor = 0.3,
     [string]$DenseEmbeddings = "",
     [string]$OutputDir = "",
-    [int]$NumWorkers = 4,
+    [int]$NumWorkers = 0,
     [switch]$NoResume = $false,
     [switch]$NoCacheIndex = $false,
     [int]$CheckpointInterval = 10000,
@@ -60,7 +64,6 @@ Write-Header "PHASE 1: STAGE 0 NORMALIZATION & STAGE 1 BLOCKING ($($Split.ToUppe
 
 $_log = Initialize-Logging -ScriptName "01_run_blocking_$Split"
 
-
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
 # Determine default output directory
@@ -69,7 +72,28 @@ if (-not $OutputDir) {
 }
 Ensure-Directory $OutputDir
 
-# Determine source and ground truth paths
+# ------------------------------------------------------------------------------
+# RAM-aware worker count (Windows ThreadPoolExecutor — memory is shared, not duplicated)
+# Workers share the same blocking index in-process; more workers = more CPU utilisation,
+# NOT more RAM. Set to 1 only on very low-RAM machines where even a single process
+# loading the index would leave insufficient headroom for other tasks.
+# ------------------------------------------------------------------------------
+if ($NumWorkers -le 0) {
+    $totalRamGb = [Math]::Round(
+        (Get-WmiObject -Class Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+    if ($totalRamGb -lt 28) {
+        $NumWorkers = 1
+        Write-WarningMessage "Low RAM detected (${totalRamGb} GB < 28 GB). Forcing NumWorkers=1."
+    } elseif ($totalRamGb -lt 45) {
+        $NumWorkers = 2
+        Write-Info "RAM: ${totalRamGb} GB -> NumWorkers=2 (safe for 30 GB machines)."
+    } else {
+        $NumWorkers = 4
+        Write-Info "RAM: ${totalRamGb} GB -> NumWorkers=4 (all cores)."
+    }
+}
+
+# Determine source file paths
 if ($Split -eq "train") {
     $s1Raw   = Join-Path $DATASET_DIR "train\train_source1.tsv"
     $s2Raw   = Join-Path $DATASET_DIR "train\train_source2.tsv"
@@ -82,31 +106,40 @@ if ($Split -eq "train") {
     $gtFile  = ""
 }
 
-# Optional Stage 0 Preprocessing
 $s1File = $s1Raw
 $s2File = $s2Raw
 $s3File = $s3Raw
 
+# ------------------------------------------------------------------------------
+# Stage 0 normalized file discovery — single ordered search
+# ------------------------------------------------------------------------------
 $stage0Out = Join-Path $OutputDir "stage0_normalized"
-$s1Norm = Join-Path $stage0Out "${Split}_source1_normalized.tsv"
-if (-not (Test-Path $s1Norm)) { $s1Norm = Join-Path $stage0Out "$Split\${Split}_source1_normalized.tsv" }
-if (-not (Test-Path $s1Norm)) { $s1Norm = Join-Path $stage0Out "${Split}_source1_norm.tsv" }
-if (-not (Test-Path $s1Norm)) { $s1Norm = Join-Path $stage0Out "$Split\${Split}_source1_norm.tsv" }
+$s0Roots = @(
+    $stage0Out,
+    (Join-Path $stage0Out $Split)
+)
+foreach ($root in $s0Roots) {
+    $cS1 = Join-Path $root "${Split}_source1_normalized.tsv"
+    $cS2 = Join-Path $root "${Split}_source2_normalized.tsv"
+    $cS3 = Join-Path $root "${Split}_source3_normalized.tsv"
+    # Also accept _norm.tsv suffix produced by some Stage 0 variants
+    if (-not (Test-Path $cS1)) { $cS1 = Join-Path $root "${Split}_source1_norm.tsv" }
+    if (-not (Test-Path $cS2)) { $cS2 = Join-Path $root "${Split}_source2_norm.tsv" }
+    if (-not (Test-Path $cS3)) { $cS3 = Join-Path $root "${Split}_source3_norm.tsv" }
 
-$s2Norm = Join-Path $stage0Out "${Split}_source2_normalized.tsv"
-if (-not (Test-Path $s2Norm)) { $s2Norm = Join-Path $stage0Out "$Split\${Split}_source2_normalized.tsv" }
-if (-not (Test-Path $s2Norm)) { $s2Norm = Join-Path $stage0Out "${Split}_source2_norm.tsv" }
-if (-not (Test-Path $s2Norm)) { $s2Norm = Join-Path $stage0Out "$Split\${Split}_source2_norm.tsv" }
+    if ((Test-Path $cS1) -and (Test-Path $cS2) -and (Test-Path $cS3)) {
+        $s1File = $cS1
+        $s2File = $cS2
+        $s3File = $cS3
+        Write-Info "Using Stage 0 normalized files: $root"
+        break
+    }
+}
 
-$s3Norm = Join-Path $stage0Out "${Split}_source3_normalized.tsv"
-if (-not (Test-Path $s3Norm)) { $s3Norm = Join-Path $stage0Out "$Split\${Split}_source3_normalized.tsv" }
-if (-not (Test-Path $s3Norm)) { $s3Norm = Join-Path $stage0Out "${Split}_source3_norm.tsv" }
-if (-not (Test-Path $s3Norm)) { $s3Norm = Join-Path $stage0Out "$Split\${Split}_source3_norm.tsv" }
-
+# Optional Stage 0 Preprocessing
 if ($RunStage0) {
     Write-Step "1.0" "Running Stage 0 Streaming Normalization on $Split..."
     Ensure-Directory $stage0Out
-
     $stage0Args = @(
         "--mode", "stage0_normalize",
         "--data_dir", $DATASET_DIR,
@@ -114,18 +147,23 @@ if ($RunStage0) {
         "--splits", $Split
     )
     Invoke-PythonModule "src.data_builder" $stage0Args "Stage 0 Normalization" -DryRun $DryRun -PythonExe $python
+    # Re-probe normalized file locations after normalization completes
+    foreach ($root in $s0Roots) {
+        $cS1 = Join-Path $root "${Split}_source1_normalized.tsv"
+        $cS2 = Join-Path $root "${Split}_source2_normalized.tsv"
+        $cS3 = Join-Path $root "${Split}_source3_normalized.tsv"
+        if ((Test-Path $cS1) -and (Test-Path $cS2) -and (Test-Path $cS3)) {
+            $s1File = $cS1; $s2File = $cS2; $s3File = $cS3
+            Write-Info "Using freshly normalized files: $root"
+            break
+        }
+    }
 }
 
-if ((Test-Path $s1Norm) -and (Test-Path $s2Norm) -and (Test-Path $s3Norm)) {
-    $s1File = $s1Norm
-    $s2File = $s2Norm
-    $s3File = $s3Norm
-    Write-Info "Using Stage 0 S1 normalized: $s1File"
-    Write-Info "Using Stage 0 S2 normalized: $s2File"
-    Write-Info "Using Stage 0 S3 normalized: $s3File"
-} else {
-    Write-Info "Using raw input files (Stage 0 normalized files not present or not requested)."
-}
+Write-Info "Source 1: $s1File"
+Write-Info "Source 2: $s2File"
+Write-Info "Source 3: $s3File"
+Write-Info "Workers:  $NumWorkers (ThreadPoolExecutor — shared index, no RAM duplication)"
 
 # Run Stage 1 Multi-Channel Blocker
 Write-Step "1.1" "Executing Multi-Channel Blocker ($NumWorkers workers, resume=$((-not $NoResume)))..."
@@ -141,15 +179,8 @@ $blockerArgs = @(
     "--checkpoint-interval", $CheckpointInterval.ToString()
 )
 
-# Phase 2: cache control
-if ($NoCacheIndex) {
-    $blockerArgs += "--no-cache-index"
-}
-
-# Phase 3: resume control
-if ($NoResume) {
-    $blockerArgs += "--no-resume"
-}
+if ($NoCacheIndex)  { $blockerArgs += "--no-cache-index" }
+if ($NoResume)      { $blockerArgs += "--no-resume" }
 
 if ($gtFile -and (Test-Path $gtFile)) {
     $blockerArgs += @("--ground-truth", $gtFile)
@@ -164,7 +195,6 @@ Invoke-PythonModule "src.blocking" $blockerArgs "Stage 1 Blocking" -DryRun $DryR
 # Summary verification
 if (-not $DryRun) {
     $candPairs = Join-Path $OutputDir "candidate_pairs.tsv"
-    $candProv  = Join-Path $OutputDir "candidate_provenance.tsv"
     $summary   = Join-Path $OutputDir "blocking_summary.json"
 
     if ((Test-Path $candPairs) -and (Test-Path $summary)) {
@@ -180,9 +210,9 @@ if (-not $DryRun) {
             $ra = $summaryJson.recall_audit
             Write-Host ""
             Write-Host "  RECALL AUDIT REPORT (Train Ground Truth):" -ForegroundColor Cyan
-            Write-Host "  Pair Recall:     $([Math]::Round($ra.pair_recall * 100, 2))%" -ForegroundColor Green
+            Write-Host "  Pair Recall:     $([Math]::Round($ra.pair_recall * 100, 2))%"   -ForegroundColor Green
             Write-Host "  Entity Recall:   $([Math]::Round($ra.entity_recall * 100, 2))%" -ForegroundColor Green
-            Write-Host "  Any-Hit Rate:    $([Math]::Round($ra.any_hit_rate * 100, 2))%" -ForegroundColor Green
+            Write-Host "  Any-Hit Rate:    $([Math]::Round($ra.any_hit_rate * 100, 2))%"  -ForegroundColor Green
         }
         Write-Success "Phase 1 Blocking completed -> $OutputDir"
     } else {

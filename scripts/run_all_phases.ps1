@@ -52,6 +52,11 @@ param(
     # B-2: explicitly wire docs/10 canonical values so they appear in one place
     [float]$CountryMaskRate = 0.15,
     [bool]$UseMonotoneConstraints = $true,
+    # GPU-aware batch sizes (0 = auto-select in 02c based on detected hardware)
+    [int]$BgeBatchSize = 0,
+    [int]$QwenBatchSize = 0,
+    # Worker count for blocking (0 = auto-select based on available RAM)
+    [int]$NumWorkers = 0,
     [switch]$DryRun = $false,
     [string]$OutputDir = "",
     [string]$PythonPath = ""
@@ -76,6 +81,9 @@ Write-Header "AMAZON ML CHALLENGE 2026: END-TO-END PIPELINE ORCHESTRATOR"
 
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
+# Probe GPU once at pipeline start — sub-scripts inherit $script:_Gpu* via dot-sourcing
+Initialize-Gpu -PythonExe $python
+
 if (-not $OutputDir) {
     $OutputDir = $DEFAULT_OUT
 }
@@ -87,7 +95,11 @@ Write-Host "  - From Phase:            $FromPhase" -ForegroundColor White
 Write-Host "  - To Phase:              $ToPhase" -ForegroundColor White
 Write-Host "  - Run Mode:              $RunMode" -ForegroundColor White
 Write-Host "  - Skip GPU:              $SkipGPU (Use BGE-M3 base if true)" -ForegroundColor White
+Write-Host "  - GPU Device:            $($script:_GpuDevice) ($($script:_GpuName))" -ForegroundColor White
 Write-Host "  - Include Qwen:          $IncludeQwen" -ForegroundColor White
+Write-Host "  - BGE Batch Size:        $(if ($BgeBatchSize -gt 0) { $BgeBatchSize } else { 'auto' })" -ForegroundColor White
+Write-Host "  - Qwen Batch Size:       $(if ($QwenBatchSize -gt 0) { $QwenBatchSize } else { 'auto' })" -ForegroundColor White
+Write-Host "  - Blocking Workers:      $(if ($NumWorkers -gt 0) { $NumWorkers } else { 'auto (RAM-aware)' })" -ForegroundColor White
 Write-Host "  - Include Qwen Matcher:  $($script:IncludeQwenMatcher)" -ForegroundColor White
 Write-Host "  - Qwen Matcher Adapter:  $(if ($script:QwenMatcherAdapter) { $script:QwenMatcherAdapter } else { '(none)' })" -ForegroundColor White
 Write-Host "  - Run Stage 0:           $RunStage0" -ForegroundColor White
@@ -150,10 +162,10 @@ if ($RunMode -eq "InferenceOnly") {
 # Phase 1: Candidate Generation (Blocking) - Train & Test
 # ------------------------------------------------------------------------------
 Run-PipelinePhase 1 "Candidate Generation / Blocking" {
-    # B-1: MaxCandidates is the per-entity budget (docs/10 canonical = 50).
+    # MaxCandidates is the per-entity budget (docs/10 canonical = 50).
     # FastSample speed comes from blocking fewer entities inside Python, NOT
     # from reducing the per-entity budget below the retrieval depths (also 50).
-    $maxCandidates = 50   # always canonical; never lower than TopKSparse/TopKDense
+    $maxCandidates = 50
     $topK          = if ($RunMode -eq "FastSample") { 20 } else { 50 }
 
     # Train blocking
@@ -163,6 +175,7 @@ Run-PipelinePhase 1 "Candidate Generation / Blocking" {
         -MaxCandidates $maxCandidates `
         -TopKSparse $topK `
         -TopKDense  $topK `
+        -NumWorkers $NumWorkers `
         -OutputDir (Join-Path $OutputDir "phase1_blocking_train") `
         -DryRun:$DryRun `
         -PythonPath $python
@@ -174,6 +187,7 @@ Run-PipelinePhase 1 "Candidate Generation / Blocking" {
         -MaxCandidates $maxCandidates `
         -TopKSparse $topK `
         -TopKDense  $topK `
+        -NumWorkers $NumWorkers `
         -OutputDir (Join-Path $OutputDir "phase1_blocking_test") `
         -DryRun:$DryRun `
         -PythonPath $python
@@ -256,12 +270,15 @@ Run-PipelinePhase 2 "Representation & Feature Engineering" {
     }
 
     # 2c. Feature Extraction (Train & Test)
-    # A-2: read from $script: scope to get the gate-updated values
+    # A-2: read from $script: scope to get the gate-updated values.
+    # Each call runs pair_features (CPU) in background while BGE+Qwen run on GPU.
     & "$PSScriptRoot\02c_extract_pair_features.ps1" `
         -CandidateFile $trainCandFile `
         -Split "train" `
         -BgeModel $bgeModel `
+        -BgeBatchSize $BgeBatchSize `
         -IncludeQwen:$IncludeQwen `
+        -QwenBatchSize $QwenBatchSize `
         -IncludeQwenMatcher:$($script:IncludeQwenMatcher) `
         -QwenMatcherAdapter $script:QwenMatcherAdapter `
         -OutputDir (Join-Path $OutputDir "phase2_features_train") `
@@ -272,7 +289,9 @@ Run-PipelinePhase 2 "Representation & Feature Engineering" {
         -CandidateFile $testCandFile `
         -Split "test" `
         -BgeModel $bgeModel `
+        -BgeBatchSize $BgeBatchSize `
         -IncludeQwen:$IncludeQwen `
+        -QwenBatchSize $QwenBatchSize `
         -IncludeQwenMatcher:$($script:IncludeQwenMatcher) `
         -QwenMatcherAdapter $script:QwenMatcherAdapter `
         -OutputDir (Join-Path $OutputDir "phase2_features_test") `
