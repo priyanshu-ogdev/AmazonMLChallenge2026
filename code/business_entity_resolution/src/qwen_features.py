@@ -51,6 +51,8 @@ class QwenEntityEncoder:
         self.instruction = instruction
         self.batch_size = batch_size
         self.model = SentenceTransformer(model_name, device=device)
+        if device and "cuda" in device:
+            self.model.half()  # 2x speedup and VRAM reduction on Ampere GPUs
         self.model.max_seq_length = max_seq_length
         self.model_name = model_name
 
@@ -185,8 +187,16 @@ def build_qwen_features(
     s1_indices = [id_to_idx[sid] for sid in s1_ids]
     cand_indices = [id_to_idx[cid] for cid in cand_ids]
     
-    # Vectorized cosine similarity (embeddings are already L2 normalized)
-    similarities = np.einsum("ij,ij->i", embeddings[s1_indices], embeddings[cand_indices])
+    # Chunked vectorized cosine similarity to prevent RAM spikes on large candidate sets
+    chunk_size = 100_000
+    similarities = np.zeros(len(s1_indices), dtype=np.float32)
+    for i in range(0, len(s1_indices), chunk_size):
+        end = i + chunk_size
+        similarities[i:end] = np.einsum(
+            "ij,ij->i",
+            embeddings[s1_indices[i:end]],
+            embeddings[cand_indices[i:end]]
+        )
     
     # Vectorized missing text flags
     s1_missing = np.array([sid in empty_text_ids for sid in s1_ids], dtype=np.int8)
