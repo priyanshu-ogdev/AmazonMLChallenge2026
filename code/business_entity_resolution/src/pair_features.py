@@ -478,7 +478,7 @@ def _feature_worker(
 def stream_provenance_grouped(prov_file, max_cands):
     with open(prov_file, "r", encoding="utf-8") as f:
         header = f.readline()
-        col_map = {c: i for i, c in enumerate(header.rstrip("\\r\\n").split("\\t"))}
+        col_map = {c: i for i, c in enumerate(header.rstrip("\r\n").split("\t"))}
         s1_idx = col_map.get("source1_entity_id", 0)
         cid_idx = col_map.get("candidate_entity_id", 1)
         prov_idx = col_map.get("blocker_provenance", 3)
@@ -489,7 +489,7 @@ def stream_provenance_grouped(prov_file, max_cands):
         cur_s1 = None
         cur_dict = {}
         for line in f:
-            parts = line.rstrip("\\r\\n").split("\\t")
+            parts = line.rstrip("\r\n").split("\t")
             if len(parts) <= max(s1_idx, cid_idx): continue
             s1 = parts[s1_idx]
             if s1 != cur_s1:
@@ -535,7 +535,7 @@ def generate_feature_chunks(candidate_file, provenance_file, max_cands, chunk_si
         cf.readline() # header
         chunk = []
         for line in cf:
-            parts = line.rstrip("\\r\\n").split("\\t")
+            parts = line.rstrip("\r\n").split("\t")
             s1 = parts[0]
             if not s1: continue
             cand_str = parts[1] if len(parts) > 1 else ""
@@ -596,7 +596,7 @@ def build_pair_features(
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_file, "w", encoding="utf-8", newline="") as out_f:
-        writer = csv.writer(out_f, delimiter="\\t", quoting=csv.QUOTE_NONE, escapechar="\\\\")
+        writer = csv.writer(out_f, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
         writer.writerow(feature_columns)
 
         chunk_gen = generate_feature_chunks(candidate_file, provenance_file, max_candidates_per_entity)
