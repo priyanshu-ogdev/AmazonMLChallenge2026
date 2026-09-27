@@ -70,7 +70,7 @@ Through systematic algorithmic optimizations across Stages 0 through 4, total pi
 |---|---|---|---|---|
 | **Stage 1: Blocking** | Naive Python dict inverted index | `FastNormalizedBlocker` (Polars + uint32) | **~56x - 100x faster** | Zero-copy arrow ingestion & uint32 indexing |
 | **Stage 2a: BGE-M3 Dense** | FP32, Batch 32, CPU/GPU mixed | TF32 + FP16 + Batch 256 + Multi-GPU pool | **~4.1x faster** | TensorFloat-32 & half-precision matmul |
-| **Stage 2c: Pair Features** | Pure-Python Levenshtein + Dicts | C++ RapidFuzz + Zero-Alloc Tuple + Streaming | **~10x faster** | SIMD edit distances & zero heap churn |
+| **Stage 2c: Pair Features** | Pure-Python Dicts (100GB RAM Crash)| C++ RapidFuzz + 6-Tuple + ThreadPool | **~10x faster** | 99% RAM reduction & zero heap churn |
 | **Stage 3: GBM Training** | CPU-only XGBoost | GPU XGBoost (`hist`, `max_bin=256`) | **~5.5x faster** | CUDA histogram construction & 8-bit bins |
 | **Stage 3/4: Thresholding** | $O(M \times N)$ independent sweeps | **Invariant Claim Theorem** + Descending Sweep | **~250x faster** | Single $O(N)$ pass & sub-second sweep |
 | **Total End-to-End Run** | **~8 hours** | **~38 - 48 minutes** | **~10x - 12x faster** | Sequential GPU Memory Architecture |

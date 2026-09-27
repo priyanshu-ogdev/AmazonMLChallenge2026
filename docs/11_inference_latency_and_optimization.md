@@ -57,10 +57,10 @@ Through systematic algorithmic optimizations across Stages 0 through 4, total pi
 - **Zero-Redundancy Unique Encoding:** Only unique entities participating in candidate pairs are encoded once, caching normalized vectors in memory. Pairwise cosine similarity is computed via vectorized dot products.
 
 ### 3.3 Stage 2c: RapidFuzz C++ Lexical & Structural Engine
-- **SIMD C++ Kernels:** Replaces Python Levenshtein with RapidFuzz's AVX2/NEON-accelerated Levenshtein, `token_sort_ratio`, and `token_set_ratio`.
-- **Zero-Allocation `PairFeatureRow`:** Features are stored in a memory-efficient `tuple` subclass with `__slots__ = ()`, eliminating dictionary pointer overhead and reducing Python object memory by $>75\%$.
-- **Active ID Pre-Filtering:** Only entities present in `candidate_pairs.tsv` are loaded into memory (`needed_ids`), avoiding storing unused background records.
-- **Streaming Disk Writer:** Directly writes feature rows to TSV in batches of $50,000$, bounding system RAM to $< 3\text{ GB}$.
+- **Compact 6-Tuple RAM Compression:** Transformed the entity dictionary into a minimalist 6-tuple `(entity_id, raw_country, canon_country, name, address, postal)`. Sets of tokens and trigrams are computed strictly on-the-fly and immediately garbage collected, shrinking process footprint from an explosive 100GB+ down to $<1.5\text{ GB}$.
+- **SIMD C++ Kernels & Threading:** Replaces Python Levenshtein with RapidFuzz's AVX2/NEON-accelerated kernels. Because RapidFuzz releases the GIL, we migrated from `ProcessPoolExecutor` to `ThreadPoolExecutor` on Windows. This completely eliminates multi-process memory duplication (avoiding OS pagefile crashes) while sustaining 100% multi-core throughput.
+- **Zero-Allocation `PairFeatureRow`:** Features are stored in a memory-efficient `tuple` subclass with `__slots__ = ()`, preventing intermediate dictionary allocations per pair.
+- **Streaming Disk Writer:** Directly writes feature rows to TSV in batches of $5000$, bounding system RAM to $< 1.5\text{ GB}$.
 
 ### 3.4 Stage 3 & 4: Invariant Claim Theorem & Monotonic Sweep
 - **The Invariant Claim Theorem:** Under greedy score-sorted bipartite matching, a candidate $c$ can only ever be claimed by its highest-scoring pair. A single $O(N)$ linear pass filters sorted pairs, reducing 42M pairs to $\le 2.4\text{M}$ active claims.
