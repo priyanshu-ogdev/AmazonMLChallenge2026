@@ -28,6 +28,7 @@ import argparse
 import concurrent.futures
 import csv
 import hashlib
+import itertools
 import json
 import math
 import multiprocessing
@@ -431,7 +432,6 @@ class MultiChannelBlocker:
         Query an index respecting the country partitioning invariant.
         Phase 1 optimized: avoids unnecessary list() creation on hot paths.
         """
-        import itertools
         sub = index.get(key)
         if not sub:
             return _EMPTY_LIST
@@ -470,12 +470,11 @@ class MultiChannelBlocker:
         self,
         s1: BlockingRecord,
         dense_scores: Optional[Dict[str, float]] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Tuple[Any, ...]]:
         """
         Generate, union, score, and rank candidates for a single Source 1 record.
-        Returns a list of dicts with keys:
-          candidate_id, blocker_provenance, blocker_count, best_blocker_rank,
-          best_blocker_score, country_partition
+        Returns a list of tuples in the exact order needed for provenance.tsv:
+          (s1_id, cand_id, cand_source, provenance, count, rank, score, country)
 
         Phase 1 optimized: uses four flat dicts instead of defaultdict(lambda: {...})
         and inlines record_hit to eliminate per-call Python function overhead.
@@ -614,6 +613,11 @@ class MultiChannelBlocker:
                 s1_token_weights[tok] = tf * idf
 
             if s1_token_weights:
+                # Cap the maximum number of token queries to prevent worst-case explosion on very long entities
+                if len(s1_token_weights) > 10:
+                    top_tokens_list = sorted(s1_token_weights.keys(), key=lambda t: s1_token_weights[t], reverse=True)[:10]
+                    s1_token_weights = {t: s1_token_weights[t] for t in top_tokens_list}
+
                 for tok, w_s1 in s1_token_weights.items():
                     cands = self._query_partitioned_index(_index_tokens, tok, country)
                     for cid in cands:
@@ -680,16 +684,16 @@ class MultiChannelBlocker:
             ranked_candidates.append(
                 (
                     sort_key,
-                    {
-                        "source1_entity_id":    s1.entity_id,
-                        "candidate_entity_id":  cid,
-                        "candidate_source":     cand_source,
-                        "blocker_provenance":   provenance_str,
-                        "blocker_count":        blocker_cnt,
-                        "best_blocker_rank":    best_rank,
-                        "best_blocker_score":   round(best_score, 4),
-                        "country_partition":    s1.canonical_country or "global",
-                    },
+                    (
+                        s1.entity_id,           # 0: source1_entity_id
+                        cid,                    # 1: candidate_entity_id
+                        cand_source,            # 2: candidate_source
+                        provenance_str,         # 3: blocker_provenance
+                        blocker_cnt,            # 4: blocker_count
+                        best_rank,              # 5: best_blocker_rank
+                        round(best_score, 4),   # 6: best_blocker_score
+                        s1.canonical_country or "global", # 7: country_partition
+                    ),
                 )
             )
         ranked_candidates.sort(key=lambda item: item[0])
@@ -1032,11 +1036,8 @@ def _query_worker(
     with open(out_pairs_path, "w", encoding="utf-8", newline="") as pf, \
          open(out_prov_path, "w", encoding="utf-8", newline="") as pvf:
         pw = csv.writer(pf,  delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
-        dw = csv.DictWriter(
-            pvf, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\",
-            fieldnames=prov_fields,
-        )
-        dw.writeheader()
+        dw = csv.writer(pvf, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
+        dw.writerow(prov_fields)
         for row in chunk_rows:
             s1_rec = BlockingRecord.from_row(
                 entity_id=row["entity_id"],
@@ -1057,7 +1058,7 @@ def _query_worker(
                 pw.writerow([s1_rec.entity_id, ""])
             else:
                 pairs_count += len(candidates)
-                pw.writerow([s1_rec.entity_id, ",".join(c["candidate_entity_id"] for c in candidates)])
+                pw.writerow([s1_rec.entity_id, ",".join(c[1] for c in candidates)])
                 for c in candidates:
                     dw.writerow(c)
     print(f"[WORKER {worker_id}] done: {pairs_count:,} pairs, {singletons:,} singletons", flush=True)
@@ -1312,18 +1313,14 @@ def run_blocking(
              open(provenance_path,      file_mode, encoding="utf-8", newline="") as prov_file:
 
             pairs_writer = csv.writer(pairs_file, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
-            prov_writer  = csv.DictWriter(
-                prov_file,
-                delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\",
-                fieldnames=[
+            prov_writer  = csv.writer(prov_file, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
+            if not resume_mode:
+                pairs_writer.writerow(["source1_entity_id", "candidate_entity_ids"])
+                prov_writer.writerow([
                     "source1_entity_id", "candidate_entity_id", "candidate_source",
                     "blocker_provenance", "blocker_count", "best_blocker_rank",
                     "best_blocker_score", "country_partition",
-                ],
-            )
-            if not resume_mode:
-                pairs_writer.writerow(["source1_entity_id", "candidate_entity_ids"])
-                prov_writer.writeheader()
+                ])
 
             print(f"Generating candidate pairs for S1 records from {[str(p) for p in source1_paths]}...", flush=True)
             for row in read_tsv_records(source1_paths):
@@ -1358,11 +1355,11 @@ def run_blocking(
                     pairs_writer.writerow([s1_rec.entity_id, ""])
                 else:
                     total_pairs += len(candidates)
-                    cand_ids = [c["candidate_entity_id"] for c in candidates]
+                    cand_ids = [c[1] for c in candidates]
                     pairs_writer.writerow([s1_rec.entity_id, ",".join(cand_ids)])
                     for cand_info in candidates:
                         prov_writer.writerow(cand_info)
-                        for blk in cand_info["blocker_provenance"].split(","):
+                        for blk in cand_info[3].split(","):
                             channel_counts[blk] += 1
 
                 # Recall audit
@@ -1370,7 +1367,7 @@ def run_blocking(
                     true_matches = ground_truth[s1_rec.entity_id]
                     c_country = s1_rec.canonical_country or "unknown"
                     gt_country_totals[c_country] += len(true_matches)
-                    found_cands = {c["candidate_entity_id"] for c in candidates}
+                    found_cands = {c[1] for c in candidates}
                     gt_hits = true_matches & found_cands
                     gt_recovered_pairs += len(gt_hits)
                     if gt_hits:
@@ -1378,10 +1375,10 @@ def run_blocking(
                     if gt_hits == true_matches and len(true_matches) > 0:
                         gt_entity_full_hit += 1
                     for c in candidates:
-                        cid = c["candidate_entity_id"]
+                        cid = c[1]
                         if cid in true_matches:
                             gt_by_country[c_country] += 1
-                            for blk in c["blocker_provenance"].split(","):
+                            for blk in c[3].split(","):
                                 gt_by_channel[blk] += 1
 
                 # Progress + checkpoint flush
