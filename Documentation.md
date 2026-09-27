@@ -12,13 +12,13 @@
 ---
 
 ```mermaid
-flowchart TD
-    subgraph S0 [Stage 0 Ingestion and Normalization]
+graph TD
+    subgraph Stage 0 Ingestion and Normalization
         R0[Raw Feeds] --> N0[Unicode NFKC and Legal Suffix Canonicalization]
         N0 --> D0[Normalized Records and Missing Address Sentinels]
     end
 
-    subgraph S1 [Stage 1 Multi-Channel Candidate Generation]
+    subgraph Stage 1 Candidate Generation
         D0 --> B1[Channel 1 Exact and Composite Keys]
         D0 --> B2[Channel 2 Char N-Gram Inverted Index]
         D0 --> B3[Channel 3 Token Inverted Index]
@@ -32,36 +32,36 @@ flowchart TD
         B4b --> U1
         
         U1 --> G1{Recall Audit Gate}
-        G1 --> CP_TSV[candidate_pairs.tsv Max 50 Candidates]
+        G1 --> CP_TSV[candidate pairs Max 50 Candidates]
     end
 
-    subgraph S2 [Stage 2 Representation and Feature Engineering]
-        CP_TSV --> F1[Stage 2a BGE-M3 Dense Cosine]
-        CP_TSV --> F2[Stage 2b Qwen3-Embedding Cosine]
-        CP_TSV --> F3[Stage 2c 35 RapidFuzz Features]
+    subgraph Stage 2 Feature Engineering
+        CP_TSV --> F1[Stage 2a Dense Cosine]
+        CP_TSV --> F2[Stage 2b Qwen Cosine]
+        CP_TSV --> F3[Stage 2c RapidFuzz Features]
         
         F1 --> M2[Grouped Feature Matrix]
         F2 --> M2
         F3 --> M2
     end
 
-    subgraph S3 [Stage 3 Supervised Scoring and Probability Calibration]
-        M2 --> G3[GPU-Accelerated XGBoost with Monotonic Constraints]
+    subgraph Stage 3 Scoring Calibration
+        M2 --> G3[GPU XGBoost Monotonic Constraints]
         G3 --> REG[Regularization Country Masking]
         REG --> CALIB[Probability Calibration]
         CALIB --> P3[Calibrated Probabilities]
     end
 
-    subgraph S4 [Stage 4 Precision Decision and Injective Assignment]
-        P3 --> ICT[Invariant Claim Theorem O N Filtering]
-        ICT --> SWEEP[Monotonic Descending Macro-F0.5 Sweep]
-        SWEEP --> INJ[Greedy 1-to-N Injective Bipartite Assignment]
+    subgraph Stage 4 Decision Assignment
+        P3 --> ICT[Invariant Claim Theorem Filtering]
+        ICT --> SWEEP[Monotonic Descending Macro F0.5 Sweep]
+        SWEEP --> INJ[Greedy Injective Bipartite Assignment]
         INJ --> S4_OUT[Singleton Protection]
-        S4_OUT --> O4[Official Submission matching_results.tsv]
+        S4_OUT --> O4[Official Submission results.tsv]
     end
 
-    subgraph S5 [Stage 5 Verification and Packaging]
-        O4 --> VAL[Zero-Defect Submission Validator]
+    subgraph Stage 5 Verification Packaging
+        O4 --> VAL[Zero Defect Submission Validator]
         CP_TSV --> VAL
     end
 ```
