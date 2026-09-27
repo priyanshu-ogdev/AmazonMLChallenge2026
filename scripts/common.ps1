@@ -1,5 +1,5 @@
 # ==============================================================================
-# Business Entity Resolution — PowerShell Pipeline Orchestration: Common Helpers
+# Business Entity Resolution -- PowerShell Pipeline Orchestration: Common Helpers
 # ==============================================================================
 # Provides common path resolution, colorized logging, error handling,
 # GPU detection/teardown, and Python execution wrappers for all phase scripts.
@@ -55,7 +55,7 @@ function Get-PythonExecutable {
 # GPU Detection & Memory Management
 # ------------------------------------------------------------------------------
 
-# Script-level GPU state — populated by Initialize-Gpu
+# Script-level GPU state -- populated by Initialize-Gpu
 $script:_GpuAvailable = $false
 $script:_GpuDevice    = "cpu"
 $script:_GpuName      = "CPU"
@@ -93,12 +93,12 @@ except Exception as e:
             $script:_GpuDevice    = if ($script:_GpuAvailable) { "cuda" } else { "cpu" }
         }
     } catch {
-        # Probe failed — default to CPU
+        # Probe failed -- default to CPU
     }
 
     if ($script:_GpuAvailable) {
         Write-Host ""
-        Write-Host "  [GPU] $($script:_GpuName) — $($script:_GpuVramGb) GB VRAM — Sequential GPU mode active." -ForegroundColor Green
+        Write-Host "  [GPU] $($script:_GpuName) -- $($script:_GpuVramGb) GB VRAM -- Sequential GPU mode active." -ForegroundColor Green
         Write-Host "        Each model loaded exclusively. VRAM fully released between stages." -ForegroundColor DarkGreen
         Write-Host ""
     } else {
@@ -143,7 +143,7 @@ print('[GPU] VRAM cache cleared${tagMsg}.')
 }
 
 # ------------------------------------------------------------------------------
-# Fast Artifact Line Counter (.NET StreamReader — avoids full file load)
+# Fast Artifact Line Counter (.NET StreamReader -- avoids full file load)
 # ------------------------------------------------------------------------------
 function Get-FastLineCount {
     <#
@@ -257,7 +257,7 @@ function Invoke-PythonModule {
 
     $env:PYTHONPATH           = "$CODE_DIR;$PROJECT_ROOT"
     $env:PYTHONUNBUFFERED     = "1"
-    # Limit CUDA fragmentation — safe no-op on CPU-only machines
+    # Limit CUDA fragmentation -- safe no-op on CPU-only machines
     if (-not $env:PYTORCH_CUDA_ALLOC_CONF) {
         $env:PYTORCH_CUDA_ALLOC_CONF = "max_split_size_mb:512"
     }
@@ -328,7 +328,7 @@ function Initialize-Logging {
         Write-Host "[LOG] Transcript -> $logFile" -ForegroundColor DarkGray
     }
     catch {
-        # Transcript already running from parent orchestrator — that transcript
+        # Transcript already running from parent orchestrator -- that transcript
         # captures all output anyway; just return the path for reference.
         Write-Host "[LOG] Nested transcript skipped (parent transcript active): $logFile" -ForegroundColor DarkGray
     }
@@ -550,7 +550,9 @@ function Invoke-PythonModule {
     $env:PYTHONPATH = "$CODE_DIR;$PROJECT_ROOT"
     $env:PYTHONUNBUFFERED = "1"
 
+    $prevEAP = $ErrorActionPreference
     try {
+        $ErrorActionPreference = "Continue"
         Push-Location $CODE_DIR
         # Run python unbuffered and pipe through Write-Host so Start-Transcript captures all output live
         & $PythonExe -u $allArgs 2>&1 | ForEach-Object {
@@ -559,6 +561,7 @@ function Invoke-PythonModule {
         $exitCode = $LASTEXITCODE
     }
     finally {
+        $ErrorActionPreference = $prevEAP
         Pop-Location
         $env:PYTHONPATH = $oldPythonPath
         $env:PYTHONUNBUFFERED = $oldUnbuffered
@@ -615,7 +618,7 @@ function Initialize-Logging {
         Write-Host "[LOG] Transcript -> $logFile" -ForegroundColor DarkGray
     }
     catch {
-        # Transcript already running from parent orchestrator — that transcript
+        # Transcript already running from parent orchestrator -- that transcript
         # captures all output anyway; just return the path for reference.
         Write-Host "[LOG] Nested transcript skipped (parent transcript active): $logFile" -ForegroundColor DarkGray
     }
@@ -668,7 +671,9 @@ function Invoke-PythonScript {
     $env:PYTHONPATH = "$CODE_DIR;$PROJECT_ROOT"
     $env:PYTHONUNBUFFERED = "1"
 
+    $prevEAP = $ErrorActionPreference
     try {
+        $ErrorActionPreference = "Continue"
         Push-Location $PROJECT_ROOT
         & $PythonExe -u $ScriptPath $Arguments 2>&1 | ForEach-Object {
             Write-Host "$_"
@@ -676,6 +681,7 @@ function Invoke-PythonScript {
         $exitCode = $LASTEXITCODE
     }
     finally {
+        $ErrorActionPreference = $prevEAP
         Pop-Location
         $env:PYTHONPATH = $oldPythonPath
         $env:PYTHONUNBUFFERED = $oldUnbuffered

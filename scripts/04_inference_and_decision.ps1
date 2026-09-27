@@ -111,7 +111,7 @@ if (-not $TestCandidateFile) {
     }
 }
 
-# Resolve test source paths — always passed so scoring.py can load TF-IDF features
+# Resolve test source paths -- always passed so scoring.py can load TF-IDF features
 $s1TestFile = Join-Path $DATASET_DIR "test\test_source1.tsv"
 $s2TestFile = Join-Path $DATASET_DIR "test\test_source2.tsv"
 $s3TestFile = Join-Path $DATASET_DIR "test\test_source3.tsv"
@@ -142,7 +142,7 @@ $scoreArgs = @(
     "--features", $TestFeatures,
     "--artifact-dir", $ArtifactDir,
     "--output-file", $scoredCandidatesOut,
-    # Always pass source paths — scoring.py uses these to recompute TF-IDF cosine
+    # Always pass source paths -- scoring.py uses these to recompute TF-IDF cosine
     # when a saved tfidf_vectorizer.joblib is present in the artifact dir.
     "--source1", $s1TestFile,
     "--candidate-sources", $s2TestFile, $s3TestFile

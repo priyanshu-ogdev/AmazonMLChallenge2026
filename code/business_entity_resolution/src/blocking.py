@@ -78,6 +78,34 @@ MIN_TOKEN_LEN = 3
 
 # Index cache versioning — bump when MultiChannelBlocker schema changes
 INDEX_CACHE_VERSION = 3
+
+
+class CandidateHit(tuple):
+    """Zero-overhead tuple representing a candidate hit, supporting both index and key access."""
+    __slots__ = ()
+    _FIELDS = (
+        "source1_entity_id",
+        "candidate_entity_id",
+        "candidate_source",
+        "blocker_provenance",
+        "blocker_count",
+        "best_blocker_rank",
+        "best_blocker_score",
+        "country_partition",
+    )
+    _FIELD_MAP = {name: i for i, name in enumerate(_FIELDS)}
+
+    def __getitem__(self, item):
+        if isinstance(item, str):
+            idx = self._FIELD_MAP.get(item)
+            if idx is not None:
+                return super().__getitem__(idx)
+            raise KeyError(item)
+        return super().__getitem__(item)
+
+    def get(self, key, default=None):
+        idx = self._FIELD_MAP.get(key)
+        return super().__getitem__(idx) if idx is not None else default
 INDEX_CACHE_NAME = "candidate_index.pkl"
 _shared_blocker = None
 CHECKPOINT_INTERVAL = 10_000
@@ -684,7 +712,7 @@ class MultiChannelBlocker:
             ranked_candidates.append(
                 (
                     sort_key,
-                    (
+                    CandidateHit((
                         s1.entity_id,           # 0: source1_entity_id
                         cid,                    # 1: candidate_entity_id
                         cand_source,            # 2: candidate_source
@@ -693,7 +721,7 @@ class MultiChannelBlocker:
                         best_rank,              # 5: best_blocker_rank
                         round(best_score, 4),   # 6: best_blocker_score
                         s1.canonical_country or "global", # 7: country_partition
-                    ),
+                    )),
                 )
             )
         ranked_candidates.sort(key=lambda item: item[0])

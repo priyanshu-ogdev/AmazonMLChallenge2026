@@ -73,7 +73,7 @@ if (-not $OutputDir) {
 Ensure-Directory $OutputDir
 
 # ------------------------------------------------------------------------------
-# Worker count (Windows ThreadPoolExecutor — memory is shared, not duplicated)
+# Worker count (Windows ThreadPoolExecutor -- memory is shared, not duplicated)
 # Workers share the same blocking index in-process; more workers = more CPU utilisation,
 # NOT more RAM. We can safely use all available CPU cores.
 # ------------------------------------------------------------------------------
@@ -103,7 +103,7 @@ $s2File = $s2Raw
 $s3File = $s3Raw
 
 # ------------------------------------------------------------------------------
-# Stage 0 normalized file discovery — single ordered search
+# Stage 0 normalized file discovery -- single ordered search
 # ------------------------------------------------------------------------------
 $stage0Out = Join-Path $OutputDir "stage0_normalized"
 $s0Roots = @(
@@ -155,7 +155,7 @@ if ($RunStage0) {
 Write-Info "Source 1: $s1File"
 Write-Info "Source 2: $s2File"
 Write-Info "Source 3: $s3File"
-Write-Info "Workers:  $NumWorkers (ThreadPoolExecutor — shared index, no RAM duplication)"
+Write-Info "Workers:  $NumWorkers (ThreadPoolExecutor -- shared index, no RAM duplication)"
 
 # Run Stage 1 Multi-Channel Blocker
 Write-Step "1.1" "Executing Multi-Channel Blocker ($NumWorkers workers, resume=$((-not $NoResume)))..."

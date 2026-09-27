@@ -67,7 +67,7 @@ $ErrorActionPreference = "Stop"
 
 . "$PSScriptRoot\common.ps1"
 
-# C-1: open the master pipeline transcript — sub-scripts get their own transcripts too
+# C-1: open the master pipeline transcript -- sub-scripts get their own transcripts too
 $script:_masterLog = Initialize-Logging -ScriptName "run_all_phases"
 
 # A-2: declare QwenMatcher state at script scope so mutations inside scriptblocks
@@ -81,7 +81,7 @@ Write-Header "AMAZON ML CHALLENGE 2026: END-TO-END PIPELINE ORCHESTRATOR"
 
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
-# Probe GPU once at pipeline start — sub-scripts inherit $script:_Gpu* via dot-sourcing
+# Probe GPU once at pipeline start -- sub-scripts inherit $script:_Gpu* via dot-sourcing
 Initialize-Gpu -PythonExe $python
 
 if (-not $OutputDir) {
@@ -315,7 +315,7 @@ Run-PipelinePhase 3 "Grouped-OOF GBM Training & Calibration" {
     $qwenMatcherFeats = Join-Path $OutputDir "phase2_features_train\qwen_matcher_features.tsv"
     $p3ModelOut       = Join-Path $OutputDir "phase3_gbm"
 
-    # B-2: forward canonical docs/10 values explicitly — never rely on sub-script defaults
+    # B-2: forward canonical docs/10 values explicitly -- never rely on sub-script defaults
     $p3Params = @{
         FeaturesFile           = $trainFeats
         OutputDir              = $p3ModelOut

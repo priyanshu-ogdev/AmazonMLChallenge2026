@@ -67,7 +67,7 @@ $_log = Initialize-Logging -ScriptName "03_train_scoring_gbm"
 
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
-# Probe GPU — informs the user whether XGBoost will use CUDA or CPU
+# Probe GPU -- informs the user whether XGBoost will use CUDA or CPU
 Initialize-Gpu -PythonExe $python
 
 if (-not $OutputDir) {
@@ -111,7 +111,7 @@ if (-not $GroundTruthFile) {
     $GroundTruthFile = Join-Path $DATASET_DIR "train\train_ground_truth.tsv"
 }
 
-# Always resolve source paths — needed by scoring.py when TF-IDF vectorizer is saved
+# Always resolve source paths -- needed by scoring.py when TF-IDF vectorizer is saved
 $s1Train = Join-Path $DATASET_DIR "train\train_source1.tsv"
 $s2Train = Join-Path $DATASET_DIR "train\train_source2.tsv"
 $s3Train = Join-Path $DATASET_DIR "train\train_source3.tsv"
@@ -144,7 +144,7 @@ $trainArgs = @(
     "--booster", $Booster,
     "--eta", $Eta.ToString(),
     "--country-mask-rate", $CountryMaskRate.ToString(),
-    # Always pass source paths — scoring.py uses these when a TF-IDF vectorizer was saved,
+    # Always pass source paths -- scoring.py uses these when a TF-IDF vectorizer was saved,
     # and they are safely ignored when no vectorizer is present.
     "--source1", $s1Train,
     "--candidate-sources", $s2Train, $s3Train

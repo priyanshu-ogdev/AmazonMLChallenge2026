@@ -12,7 +12,7 @@
                         [VRAM flush]
       [SYNC]            Wait for CPU pair-features job to finish
 
-    This means GPU is 100% busy while CPU runs in parallel — total wall time is
+    This means GPU is 100% busy while CPU runs in parallel -- total wall time is
     max(CPU_time, GPU_time) instead of their sum.
 
 .PARAMETER CandidateFile
@@ -72,7 +72,7 @@ $_log = Initialize-Logging -ScriptName "02c_extract_pair_features_$Split"
 
 $python = Get-PythonExecutable -ExplicitPath $PythonPath
 
-# Probe GPU once — populates $script:_GpuAvailable, $script:_GpuDevice, etc.
+# Probe GPU once -- populates $script:_GpuAvailable, $script:_GpuDevice, etc.
 Initialize-Gpu -PythonExe $python
 
 if (-not $OutputDir) {
@@ -105,7 +105,7 @@ if (-not $ProvenanceFile) {
     }
 }
 
-# Resolve Source TSVs — prefer Stage 0 normalized files when present
+# Resolve Source TSVs -- prefer Stage 0 normalized files when present
 $s1File = Join-Path $DATASET_DIR "$Split\${Split}_source1.tsv"
 $s2File = Join-Path $DATASET_DIR "$Split\${Split}_source2.tsv"
 $s3File = Join-Path $DATASET_DIR "$Split\${Split}_source3.tsv"
@@ -130,7 +130,7 @@ foreach ($s0s1 in $stage0Candidates) {
     }
 }
 
-# Resolve batch sizes — GPU vs CPU defaults
+# Resolve batch sizes -- GPU vs CPU defaults
 if ($BgeBatchSize -le 0)  { $BgeBatchSize  = if ($script:_GpuAvailable) { 128 } else { 32  } }
 if ($QwenBatchSize -le 0) { $QwenBatchSize = if ($script:_GpuAvailable) { 64  } else { 16  } }
 
@@ -150,7 +150,7 @@ Write-Host "  - [SYNC]           Wait for CPU job" -ForegroundColor White
 Write-Host ""
 
 # ==============================================================================
-# STEP 1 — Launch Stage 2c (CPU) as a background job immediately
+# STEP 1 -- Launch Stage 2c (CPU) as a background job immediately
 # ==============================================================================
 Write-Step "2c.1" "Launching Stage 2c Deterministic Pair Features in background (CPU all-cores)..."
 
@@ -188,7 +188,7 @@ if (-not $DryRun) {
 }
 
 # ==============================================================================
-# STEP 2 — BGE-M3 Dense Features (GPU, sequential foreground)
+# STEP 2 -- BGE-M3 Dense Features (GPU, sequential foreground)
 # ==============================================================================
 Write-Step "2c.2" "Extracting Stage 2a-i BGE-M3 Cosine Similarity Features (GPU foreground)..."
 Write-Info "Model:      $BgeModel"
@@ -211,7 +211,7 @@ Invoke-PythonModule "src.bge_features" $bgeArgs "BGE-M3 Dense Features" -DryRun 
 Release-GpuMemory -Tag "BGE-M3" -PythonExe $python
 
 # ==============================================================================
-# STEP 3 — Qwen3 Embedding Features (GPU, sequential foreground)
+# STEP 3 -- Qwen3 Embedding Features (GPU, sequential foreground)
 # ==============================================================================
 if ($IncludeQwen) {
     Write-Step "2c.3" "Extracting Stage 2a-ii Qwen3-Embedding Cosine Features (GPU foreground)..."
@@ -235,7 +235,7 @@ if ($IncludeQwen) {
 }
 
 # ==============================================================================
-# STEP 4 — Qwen Generative Matcher (GPU, sequential, stretch goal)
+# STEP 4 -- Qwen Generative Matcher (GPU, sequential, stretch goal)
 # ==============================================================================
 if ($IncludeQwenMatcher) {
     if (-not $QwenMatcherAdapter) {
@@ -255,7 +255,7 @@ if ($IncludeQwenMatcher) {
 }
 
 # ==============================================================================
-# STEP 5 — Synchronize: wait for background CPU pair-features job
+# STEP 5 -- Synchronize: wait for background CPU pair-features job
 # ==============================================================================
 if ($pairJob) {
     Write-Step "2c.5" "Waiting for background pair-features job (CPU) to complete..."
@@ -285,7 +285,7 @@ if ($pairJob) {
 }
 
 # ==============================================================================
-# STEP 6 — Artifact Verification (fast .NET line counter)
+# STEP 6 -- Artifact Verification (fast .NET line counter)
 # ==============================================================================
 if (-not $DryRun) {
     Write-Step "2c.6" "Verifying Feature Extraction Artifacts..."

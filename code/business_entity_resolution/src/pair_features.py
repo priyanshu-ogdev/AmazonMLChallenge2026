@@ -44,6 +44,70 @@ def _numeric_tokens(value: str) -> Set[str]:
     return set(_NUMBER_RE.findall(value or ""))
 
 
+class PairFeatureRow(tuple):
+    """Zero-overhead tuple representing a pair feature row with key/index dual access."""
+    __slots__ = ()
+    _FIELDS = (
+        "source1_entity_id",
+        "candidate_entity_id",
+        "source1_country",
+        "candidate_country",
+        "source1_canonical_country",
+        "candidate_canonical_country",
+        "source_is_s3",
+        "country_equal",
+        "country_equal_missing",
+        "left_country_missing",
+        "right_country_missing",
+        "name_both_missing",
+        "address_both_missing",
+        "name_exact",
+        "address_exact",
+        "name_jaccard",
+        "name_overlap",
+        "name_edit_similarity",
+        "name_char_trigram_jaccard",
+        "address_jaccard",
+        "address_overlap",
+        "address_edit_similarity",
+        "address_char_trigram_jaccard",
+        "name_number_overlap",
+        "address_number_overlap",
+        "postal_equal",
+        "postal_missing_either",
+        "name_length_abs_diff",
+        "address_length_abs_diff",
+        "same_name_different_address",
+        "same_address_different_name",
+        "candidate_rank",
+        "candidate_rank_missing",
+        "rank_margin_from_best",
+        "best_blocker_score",
+        "best_blocker_score_missing",
+        "best_blocker_score_diff",
+        "best_blocker_score_diff_missing",
+        "blocker_count",
+        "candidate_count_for_s1",
+        "has_blocker_provenance",
+        "blocker_provenance",
+    )
+    _FIELD_MAP = {name: i for i, name in enumerate(_FIELDS)}
+    _FIELD_MAP["candidate_count"] = 39
+    _FIELD_MAP["has_provenance"] = 40
+
+    def __getitem__(self, item):
+        if isinstance(item, str):
+            idx = self._FIELD_MAP.get(item)
+            if idx is not None:
+                return super().__getitem__(idx)
+            raise KeyError(item)
+        return super().__getitem__(item)
+
+    def get(self, key, default=None):
+        idx = self._FIELD_MAP.get(key)
+        return super().__getitem__(idx) if idx is not None else default
+
+
 try:
     from rapidfuzz.distance import Levenshtein as _rf_levenshtein
 
@@ -200,7 +264,7 @@ def pair_feature_row(
         int(bool(provenance)),
         provenance or "",
     )
-    return row
+    return PairFeatureRow(row)
 
 
 def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
