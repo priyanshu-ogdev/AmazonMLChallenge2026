@@ -893,8 +893,10 @@ class MultiChannelBlocker:
                 "_cached_max_token_count": self._cached_max_token_count,
             },
         }
-        with open(path, "wb") as fh:
+        tmp_path = path.with_suffix(".tmp")
+        with open(tmp_path, "wb") as fh:
             pickle.dump(payload, fh, protocol=5)
+        tmp_path.replace(path)
         size_mb = path.stat().st_size / 1024 ** 2
         print(f"[CACHE] Index saved: {path} ({size_mb:.1f} MB)", flush=True)
 
@@ -1123,13 +1125,8 @@ def _candidate_source_fingerprint(paths: Sequence[Path]) -> str:
 
 
 def _read_cache_fingerprint(cache_path: Path) -> str:
-    """Peek the fingerprint stored inside a pickle cache without full load."""
-    try:
-        with open(cache_path, "rb") as fh:
-            data = pickle.load(fh)
-        return data.get("_fingerprint", "")
-    except Exception:
-        return ""
+    """(Deprecated) Peek the fingerprint stored inside a pickle cache."""
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1290,12 +1287,15 @@ def run_blocking(
 
     if cache_index and cache_path.exists():
         try:
-            cached_fp = _read_cache_fingerprint(cache_path)
+            print(f"[CACHE] Loading index from {cache_path}...", flush=True)
+            loaded_blocker = MultiChannelBlocker.load_index(cache_path)
+            
+            cached_fp = getattr(loaded_blocker, "_fingerprint", "")
             if cached_fp == fingerprint:
-                print(f"[CACHE] Fingerprint match — loading index from {cache_path}...", flush=True)
+                print(f"[CACHE] Fingerprint match! Index loaded successfully.", flush=True)
+                blocker = loaded_blocker
             else:
-                print(f"[CACHE] Fingerprint mismatch (cached={cached_fp} current={fingerprint}) — FORCING load of index anyway.", flush=True)
-            blocker = MultiChannelBlocker.load_index(cache_path)
+                print(f"[CACHE] Fingerprint mismatch (cached={cached_fp} current={fingerprint}). Discarding cache and rebuilding.", flush=True)
         except Exception as exc:
             print(f"[CACHE] Load failed ({exc}) — rebuilding index.", flush=True)
 
