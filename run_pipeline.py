@@ -78,11 +78,11 @@ def _default_batch(default_gpu: int, default_cpu: int) -> int:
     return default_gpu if _cuda_available() else default_cpu
 
 
-def run_blocking(source1, source2, output_dir, use_fast=False):
+def run_blocking(source1, source2, output_dir, use_fast=False, max_candidates=10):
     """Stage 1: Multi-channel blocking."""
     t0 = time.time()
     logger.info("=" * 70)
-    logger.info("[STAGE 1] Blocking -- CPU+RAM, all cores (engine=%s).", "FastNormalizedBlocker" if use_fast else "MultiChannelBlocker")
+    logger.info("[STAGE 1] Blocking -- CPU+RAM, all cores (engine=%s, max_cands=%d).", "FastNormalizedBlocker" if use_fast else "MultiChannelBlocker", max_candidates)
     logger.info("=" * 70)
     if use_fast:
         from src.fast_blocking import run_fast_blocking as _fast_blocking
@@ -90,6 +90,7 @@ def run_blocking(source1, source2, output_dir, use_fast=False):
             source1_paths=source1,
             candidate_sources=source2,
             output_dir=output_dir,
+            max_candidates_per_entity=max_candidates,
         )
     else:
         from src.blocking import run_blocking as _blocking
@@ -101,7 +102,19 @@ def run_blocking(source1, source2, output_dir, use_fast=False):
     logger.info("[STAGE 1] Done in %.1f s.", time.time() - t0)
 
 
-def run_bge_features(source1, candidate_sources, candidate_file, output_dir, batch_size):
+def _resolve_normalized(paths: List[Path], output_dir: Path) -> List[Path]:
+    norm_dir = output_dir / "stage0_normalized"
+    resolved = []
+    for p in paths:
+        cand = norm_dir / f"{p.stem}_normalized.tsv"
+        if cand.exists() and cand.stat().st_size > 0:
+            resolved.append(cand)
+        else:
+            resolved.append(p)
+    return resolved
+
+
+def run_bge_features(source1, candidate_sources, candidate_file, output_dir, batch_size, max_candidates_per_entity=10):
     """Stage 2a: BGE-M3 dense pair features."""
     from src.bge_features import build_bge_features
     output_file = output_dir / "bge_features.tsv"
@@ -110,13 +123,17 @@ def run_bge_features(source1, candidate_sources, candidate_file, output_dir, bat
     logger.info("=" * 70)
     logger.info("[STAGE 2a] BGE-M3 features -- device=%s, batch=%d.", device or "cpu", batch_size)
     logger.info("=" * 70)
+    resolved_s1 = _resolve_normalized(source1, output_dir)
+    resolved_cands = _resolve_normalized(candidate_sources, output_dir)
     build_bge_features(
-        source1_paths=source1,
-        candidate_paths=candidate_sources,
+        source1_paths=resolved_s1,
+        candidate_paths=resolved_cands,
         candidate_file=candidate_file,
         output_file=output_file,
         batch_size=batch_size,
         device=device,
+        max_seq_length=64,
+        max_candidates_per_entity=max_candidates_per_entity,
     )
     _release_gpu("BGE-M3")
     logger.info("[STAGE 2a] Done in %.1f s -> %s", time.time() - t0, output_file)
@@ -145,21 +162,44 @@ def run_qwen_features(source1, candidate_sources, candidate_file, output_dir, ba
     return output_file
 
 
-def run_pair_features(source1, candidate_sources, candidate_file, output_dir, provenance_file=None):
+def run_pair_features(source1, candidate_sources, candidate_file, output_dir, provenance_file=None, max_candidates_per_entity=15):
     """Stage 2c: Deterministic lexical pair features (CPU only)."""
+    import csv
+    import pandas as pd
     from src.pair_features import build_pair_features, load_records
     output_file = output_dir / "pair_features.tsv"
-    all_paths = list(source1) + list(candidate_sources)
+    resolved_s1 = _resolve_normalized(source1, output_dir)
+    resolved_cands = _resolve_normalized(candidate_sources, output_dir)
+    all_paths = list(resolved_s1) + list(resolved_cands)
     t0 = time.time()
     logger.info("=" * 70)
     logger.info("[STAGE 2c] Pair features -- CPU, all cores, tuple-optimized.")
     logger.info("=" * 70)
-    records = load_records(all_paths)
+
+    # Pre-extract active IDs to keep memory minimal
+    cands_df = pd.read_csv(candidate_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
+    s1_vals = cands_df["source1_entity_id"].values
+    cand_vals = cands_df["candidate_entity_ids"].values
+    needed_ids = set(s1_vals)
+    for c_str in cand_vals:
+        if c_str:
+            for c in c_str.split(",")[:max_candidates_per_entity]:
+                c_clean = c.strip()
+                if c_clean:
+                    needed_ids.add(c_clean)
+    del cands_df
+    gc.collect()
+
+    records = load_records(all_paths, needed_ids=needed_ids)
+    del needed_ids
+    gc.collect()
+
     build_pair_features(
         records=records,
         candidate_file=candidate_file,
         output_file=output_file,
         provenance_file=provenance_file,
+        max_candidates_per_entity=max_candidates_per_entity,
     )
     del records
     gc.collect()
@@ -240,7 +280,9 @@ def run_decision(scored_file, source1, output_dir, artifact_dir):
     result = assemble_matching_results(scored, source1_ids, threshold=threshold, injective=True)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_file, sep="\t", index=False, quoting=_csv.QUOTE_NONE, escapechar="\\")
-    logger.info("[STAGE 4] Done in %.1f s -> %s (%d rows).", time.time() - t0, output_file, len(result))
+    matching_file = output_dir / "matching_results.tsv"
+    result.to_csv(matching_file, sep="\t", index=False, quoting=_csv.QUOTE_NONE, escapechar="\\")
+    logger.info("[STAGE 4] Done in %.1f s -> %s and %s (%d rows).", time.time() - t0, output_file, matching_file, len(result))
     return output_file
 
 
@@ -271,6 +313,7 @@ def main() -> None:
     parser.add_argument("--use-monotone-constraints", action="store_true")
     parser.add_argument("--compare-dart", action="store_true")
     parser.add_argument("--fast-blocking", action="store_true", help="Use vectorized Polars FastNormalizedBlocker")
+    parser.add_argument("--max-candidates-per-entity", type=int, default=10, help="Maximum candidates per entity (default: 10)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -294,7 +337,7 @@ def main() -> None:
     if not candidate_sources:
         parser.error("At least one of --source2 or --source3 must be provided.")
 
-    bge_batch = args.bge_batch_size or _default_batch(128, 32)
+    bge_batch = args.bge_batch_size or _default_batch(256, 32)
     qwen_batch = args.qwen_batch_size or _default_batch(64, 16)
 
     if _cuda_available():
@@ -321,19 +364,14 @@ def main() -> None:
             sys.exit(1)
     else:
         run_blocking(source1=source1, source2=candidate_sources,
-                     output_dir=output_dir, use_fast=args.fast_blocking)
+                     output_dir=output_dir, use_fast=args.fast_blocking,
+                     max_candidates=args.max_candidates_per_entity)
 
-    # Stage 2a - BGE
+    # Stage 2 - Features: Run sequentially to ensure dedicated RAM and zero OOM
     bge_file = output_dir / "bge_features.tsv"
-    if args.skip_bge:
-        logger.info("[STAGE 2a] Skipped. Using existing: %s", bge_file)
-    else:
-        bge_file = run_bge_features(source1=source1, candidate_sources=candidate_sources,
-                                    candidate_file=candidate_pairs_file,
-                                    output_dir=output_dir, batch_size=bge_batch)
-
-    # Stage 2b - Qwen
+    pair_features_file = output_dir / "pair_features.tsv"
     qwen_file = output_dir / "qwen_features.tsv"
+
     if args.skip_qwen:
         logger.info("[STAGE 2b] Skipped. Using existing: %s", qwen_file)
     else:
@@ -341,15 +379,33 @@ def main() -> None:
                                       candidate_file=candidate_pairs_file,
                                       output_dir=output_dir, batch_size=qwen_batch)
 
-    # Stage 2c - Pair features
-    pair_features_file = output_dir / "pair_features.tsv"
+    # Stage 2c - Pair Features (CPU, all cores)
     if args.skip_pair_features:
         logger.info("[STAGE 2c] Skipped. Using existing: %s", pair_features_file)
     else:
         pair_features_file = run_pair_features(
-            source1=source1, candidate_sources=candidate_sources,
-            candidate_file=candidate_pairs_file, output_dir=output_dir,
-            provenance_file=provenance_file if provenance_file.exists() else None)
+            source1=source1,
+            candidate_sources=candidate_sources,
+            candidate_file=candidate_pairs_file,
+            output_dir=output_dir,
+            provenance_file=provenance_file if provenance_file.exists() else None,
+            max_candidates_per_entity=args.max_candidates_per_entity,
+        )
+        _release_gpu("Pair Features")
+
+    # Stage 2a - BGE-M3 (GPU)
+    if args.skip_bge:
+        logger.info("[STAGE 2a] Skipped. Using existing: %s", bge_file)
+    else:
+        bge_file = run_bge_features(
+            source1=source1,
+            candidate_sources=candidate_sources,
+            candidate_file=candidate_pairs_file,
+            output_dir=output_dir,
+            batch_size=bge_batch,
+            max_candidates_per_entity=args.max_candidates_per_entity,
+        )
+        _release_gpu("BGE-M3")
 
     if args.ground_truth is None and not args.skip_train:
         logger.warning("No --ground-truth provided. Skipping GBM training.")

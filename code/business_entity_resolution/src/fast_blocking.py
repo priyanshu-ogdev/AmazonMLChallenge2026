@@ -943,6 +943,8 @@ def main() -> None:
     parser.add_argument("--ground-truth", type=Path, default=None)
     parser.add_argument("--max-candidates", type=int, default=MAX_CANDIDATES)
     parser.add_argument("--top-k-sparse", type=int, default=TOP_K_SPARSE)
+    parser.add_argument("--top-k-dense", type=int, default=50, help="Compatibility flag")
+    parser.add_argument("--dense-embeddings", type=Path, default=None, help="Compatibility flag")
     parser.add_argument("--similarity-floor", type=float, default=SIMILARITY_FLOOR)
     parser.add_argument("--num-workers", type=int, default=0, help="Compatibility flag")
     parser.add_argument("--checkpoint-interval", type=int, default=10000, help="Compatibility flag")

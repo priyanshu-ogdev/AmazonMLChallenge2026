@@ -83,7 +83,7 @@ class BGEEntityEncoder:
         return np.asarray(embeddings, dtype=np.float32)
 
 
-def load_records(paths: Iterable[Path]) -> Dict[str, str]:
+def load_records(paths: Iterable[Path], needed_ids: Optional[Set[str]] = None) -> Dict[str, str]:
     """Load and normalize entity text from raw or Layer 0 normalized challenge TSV files."""
     records: Dict[str, str] = {}
     for path in paths:
@@ -94,7 +94,10 @@ def load_records(paths: Iterable[Path]) -> Dict[str, str]:
 
         if "encoder_text" in frame.columns:
             for row in frame.itertuples(index=False):
-                records[row.entity_id] = getattr(row, "encoder_text")
+                eid = row.entity_id
+                if needed_ids is not None and eid not in needed_ids:
+                    continue
+                records[eid] = getattr(row, "encoder_text")
             continue
 
         name_col = next((c for c in ("business_name", "raw_name", "norm_name") if c in frame.columns), None)
@@ -103,14 +106,17 @@ def load_records(paths: Iterable[Path]) -> Dict[str, str]:
             raise ValueError(f"{path} is missing name/address columns: {list(frame.columns)}")
 
         for row in frame.itertuples(index=False):
+            eid = row.entity_id
+            if needed_ids is not None and eid not in needed_ids:
+                continue
             name_val = getattr(row, name_col, "")
             addr_val = getattr(row, addr_col, "")
-            records[row.entity_id] = normalize_entity(name_val, addr_val)
+            records[eid] = normalize_entity(name_val, addr_val)
     return records
 
 
-def load_candidates(path: Path) -> List[Tuple[str, str]]:
-    """Expand candidate_pairs.tsv into unique (S1, candidate) rows."""
+def load_candidates(path: Path, max_candidates_per_entity: Optional[int] = 15) -> List[Tuple[str, str]]:
+    """Expand candidate_pairs.tsv into unique (S1, candidate) rows with optional per-entity candidate cap."""
     frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
     required = {"source1_entity_id", "candidate_entity_ids"}
     missing = required - set(frame.columns)
@@ -118,18 +124,18 @@ def load_candidates(path: Path) -> List[Tuple[str, str]]:
         raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
 
     pairs: List[Tuple[str, str]] = []
-    seen = set()
-    for row in frame.itertuples(index=False):
-        candidate_ids = [
-            candidate.strip()
-            for candidate in row.candidate_entity_ids.split(",")
-            if candidate.strip()
-        ]
-        for candidate_id in candidate_ids:
-            pair = (row.source1_entity_id, candidate_id)
-            if pair not in seen:
-                seen.add(pair)
-                pairs.append(pair)
+    cap = max_candidates_per_entity or 999999
+    s1_vals = frame["source1_entity_id"].values
+    cand_vals = frame["candidate_entity_ids"].values
+
+    for i in range(len(s1_vals)):
+        s1_id = s1_vals[i]
+        cands = [c.strip() for c in cand_vals[i].split(",") if c.strip()][:cap]
+        cand_seen = set()
+        for cid in cands:
+            if cid not in cand_seen:
+                cand_seen.add(cid)
+                pairs.append((s1_id, cid))
     return pairs
 
 
@@ -139,40 +145,39 @@ def build_bge_features(
     candidate_file: Path,
     output_file: Path,
     model_name: str = DEFAULT_MODEL,
-    max_seq_length: int = 80,
-    batch_size: int = 48,
+    max_seq_length: int = 64,
+    batch_size: int = 256,
     device: Optional[str] = None,
-) -> pd.DataFrame:
+    max_candidates_per_entity: int = 15,
+) -> Path:
     """
-    Encode all entities referenced by candidate_pairs.tsv and write pair features.
+    Encode candidate entities and stream BGE-M3 cosine features directly to TSV.
+    Optimized for high-throughput batching, FP16 tensor core acceleration, and low RAM.
+    """
+    import csv as _csv
+    import gc
+    candidate_pairs = load_candidates(candidate_file, max_candidates_per_entity=max_candidates_per_entity)
+    needed_ids = {pair[0] for pair in candidate_pairs} | {pair[1] for pair in candidate_pairs}
 
-    The output contains one row per candidate pair:
-      source1_entity_id \t candidate_entity_id \t bge_cosine
-    """
-    records = load_records(source1_paths)
-    candidate_pairs = load_candidates(candidate_file)
-    candidate_records = load_records(candidate_paths)
+    records = load_records(source1_paths, needed_ids=needed_ids)
+    candidate_records = load_records(candidate_paths, needed_ids=needed_ids)
     records.update(candidate_records)
+    del candidate_records
+    gc.collect()
 
-    missing_ids = sorted(
-        {entity_id for pair in candidate_pairs for entity_id in pair}
-        - set(records)
-    )
+    missing_ids = sorted(needed_ids - set(records))
     if missing_ids:
         raise ValueError(
             f"{len(missing_ids)} candidate IDs were not found in input records; "
             f"examples: {missing_ids[:5]}"
         )
 
-    entity_ids = sorted({entity_id for pair in candidate_pairs for entity_id in pair})
-    # Track which entities had empty normalized text: an embedding of "" is a
-    # real vector, not NaN, so it would otherwise look like a genuine (low)
-    # similarity score to the GBM rather than an untrustworthy one. This
-    # mirrors the name_both_missing/address_both_missing pattern already used
-    # in pair_features.py for the hand-crafted (2c) features.
+    entity_ids = sorted(needed_ids)
     empty_text_ids = {
         entity_id for entity_id in entity_ids if not records[entity_id].strip()
     }
+    logger.info("[BGE-M3] Encoding %d unique entities (batch_size=%d, max_seq_length=%d)...",
+                len(entity_ids), batch_size, max_seq_length)
     encoder = BGEEntityEncoder(
         model_name=model_name,
         max_seq_length=max_seq_length,
@@ -180,48 +185,63 @@ def build_bge_features(
         device=device,
     )
     embeddings = encoder.encode([records[entity_id] for entity_id in entity_ids])
+    embeddings_fp16 = np.asarray(embeddings, dtype=np.float16)
+    del embeddings
+    del records
+    gc.collect()
+
     id_to_idx = {entity_id: i for i, entity_id in enumerate(entity_ids)}
-    
-    s1_ids = [pair[0] for pair in candidate_pairs]
-    cand_ids = [pair[1] for pair in candidate_pairs]
-    s1_indices = [id_to_idx[sid] for sid in s1_ids]
-    cand_indices = [id_to_idx[cid] for cid in cand_ids]
-    
-    # Chunked vectorized cosine similarity to prevent RAM spikes on large candidate sets
-    chunk_size = 100_000
-    similarities = np.zeros(len(s1_indices), dtype=np.float32)
-    for i in range(0, len(s1_indices), chunk_size):
-        end = i + chunk_size
-        similarities[i:end] = np.einsum(
-            "ij,ij->i",
-            embeddings[s1_indices[i:end]],
-            embeddings[cand_indices[i:end]]
-        )
-    
-    # Vectorized missing text flags
-    s1_missing = np.array([sid in empty_text_ids for sid in s1_ids], dtype=np.int8)
-    cand_missing = np.array([cid in empty_text_ids for cid in cand_ids], dtype=np.int8)
-    missing_flags = np.maximum(s1_missing, cand_missing)
-    
-    result = pd.DataFrame({
-        "source1_entity_id": s1_ids,
-        "candidate_entity_id": cand_ids,
-        "bge_cosine": similarities,
-        "bge_cosine_missing": missing_flags,
-    })
+    n_pairs = len(candidate_pairs)
+    s1_indices = np.empty(n_pairs, dtype=np.int32)
+    cand_indices = np.empty(n_pairs, dtype=np.int32)
+    for idx, (sid, cid) in enumerate(candidate_pairs):
+        s1_indices[idx] = id_to_idx[sid]
+        cand_indices[idx] = id_to_idx[cid]
+    del candidate_pairs
+    del id_to_idx
+    gc.collect()
+
+    output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    result.to_csv(output_file, sep="\t", index=False, quoting=csv.QUOTE_NONE, escapechar="\\")
+    total_pairs = len(s1_indices)
+    chunk_size = 200_000
+
+    logger.info("[BGE-M3] Streaming %d candidate pair cosine similarities to %s...",
+                total_pairs, output_file)
+    with open(output_file, "w", encoding="utf-8", newline="") as out_f:
+        writer = _csv.writer(out_f, delimiter="\t", quoting=_csv.QUOTE_NONE, escapechar="\\")
+        writer.writerow(["source1_entity_id", "candidate_entity_id", "bge_cosine", "bge_cosine_missing"])
+
+        for i in range(0, total_pairs, chunk_size):
+            end = min(i + chunk_size, total_pairs)
+            s1_sub = s1_indices[i:end]
+            cand_sub = cand_indices[i:end]
+            # Vectorized dot product on normalized FP16 vectors
+            dots = np.sum(embeddings_fp16[s1_sub] * embeddings_fp16[cand_sub], axis=1, dtype=np.float32)
+            dots = np.clip(dots, -1.0, 1.0)
+            
+            chunk_rows = []
+            for j, sim in enumerate(dots):
+                pair_idx = i + j
+                s1_e = entity_ids[s1_indices[pair_idx]]
+                cand_e = entity_ids[cand_indices[pair_idx]]
+                is_miss = 1 if (s1_e in empty_text_ids or cand_e in empty_text_ids) else 0
+                chunk_rows.append((s1_e, cand_e, f"{sim:.4f}", is_miss))
+            writer.writerows(chunk_rows)
+
+    del embeddings_fp16
     metadata = {
         "model_name": model_name,
         "max_seq_length": max_seq_length,
         "batch_size": batch_size,
         "normalized_embeddings": True,
-        "candidate_pairs": len(result),
+        "candidate_pairs": total_pairs,
         "unique_entities": len(entity_ids),
+        "max_candidates_per_entity": max_candidates_per_entity,
     }
     with open(output_file.with_suffix(".json"), "w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2)
-    return result
+    return output_file
 
 
 def main() -> None:

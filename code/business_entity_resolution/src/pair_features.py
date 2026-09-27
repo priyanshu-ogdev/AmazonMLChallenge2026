@@ -56,6 +56,8 @@ def _token_sort_ratio(left: str, right: str) -> float:
         return 1.0
     if not left or not right:
         return 0.0
+    if left == right:
+        return 1.0
     if _rf_fuzz is not None:
         return float(_rf_fuzz.token_sort_ratio(left, right)) / 100.0
     return _safe_ratio(left, right)
@@ -66,6 +68,8 @@ def _token_set_ratio(left: str, right: str) -> float:
         return 1.0
     if not left or not right:
         return 0.0
+    if left == right:
+        return 1.0
     if _rf_fuzz is not None:
         return float(_rf_fuzz.token_set_ratio(left, right)) / 100.0
     return _safe_ratio(left, right)
@@ -76,6 +80,8 @@ def _fuzz_ratio(left: str, right: str) -> float:
         return 1.0
     if not left or not right:
         return 0.0
+    if left == right:
+        return 1.0
     if _rf_fuzz is not None:
         return float(_rf_fuzz.ratio(left, right)) / 100.0
     return _safe_ratio(left, right)
@@ -376,7 +382,7 @@ def pair_feature_row(
     return PairFeatureRow(row)
 
 
-def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
+def load_records(paths: Iterable[Path], needed_ids: Optional[Set[str]] = None) -> Dict[str, Dict[str, str]]:
     records: Dict[str, Dict[str, str]] = {}
     for path in paths:
         frame = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
@@ -403,8 +409,11 @@ def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
             postals = frame["postal_code"].values if "postal_code" in frame.columns else np.array([""] * len(frame))
             is_missings = frame["is_address_missing"].values if "is_address_missing" in frame.columns else np.array(["0"] * len(frame))
             for i in range(len(eids)):
-                records[eids[i]] = {
-                    "entity_id": eids[i],
+                eid = eids[i]
+                if needed_ids is not None and eid not in needed_ids:
+                    continue
+                records[eid] = {
+                    "entity_id": eid,
                     "business_name": names[i],
                     "business_address": addrs[i],
                     "raw_name": raw_names[i],
@@ -418,8 +427,11 @@ def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
                 }
         else:
             for i in range(len(eids)):
-                records[eids[i]] = {
-                    "entity_id": eids[i],
+                eid = eids[i]
+                if needed_ids is not None and eid not in needed_ids:
+                    continue
+                records[eid] = {
+                    "entity_id": eid,
                     "business_name": names[i],
                     "business_address": addrs[i],
                     "raw_name": raw_names[i],
@@ -430,30 +442,35 @@ def load_records(paths: Iterable[Path]) -> Dict[str, Dict[str, str]]:
     return records
 
 
+def _spawn_initializer(
+    normalized: Dict[str, Dict[str, object]],
+) -> None:
+    """Initializer for spawn-based ProcessPoolExecutor workers."""
+    global _shared_normalized
+    _shared_normalized = normalized
+
+
 def _feature_worker(
-    chunk_items: List[Tuple[str, List[str]]],
-    normalized: Optional[Dict[str, Dict[str, object]]],
-    provenance: Optional[Dict[Tuple[str, str], Tuple[str, Optional[float], Optional[float], Optional[int]]]],
-    s1_max_score: Optional[Dict[str, float]],
+    chunk_items: List[Tuple[str, List[str], Dict[str, Tuple], Optional[float]]],
+    normalized: Optional[Dict[str, Dict[str, object]]] = None,
 ) -> List[Tuple[Any, ...]]:
-    global _shared_normalized, _shared_provenance, _shared_s1_max_score
-    normalized = normalized if normalized is not None else _shared_normalized
-    provenance = provenance if provenance is not None else _shared_provenance
-    s1_max_score = s1_max_score if s1_max_score is not None else _shared_s1_max_score
+    global _shared_normalized
+    norm_dict = normalized if normalized is not None else _shared_normalized
 
     worker_rows: List[Tuple[Any, ...]] = []
-    for s1_id, cand_ids in chunk_items:
+    for s1_id, cand_ids, s1_prov, max_s in chunk_items:
         cand_count = len(cand_ids)
-        s1_norm = normalized[s1_id]
-        max_s = s1_max_score.get(s1_id)
+        s1_norm = norm_dict[s1_id]
         for candidate_id in cand_ids:
-            pair = (s1_id, candidate_id)
-            blocker, rank, score, count = provenance.get(pair, (None, None, None, None))
+            cand_norm = norm_dict.get(candidate_id)
+            if cand_norm is None:
+                continue
+            blocker, rank, score, count = s1_prov.get(candidate_id, (None, None, None, None))
             margin = (max_s - score) if (max_s is not None and score is not None) else None
             worker_rows.append(
                 pair_feature_row(
                     s1_norm,
-                    normalized[candidate_id],
+                    cand_norm,
                     provenance=blocker,
                     left_rank=rank,
                     best_score=score,
@@ -470,6 +487,7 @@ def build_pair_features(
     candidate_file: Path,
     output_file: Path,
     provenance_file: Optional[Path] = None,
+    max_candidates_per_entity: int = 15,
 ) -> pd.DataFrame:
     """Build features for every candidate pair, failing on invalid references."""
     candidates = pd.read_csv(candidate_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE)
@@ -478,9 +496,7 @@ def build_pair_features(
     if missing:
         raise ValueError(f"{candidate_file} is missing required columns: {sorted(missing)}")
 
-    # Bug 4 fix: collect active entity IDs appearing in candidate pairs so we only normalize those.
     active_ids: Set[str] = set()
-    seen: Set[Tuple[str, str]] = set()
     pairs_by_s1: Dict[str, List[str]] = {}
 
     s1_vals = candidates["source1_entity_id"].values
@@ -493,120 +509,134 @@ def build_pair_features(
         if source1_id not in records:
             raise ValueError(f"Unknown source1 entity ID: {source1_id}")
         active_ids.add(source1_id)
-        for candidate_id in (v.strip() for v in cand_vals[i].split(",") if v.strip()):
-            pair = (source1_id, candidate_id)
-            if pair in seen:
-                continue
-            seen.add(pair)
-            if candidate_id not in records:
-                raise ValueError(f"Unknown candidate entity ID: {candidate_id}")
-            active_ids.add(candidate_id)
-            pairs_by_s1.setdefault(source1_id, []).append(candidate_id)
+        
+        seen_cand = set()
+        cands_for_s1 = []
+        raw_cands = [v.strip() for v in cand_vals[i].split(",") if v.strip()]
+        for candidate_id in raw_cands[:max_candidates_per_entity]:
+            if candidate_id not in seen_cand:
+                seen_cand.add(candidate_id)
+                if candidate_id not in records:
+                    raise ValueError(f"Unknown candidate entity ID: {candidate_id}")
+                active_ids.add(candidate_id)
+                cands_for_s1.append(candidate_id)
+        if cands_for_s1:
+            pairs_by_s1[source1_id] = cands_for_s1
 
-    # Bug 3 fix: fast provenance lookup construction using column arrays.
-    provenance: Dict[Tuple[str, str], Tuple[str, Optional[float], Optional[float], Optional[int]]] = {}
-    if provenance_file:
-        provenance_frame = pd.read_csv(
-            provenance_file, sep="\t", dtype=str, keep_default_na=False, quoting=csv.QUOTE_NONE
-        )
-        required_provenance = {
-            "source1_entity_id",
-            "candidate_entity_id",
-            "blocker_provenance",
-        }
-        missing = required_provenance - set(provenance_frame.columns)
-        if missing:
-            raise ValueError(
-                f"{provenance_file} is missing required columns: {sorted(missing)}"
-            )
-        s1_arr = provenance_frame["source1_entity_id"].values
-        cid_arr = provenance_frame["candidate_entity_id"].values
-        prov_arr = provenance_frame["blocker_provenance"].values
-        rank_col = "best_blocker_rank" if "best_blocker_rank" in provenance_frame.columns else (
-            "candidate_rank" if "candidate_rank" in provenance_frame.columns else None
-        )
-        rank_arr = provenance_frame[rank_col].values if rank_col else None
-        score_arr = provenance_frame["best_blocker_score"].values if "best_blocker_score" in provenance_frame.columns else None
-        count_arr = provenance_frame["blocker_count"].values if "blocker_count" in provenance_frame.columns else None
+    del candidates
 
-        for i in range(len(provenance_frame)):
-            s1 = s1_arr[i]
-            cid = cid_arr[i]
-            prov = prov_arr[i]
-            r = rank_arr[i] if rank_arr is not None else ""
-            s = score_arr[i] if score_arr is not None else ""
-            c = count_arr[i] if count_arr is not None else ""
-            provenance[(s1, cid)] = (
-                prov,
-                float(r) if r else None,
-                float(s) if s else None,
-                int(c) if c else None,
-            )
+    # Fast streaming provenance parser (no pandas 6.7GB read, only loads top cands per S1)
+    prov_by_s1: Dict[str, Dict[str, Tuple[str, Optional[float], Optional[float], Optional[int]]]] = {}
+    if provenance_file and Path(provenance_file).exists():
+        print(f"[STAGE 2c] Streaming provenance from {provenance_file} (capping top {max_candidates_per_entity} per S1)...", flush=True)
+        with open(provenance_file, "r", encoding="utf-8") as f_prov:
+            header_line = f_prov.readline()
+            header = header_line.strip().split("\t")
+            col_map = {col: idx for idx, col in enumerate(header)}
+            s1_idx = col_map.get("source1_entity_id", 0)
+            cid_idx = col_map.get("candidate_entity_id", 1)
+            prov_idx = col_map.get("blocker_provenance", 3)
+            rank_idx = col_map.get("best_blocker_rank", col_map.get("candidate_rank", 5))
+            score_idx = col_map.get("best_blocker_score", 6)
+            count_idx = col_map.get("blocker_count", 4)
 
-    # Bug 4 fix: compute features only for active entities.
-    normalized = {entity_id: _record_features(records[entity_id]) for entity_id in active_ids}
+            cur_s1 = None
+            cur_s1_prefix = ""
+            cur_dict = {}
+            for line in f_prov:
+                if cur_s1 is not None and len(cur_dict) >= max_candidates_per_entity:
+                    if line.startswith(cur_s1_prefix):
+                        continue
+                parts = line.rstrip("\r\n").split("\t")
+                if len(parts) <= max(s1_idx, cid_idx):
+                    continue
+                s1 = parts[s1_idx]
+                if s1 != cur_s1:
+                    if cur_s1 is not None and cur_dict:
+                        prov_by_s1[cur_s1] = cur_dict
+                    cur_s1 = s1
+                    cur_s1_prefix = s1 + "\t"
+                    cur_dict = {}
+                if len(cur_dict) < max_candidates_per_entity:
+                    cid = parts[cid_idx]
+                    prov = parts[prov_idx] if 0 <= prov_idx < len(parts) else ""
+                    r = parts[rank_idx] if 0 <= rank_idx < len(parts) else ""
+                    s = parts[score_idx] if 0 <= score_idx < len(parts) else ""
+                    c = parts[count_idx] if 0 <= count_idx < len(parts) else ""
+                    cur_dict[cid] = (
+                        prov,
+                        float(r) if r else None,
+                        float(s) if s else None,
+                        int(c) if c else None,
+                    )
+            if cur_s1 is not None and cur_dict:
+                prov_by_s1[cur_s1] = cur_dict
+
+    # Compute features only for active entities and free raw records memory immediately
+    normalized = {}
+    for entity_id in active_ids:
+        rec = records.pop(entity_id, None)
+        if rec is not None:
+            normalized[entity_id] = _record_features(rec)
+    records.clear()
+    del records
+    import gc
+    gc.collect()
 
     # Pre-calculate max score per S1 entity for relative margin computation
     s1_max_score: Dict[str, float] = {}
     for s1_id, cand_ids in pairs_by_s1.items():
-        cand_scores = [
-            provenance.get((s1_id, cid), (None, None, None, None))[2]
-            for cid in cand_ids
+        s1_prov = prov_by_s1.get(s1_id, {})
+        valid_scores = [
+            s1_prov[cid][2] for cid in cand_ids
+            if cid in s1_prov and s1_prov[cid][2] is not None
         ]
-        valid_scores = [s for s in cand_scores if s is not None]
         if valid_scores:
             s1_max_score[s1_id] = max(valid_scores)
 
-    items = list(pairs_by_s1.items())
-    num_workers = max(1, os.cpu_count() or 4)
+    # Package tasks with per-S1 provenance slice (zero global dict pickling overhead)
+    chunk_size = 5000
+    s1_keys = list(pairs_by_s1.keys())
+    chunks = []
+    for i in range(0, len(s1_keys), chunk_size):
+        chunk_s1_keys = s1_keys[i:i + chunk_size]
+        chunk_payload = [
+            (
+                s1,
+                pairs_by_s1[s1],
+                prov_by_s1.get(s1, {}),
+                s1_max_score.get(s1),
+            )
+            for s1 in chunk_s1_keys
+        ]
+        chunks.append(chunk_payload)
 
-    import multiprocessing
+    del pairs_by_s1
+    del prov_by_s1
+    del s1_max_score
+    import gc
+    gc.collect()
+
+    num_workers = max(1, os.cpu_count() or 4)
     import sys as _sys
     _platform = _sys.platform
 
-    try:
-        if _platform == "win32":
-            # Windows: 'fork' is unavailable; use 'spawn' for true multiprocessing parallelism.
-            # ThreadPoolExecutor on Windows is GIL-bound for CPU-heavy string/set ops and
-            # gives virtually no speedup for pair_feature_row(). Spawn-based ProcessPool
-            # provides true OS-level parallelism at the cost of per-worker startup (~2-3 sec).
-            ctx = multiprocessing.get_context("spawn")
-            ExecutorClass = ProcessPoolExecutor
-            kwargs = {"mp_context": ctx}
-            # Spawn duplicates ~100 MB of state per worker (acceptable on Windows 32GB machines).
-            total_ram = psutil.virtual_memory().total if psutil is not None else 32 * 1024**3
-            if total_ram < (16 * 1024**3):
-                print("[WARNING] Low RAM detected (< 16GB). Capping workers=4 on Windows spawn.", flush=True)
-                num_workers = min(num_workers, 4)
-            else:
-                num_workers = min(num_workers, 10)  # cap at 10 spawn workers to avoid startup overhead
-            print(f"[INFO] Windows detected. Using ProcessPoolExecutor (spawn) with {num_workers} workers.", flush=True)
-        else:
-            # Linux/Mac: use 'fork' for zero-copy COW sharing of large dicts.
-            ctx = multiprocessing.get_context("fork")
-            ExecutorClass = ProcessPoolExecutor
-            kwargs = {"mp_context": ctx}
-            # Critical Fix for Linux/Mac: 'fork' duplicates reference-counted dictionaries.
-            # The dictionaries take ~10GB. Dirtied pages take ~3-4GB per worker.
-            total_ram = psutil.virtual_memory().total if psutil is not None else 32 * 1024**3
-            if total_ram < (28 * 1024**3):
-                print("[WARNING] Low RAM detected (< 28GB). Disabling ProcessPoolExecutor to prevent OOM crash.", flush=True)
-                num_workers = 1
-            elif total_ram < (45 * 1024**3):
-                print("[INFO] 30GB+ RAM detected. Scaling to NUM_WORKERS=2 to maximize RAM usage safely.", flush=True)
-                num_workers = min(num_workers, 2)
-            else:
-                num_workers = min(num_workers, 14)
-    except (ValueError, ImportError):
+    # On Windows, ProcessPoolExecutor(spawn) pickles the multi-GB dictionary to every worker,
+    # blowing past 25 GB RAM and triggering Windows pagefile OOM.
+    # RapidFuzz releases the GIL in C++, so ThreadPoolExecutor achieves full multi-core throughput
+    # with ZERO memory duplication (RAM < 2.5 GB).
+    if _platform == "win32":
         from concurrent.futures import ThreadPoolExecutor
         ExecutorClass = ThreadPoolExecutor
-        kwargs = {}
-        num_workers = min(num_workers, 8)
-        print(f"[INFO] ProcessPoolExecutor unavailable. Falling back to ThreadPoolExecutor with {num_workers} workers.", flush=True)
-
-    # Chunk into 5,000 S1 entities to keep memory footprint strictly bounded (< 1.8 GB RAM)
-    chunk_size = 5000
-    chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)] if items else []
+        pool_kwargs = {}
+        num_workers = min(num_workers, 12)
+        print(f"[INFO] Windows detected. Using ThreadPoolExecutor with {num_workers} threads (zero memory duplication, RapidFuzz C++ parallel).", flush=True)
+    else:
+        import multiprocessing
+        ctx = multiprocessing.get_context("fork")
+        ExecutorClass = ProcessPoolExecutor
+        pool_kwargs = {"mp_context": ctx}
+        num_workers = min(num_workers, 14)
 
     feature_columns = list(PairFeatureRow._FIELDS)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -617,33 +647,22 @@ def build_pair_features(
 
         if num_workers <= 1 or not chunks:
             for chunk in chunks:
-                chunk_rows = _feature_worker(chunk, normalized, provenance, s1_max_score)
+                chunk_rows = _feature_worker(chunk, normalized)
                 writer.writerows(chunk_rows)
         else:
-            global _shared_normalized, _shared_provenance, _shared_s1_max_score
-            _shared_normalized = normalized
-            _shared_provenance = provenance
-            _shared_s1_max_score = s1_max_score
-            
-            with ExecutorClass(max_workers=num_workers, **kwargs) as pool:
+            with ExecutorClass(max_workers=num_workers, **pool_kwargs) as pool:
                 futures = [
-                    pool.submit(_feature_worker, chunk, None, None, None)
+                    pool.submit(_feature_worker, chunk, normalized)
                     for chunk in chunks
                 ]
                 for fut in as_completed(futures):
                     chunk_rows = fut.result()
                     writer.writerows(chunk_rows)
 
-    str_cols = {
-        "source1_entity_id": str,
-        "candidate_entity_id": str,
-        "source1_country": str,
-        "candidate_country": str,
-        "source1_canonical_country": str,
-        "candidate_canonical_country": str,
-        "blocker_provenance": str,
-    }
-    return pd.read_csv(output_file, sep="\t", keep_default_na=False, quoting=csv.QUOTE_NONE, dtype=str_cols)
+    del normalized
+    gc.collect()
+    print(f"[STAGE 2c] Successfully wrote {output_file}.", flush=True)
+    return output_file
 
 
 def main() -> None:
