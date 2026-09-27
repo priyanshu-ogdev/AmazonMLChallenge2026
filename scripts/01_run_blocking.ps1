@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Phase 1: Stage 0 Normalization & Stage 1 Multi-Channel Candidate Generation (Blocking).
 .DESCRIPTION
@@ -73,24 +73,16 @@ if (-not $OutputDir) {
 Ensure-Directory $OutputDir
 
 # ------------------------------------------------------------------------------
-# RAM-aware worker count (Windows ThreadPoolExecutor — memory is shared, not duplicated)
+# Worker count (Windows ThreadPoolExecutor — memory is shared, not duplicated)
 # Workers share the same blocking index in-process; more workers = more CPU utilisation,
-# NOT more RAM. Set to 1 only on very low-RAM machines where even a single process
-# loading the index would leave insufficient headroom for other tasks.
+# NOT more RAM. We can safely use all available CPU cores.
 # ------------------------------------------------------------------------------
 if ($NumWorkers -le 0) {
-    $totalRamGb = [Math]::Round(
-        (Get-WmiObject -Class Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
-    if ($totalRamGb -lt 28) {
-        $NumWorkers = 1
-        Write-WarningMessage "Low RAM detected (${totalRamGb} GB < 28 GB). Forcing NumWorkers=1."
-    } elseif ($totalRamGb -lt 45) {
-        $NumWorkers = 2
-        Write-Info "RAM: ${totalRamGb} GB -> NumWorkers=2 (safe for 30 GB machines)."
-    } else {
-        $NumWorkers = 4
-        Write-Info "RAM: ${totalRamGb} GB -> NumWorkers=4 (all cores)."
-    }
+    $NumWorkers = [Environment]::ProcessorCount
+    # Cap at 16 to avoid extreme GIL contention overhead on massive threadrippers, 
+    # but for most consumer machines this will just use all cores.
+    if ($NumWorkers -gt 16) { $NumWorkers = 16 }
+    Write-Info "Auto-selected NumWorkers=$NumWorkers based on CPU cores (ThreadPoolExecutor shares RAM)."
 }
 
 # Determine source file paths
