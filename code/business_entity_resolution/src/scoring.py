@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import logging
 import os
@@ -839,6 +840,13 @@ def evaluate_held_out_country_diagnostic(
             "average_precision": ap,
             "best_iteration": best_iter,
         }
+        
+        # Free memory to prevent VRAM accumulation across countries
+        del model
+        del train_mat, valid_mat, y_train, y_valid
+        if inner_split_found:
+            del X_fit, y_fit, X_es_val, y_es_val
+        gc.collect()
 
     if cross_ap:
         diagnostic_results["mean_held_out_country_ap"] = float(np.mean(cross_ap))
@@ -1000,6 +1008,14 @@ def train_oof(
             "best_iteration": best_iter,
             "average_precision": float(average_precision_score(y[valid_idx], oof_preds)),
         }
+        
+        # Explicitly free memory to prevent VRAM/RAM leaks between folds
+        del model
+        del X_train, X_valid, train_matrix, valid_matrix
+        if inner_split_found:
+            del X_fit, y_fit, X_es_val, y_es_val
+        gc.collect()
+        
         return fold, valid_idx, oof_preds, info
 
     # Bug 7 fix: run folds in parallel when _pfolds > 1.
